@@ -1,0 +1,1724 @@
+[    0.42] MIP: VUBAGG 0 columns x = y from variable upper bound rows (0.00s)
+[    0.65] MIP_FOLD: integer groups: 0 accepted, 0 rejected (V_R rows 32158; rejected for V_R 0, non-±1 0, TU 0; net true accepted by net 0 work 0 over 0, panics 0, cert fails 0)
+[    0.71] MIP_FOLD: no fold (n 59708 m 54745) in 0.295s (reason line 526, ratio 0.951)
+[    0.71] MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+[    1.05] MIP: presolve: merged 85 parallel rows (0 new equations)
+[    1.05] MIP: presolve: rows 54745 -> 52485, free columns 59708 -> 57362, nonzeros 281260 -> 276654, postsolve steps 2346 (parallel columns merged: 0 integer, 0 continuous)
+[    1.07] MIP: early probing: 64 probed, 0 of 57362 free columns fixed (0.02s), not used
+[    1.15] MIP:   VB01 (loose, best): 335 fixings, 2 backtracks, infeasible, fixing rate 0.02 (all columns 0.05)
+[    1.15] MIP:   VB01 (loose, worst): 214 fixings, 2 backtracks, infeasible, fixing rate 0.02 (all columns 0.05)
+[    1.15] MIP:   VB01 (tight): 67 fixings, 7 backtracks, infeasible, fixing rate 0.03 (all columns 0.06)
+[    1.20] MIP:   VB01 (tight, best): 5498 fixings, 1 backtracks, fixing rate 1.00 (all columns 0.73)
+[    1.27] CUTMIX clique edges total 3 rows 3 implonly 0 implpairs 6 bin 32
+[    1.28] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=56 lu_nnz=147 fill=0 upd=0 col_aq=0.0000
+[    1.28] MIP:   VB01 (tight, best): sub-MIP solution 5.3925677443e8
+[    1.29] MIP:   VB01 (tight, worst): 44 fixings, 7 backtracks, infeasible, fixing rate 0.03 (all columns 0.06)
+[    1.29] MIP: VB01 on the presolved problem: 5.3925677443e8 (0.22s)
+[    1.39] MIP: VBCLQ e: before the LP probing, bound 5.3925677443e8 (VB01 solution): 148 objective columns substituted, 0 fixed in 1 passes, slack 5.866323e9, 0 columns changed (0.33s)
+[    1.42] ROOTLP_SCALE: rows 52485 cols 59708 range 1.208e3 warm false applies false
+[    1.47] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=269 lu_nnz=52485 fill=0 upd=0 col_aq=0.0000
+[    1.52] PROGRESS main iter=1000 t=0.0s phase=B infeasible_rows=1457 lu_nnz=52485 fill=2000 upd=1000 col_aq=0.0001
+[    1.57] PROGRESS main iter=2000 t=0.1s phase=B infeasible_rows=1319 lu_nnz=54961 fill=4976 upd=762 col_aq=0.0001
+[    1.63] PROGRESS main iter=3000 t=0.2s phase=B infeasible_rows=1395 lu_nnz=62036 fill=13461 upd=552 col_aq=0.0004
+[    1.70] MIP: LP probing: the first LP stopped: IterationLimit (0.30s, limit 30.00s)
+[    2.77] MIP: probing: equivalence pass with implications: 0 pairs found (0.10s), not used
+[    2.83] MIP: probing: 41178 of 41178 binaries probed (1 passes), 3 fixed, 0 bounds tightened, 1996483 implications (1.14s, cpu 0.00s, work 0, pwork 1216071685, chg 3)
+[    2.83] MIP: probing: PREPAR 4 threads, 320 windows, 41178 of 41178 probes from the windows
+[    2.83] MIP: probing: 3 equivalent binary pairs
+[    2.85] MIP: presolve again after probing (round 1)
+[    2.85] MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+[    2.97] MIP: presolve: merged 85 parallel rows (0 new equations)
+[    2.98] MIP: presolve: rows 52485 -> 52479, free columns 57359 -> 57353, nonzeros 276654 -> 276636, postsolve steps 6 (parallel columns merged: 0 integer, 0 continuous)
+[    3.88] MIP: probing: equivalence pass with implications: 0 pairs found (0.08s), not used
+[    3.95] MIP: probing: 36896 of 41169 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 1877512 implications (0.97s, cpu 0.00s, work 0, pwork 1150360322, chg 0)
+[    3.95] MIP: probing: PREPAR 4 threads, 288 windows, 36896 of 36896 probes from the windows
+[    3.95] MIP: probing: 0 equivalent binary pairs
+[    4.28] MIP: presolve: 0 dominated binaries fixed (0.32s)
+[    4.28] MIP: presolve again after probing: rows 52485 -> 52479 (less than 10% fewer), the result is not used
+[    4.36] MIP: presolve: sparsified 1643 rows (late)
+[    4.36] MIP: sparsify-late stats m 52485 n 59708 bincols 41175 changed 1643 binonly 1643 shrunk<=1 0 nnz 276654 -> 270420 gate 0.000 (f 0.000 b 1.000)
+[    4.43] HNFPRE: round 0 eq 20409 int_eq 20241 rat_skip 0 comps 66 done 66 gave_up 0 cols 41151 rank 20238 fixes 0 congs 0 (gen 0, tighten 0, max_mod 0) infeasible false (0.065s) gave_up_why 0/0/0
+[    4.43] HNFPRE: round 0 tightened 0 columns
+[    4.81] CUTMIX clique edges total 1369100 rows 335219 implonly 1033881 implpairs 1996483 bin 41175
+[    4.84] MIP: clique extension: 0 rows extended, 0 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed (1369100 edges, 0.41s)
+[    4.87] MIP: symmetry: SYMSIGN true SYMSCALE false: flipped 9842, scaled 0, tie rows doubled 9168 of 52485 rows for the detection
+[    4.91] MIP: symmetry: refinement 0.04s, work 3740065 (ENOMOTO_MIP_HO6_SYMWORK: not counted in the caps)
+[    5.01] MIP: symmetry: SYMPRE probe: 3919 cells, 3919 done as orbits, 2 probes, 2 generators (0.088s)
+[    5.05] MIP: symmetry: refinements stopped by the iteration cap 0 of 5 (ENOMOTO_MIP_HO6_SYMREFINE true)
+[    5.06] MIP: symmetry: PPLEX: 0 of 2 components upgraded, 0 packing orbisacks (0 rows) from 0 generators and 0 new involutions (0.00s)
+[    5.06] MIP: symmetry: orbital fixing with 2 of 2 generators
+[    5.06] MIP: symmetry: ORBPP 0 of 0 orbitopes static (packing, >= 3 rows, >= 10 columns), fixed 0 columns to 0
+[    5.06] MIP: symmetry: 2 generators, 3919 orbits on 7838 columns, 0 lex-leader rows (0.21s, work 5214141, search 0, verify 869374, detect 0.21s, refine 0.08s, log work 15866496)
+[    5.07] MIP: objective step with implied integers: None (without: None); costed non-integer columns 16184 (e.g. [(0, 0.353573, 0.0, 129.0, 3), (1, 0.393982, 0.0, 150.4, 3), (2, 0.444492, 0.0, 172.0, 3), (3, 0.515207, 0.0, 193.0, 3), (4, 0.57582, 0.0, 226.8, 3)])
+[    5.07] MIP: OBJINT c: lattice None (offset 8.4576380599e4), step None
+[    5.07] MIP: fixed-charge check: vb rows 31990 of 52485, continuous with vb 15995 of 16184
+[    5.08] MIP: fixed-integer LP dual check: c x 5.3917219805e8, dual bound 7.0295319360e3 -> solve
+[    5.12] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=229 lu_nnz=52485 fill=0 upd=0 col_aq=0.0000
+[    5.15] PROGRESS main iter=1000 t=0.0s phase=B infeasible_rows=1733 lu_nnz=52485 fill=3112 upd=1000 col_aq=0.0001
+[    5.19] PROGRESS main iter=2000 t=0.1s phase=B infeasible_rows=1827 lu_nnz=56914 fill=8684 upd=878 col_aq=0.0001
+[    5.22] PROGRESS main iter=3000 t=0.1s phase=B infeasible_rows=2097 lu_nnz=63584 fill=11813 upd=623 col_aq=0.0001
+[    5.25] PROGRESS main iter=4000 t=0.1s phase=B infeasible_rows=2418 lu_nnz=70770 fill=16100 upd=211 col_aq=0.0001
+[    5.27] PROGRESS main iter=5000 t=0.1s phase=B infeasible_rows=2589 lu_nnz=70770 fill=22556 upd=1211 col_aq=0.0001
+[    5.30] PROGRESS main iter=6000 t=0.2s phase=B infeasible_rows=2701 lu_nnz=78977 fill=26840 upd=677 col_aq=0.0001
+[    5.33] PROGRESS main iter=7000 t=0.2s phase=B infeasible_rows=3305 lu_nnz=89205 fill=31352 upd=37 col_aq=0.0001
+[    5.35] PROGRESS main iter=8000 t=0.2s phase=B infeasible_rows=4673 lu_nnz=89205 fill=39790 upd=1037 col_aq=0.0001
+[    5.39] PROGRESS main iter=9000 t=0.3s phase=B infeasible_rows=5236 lu_nnz=98031 fill=43095 upd=246 col_aq=0.0001
+[    5.41] PROGRESS main iter=10000 t=0.3s phase=B infeasible_rows=5528 lu_nnz=98031 fill=53204 upd=1246 col_aq=0.0001
+[    5.45] PROGRESS main iter=11000 t=0.3s phase=B infeasible_rows=5038 lu_nnz=104894 fill=52658 upd=286 col_aq=0.0001
+[    5.46] PROGRESS main iter=12000 t=0.3s phase=B infeasible_rows=4098 lu_nnz=104894 fill=58597 upd=1286 col_aq=0.0001
+[    5.49] PROGRESS main iter=13000 t=0.4s phase=B infeasible_rows=3103 lu_nnz=115046 fill=60954 upd=48 col_aq=0.0001
+[    5.51] PROGRESS main iter=14000 t=0.4s phase=B infeasible_rows=2103 lu_nnz=115046 fill=65893 upd=1048 col_aq=0.0001
+[    5.53] PROGRESS main iter=15000 t=0.4s phase=B infeasible_rows=1103 lu_nnz=115046 fill=70819 upd=2048 col_aq=0.0001
+[    5.56] PROGRESS main iter=16000 t=0.4s phase=B infeasible_rows=107 lu_nnz=82963 fill=31650 upd=580 col_aq=0.0001
+[    5.58] MIP:   global fixed integers 2349 of 43524 (newly 2349 since the root LP)
+[    5.58] MIP: new incumbent 5.3925677443e8 at node 0 (0.52s) [tree]
+[    5.58] MIP: start solution from before the restart: accepted true
+[    5.63] MIP: root LP basis from the presolve LP probing: none
+[    5.63] MIP: solving the root LP (0.57s)
+[    5.63] ROOTLP_SCALE: rows 52485 cols 59708 range 1.208e3 warm false applies false
+[    5.69] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=275 lu_nnz=52485 fill=0 upd=0 col_aq=0.0000
+[    5.71] PROGRESS main iter=1000 t=0.0s phase=B infeasible_rows=1463 lu_nnz=52485 fill=2000 upd=1000 col_aq=0.0001
+[    5.75] PROGRESS main iter=2000 t=0.1s phase=B infeasible_rows=1325 lu_nnz=54961 fill=4976 upd=762 col_aq=0.0001
+[    5.80] PROGRESS main iter=3000 t=0.1s phase=B infeasible_rows=1401 lu_nnz=62036 fill=13461 upd=552 col_aq=0.0004
+[    6.06] PROGRESS main iter=4000 t=0.4s phase=B infeasible_rows=1324 lu_nnz=63932 fill=12705 upd=248 col_aq=0.0029
+[    6.19] PROGRESS main iter=5000 t=0.5s phase=B infeasible_rows=1280 lu_nnz=66911 fill=23360 upd=589 col_aq=0.0104
+[    6.44] PROGRESS main iter=6000 t=0.8s phase=B infeasible_rows=1260 lu_nnz=73105 fill=18968 upd=55 col_aq=0.0070
+[    6.81] PROGRESS main iter=7000 t=1.1s phase=B infeasible_rows=1154 lu_nnz=75886 fill=23121 upd=155 col_aq=0.0054
+[    7.09] PROGRESS main iter=8000 t=1.4s phase=B infeasible_rows=1195 lu_nnz=78807 fill=34092 upd=454 col_aq=0.0012
+[    7.37] PROGRESS main iter=9000 t=1.7s phase=B infeasible_rows=1331 lu_nnz=142117 fill=99228 upd=650 col_aq=0.0301
+[    7.74] PROGRESS main iter=10000 t=2.1s phase=B infeasible_rows=1150 lu_nnz=82889 fill=30939 upd=524 col_aq=0.0103
+[    8.06] PROGRESS main iter=11000 t=2.4s phase=B infeasible_rows=1329 lu_nnz=84462 fill=65804 upd=642 col_aq=0.0130
+[    8.47] MIP: FJ problem (FJ_P3): rows 52485 -> 52479, free columns 57359 -> 57185, 0 continuous bounds tightened (2.85s)
+[    8.64] PROGRESS main iter=12000 t=3.0s phase=B infeasible_rows=1766 lu_nnz=89515 fill=36221 upd=122 col_aq=0.0208
+[    9.18] PROGRESS main iter=13000 t=3.5s phase=B infeasible_rows=1745 lu_nnz=91525 fill=47858 upd=329 col_aq=0.0364
+[    9.93] PROGRESS main iter=14000 t=4.2s phase=B infeasible_rows=1985 lu_nnz=92297 fill=78029 upd=577 col_aq=0.0048
+[   10.60] PROGRESS main iter=15000 t=4.9s phase=B infeasible_rows=2249 lu_nnz=94722 fill=38226 upd=25 col_aq=0.0202
+[   11.42] PROGRESS main iter=16000 t=5.7s phase=B infeasible_rows=1747 lu_nnz=96989 fill=49230 upd=217 col_aq=0.0286
+[   12.04] PROGRESS main iter=17000 t=6.4s phase=B infeasible_rows=1796 lu_nnz=99859 fill=58516 upd=372 col_aq=0.0060
+[   12.20] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2568 lu_nnz=151034 fill=86352 upd=0 col_aq=0.0000
+[   12.25] PROGRESS main iter=1000 t=0.0s phase=B infeasible_rows=494 lu_nnz=151034 fill=85821 upd=1000 col_aq=0.0002
+[   12.30] MIP: root LP 8.1025132194e6 (17280 iters, 7.24s)
+[   12.30] MIP: root LP size: rows 52485, free columns 57359, nonzeros 276648
+[   12.30] MIP: root LP work: 15.417900 tick-s (17280 iters, 6.672s)
+[   12.30] MIP: fixed-charge check: vb rows 31990 of 52485, continuous with vb 15995 of 16184
+[   12.30] MIP: fixed-charge check: vb rows 31990 of 52485, continuous with vb 15995 of 16184
+[   12.31] CUTMIX types restarts 0 m 52485 n 57359 vbrow 0.610 vbcol 0.988 fc 0 fcnode 1 cont 0.282 genint 0.000 knap 0.000 knaptight 0.000 knapgub 0.000 knapgubcol 0.000 mixknap 0.003 setp 0.387 introw 0.387 intsmall 0.387 flow 0.386
+[   12.71] MIP: clique graph: 1369100 edges (335219 from rows, probing implications 1996483)
+[   12.71] CLQSIG s 0.4161 sp 0.0012 ed 0.7540 fr 0.9091 vi 0.0000 (rows 52485 bin 43524 edges 1369100 frac 759) a 1.8 b 0.41 f 0.5027
+[   12.71] MIP: clique sigmoid: f 0.5027, clique cuts per root round 50
+[   12.71] MIP: fixed-charge check: vb rows 31990 of 52485, continuous with vb 15995 of 16184
+[   12.71] MIP: robust cut LP cap: size false, double false, progress true
+[   12.72] MIP: fixed-integer LP dual check: c x 5.0354666667e8, dual bound 1.4613714820e7 -> solve
+[   13.04] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=7731 lu_nnz=148951 fill=84447 upd=0 col_aq=0.0000
+[   13.09] PROGRESS main iter=1000 t=0.0s phase=B infeasible_rows=2782 lu_nnz=148951 fill=85517 upd=1000 col_aq=0.0010
+[   13.40] PROGRESS main iter=2000 t=0.4s phase=B infeasible_rows=2313 lu_nnz=149240 fill=102437 upd=467 col_aq=0.0442
+[   14.39] PROGRESS main iter=3000 t=1.3s phase=B infeasible_rows=2404 lu_nnz=153238 fill=100622 upd=209 col_aq=0.0484
+[   15.32] PROGRESS main iter=4000 t=2.3s phase=B infeasible_rows=2711 lu_nnz=161552 fill=89862 upd=16 col_aq=0.0080
+[   15.93] MIP: fixed-integer LP: TimeLimit (4929 iters)
+[   15.93] MIP:   global fixed integers 2349 of 43524 (newly 0 since the root LP)
+[   15.93] MIP: new incumbent 5.0363124305e8 at node 0 (10.87s) [Local-MIP]
+[   15.93] MIP: Local-MIP solution accepted true (10.87s)
+[   16.06] MIP: fixed-charge check: vb rows 31990 of 52485, continuous with vb 15995 of 16184
+[   16.10] MIP: fixed-charge check: vb rows 31990 of 52485, continuous with vb 15995 of 16184
+[   16.10] MCF detect: rows 52485 cols 59708 | flow cands 20327 flow rows 3791 commodities 15 cap cands 4368 arcs 2514 nodes 2237 incons 50.50 undirected | fail 'inconsistent' | networks [] fc_network false | 0.034s
+[   16.84] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=50 lu_nnz=152135 fill=87678 upd=0 col_aq=0.0000
+[   17.72] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=61 lu_nnz=151837 fill=87418 upd=0 col_aq=0.0000
+[   18.49] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=50 lu_nnz=152135 fill=87678 upd=0 col_aq=0.0000
+[   19.22] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=61 lu_nnz=151837 fill=87418 upd=0 col_aq=0.0000
+[   19.23] MIP: cut selection probe: compared at 0 rounds (pool stopped early), probe wall 3.30s (budget 8.0s)
+[   19.23] MIP: cut selection probe (6 rounds): default 50 cuts gain 0.000000e0 (0.00s), pool 61 cuts gain 0.000000e0 (0.00s) -> default (rule rate, probe 0.00s in total, 14.17s)
+[   20.00] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=50 lu_nnz=152135 fill=87678 upd=0 col_aq=0.0000
+[   21.37] PROGRESS main iter=1000 t=1.4s phase=B infeasible_rows=1026 lu_nnz=154518 fill=87329 upd=15 col_aq=0.0409
+[   23.10] PROGRESS main iter=2000 t=3.1s phase=B infeasible_rows=195 lu_nnz=151794 fill=90281 upd=94 col_aq=0.0188
+[   23.35] MIP: cut round 0: 50 cuts (of 1988, sep 0.46s, LP 2209 iters), LP rows 52535 (cut rows mean nnz 131), obj 8.1046381854e6 (18.30s)
+[   23.46] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1305 lu_nnz=152289 fill=86422 upd=0 col_aq=0.0000
+[   25.09] PROGRESS main iter=1000 t=1.6s phase=B infeasible_rows=1333 lu_nnz=153865 fill=93472 upd=144 col_aq=0.0097
+[   26.28] PROGRESS main iter=2000 t=2.8s phase=B infeasible_rows=253 lu_nnz=159512 fill=91313 upd=101 col_aq=0.0030
+[   26.41] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1305 lu_nnz=152289 fill=86422 upd=0 col_aq=0.0000
+[   28.13] PROGRESS main iter=1000 t=1.7s phase=B infeasible_rows=2180 lu_nnz=155868 fill=96760 upd=115 col_aq=0.0279
+[   29.57] PROGRESS main iter=2000 t=3.2s phase=B infeasible_rows=320 lu_nnz=159338 fill=90161 upd=255 col_aq=0.0006
+[   29.58] MIP: OBJPROBE r: round 0: randomized rounding none (incumbent Some(503631243.0467765) -> Some(503631243.0467765), 4.77s, 24.52s)
+[   29.59] MIP: fixed-integer LP dual check: c x 5.0279737721e8, dual bound 1.4625493540e7 -> solve
+[   29.65] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=7432 lu_nnz=152912 fill=87250 upd=0 col_aq=0.0000
+[   29.72] PROGRESS main iter=1000 t=0.1s phase=B infeasible_rows=2678 lu_nnz=152912 fill=88647 upd=1000 col_aq=0.0019
+[   30.12] PROGRESS main iter=2000 t=0.5s phase=B infeasible_rows=1717 lu_nnz=153739 fill=111521 upd=458 col_aq=0.0187
+[   31.16] PROGRESS main iter=3000 t=1.5s phase=B infeasible_rows=2310 lu_nnz=157834 fill=103133 upd=215 col_aq=0.0331
+[   31.89] PROGRESS main iter=4000 t=2.2s phase=B infeasible_rows=2165 lu_nnz=157834 fill=190086 upd=1215 col_aq=0.0179
+[   32.26] PROGRESS main iter=5000 t=2.6s phase=B infeasible_rows=1868 lu_nnz=160050 fill=107035 upd=917 col_aq=0.0018
+[   32.60] PROGRESS main iter=6000 t=2.9s phase=B infeasible_rows=1848 lu_nnz=160410 fill=95176 upd=470 col_aq=0.0023
+[   32.80] MIP: fixed-integer LP: TimeLimit (6785 iters)
+[   32.80] MIP:   global fixed integers 2349 of 43524 (newly 0 since the root LP)
+[   32.80] MIP: new incumbent 5.0288195359e8 at node 0 (27.74s) [Local-MIP]
+[   32.80] MIP: Local-MIP solution accepted true (27.74s)
+[   32.80] MIP: cut round 1: root cut time cap check: clock 41.041s of cap 16.00s (min rounds 8)
+[   33.35] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=50 lu_nnz=155160 fill=89257 upd=0 col_aq=0.0000
+[   35.04] PROGRESS main iter=1000 t=1.7s phase=B infeasible_rows=241 lu_nnz=156047 fill=89477 upd=14 col_aq=0.0660
+[   35.78] PROGRESS primal iter=0 t=0.0s obj=8.0143581503e6 dual_infeas=0 bland=false
+[   35.84] MIP: cut round 1: 50 cuts (of 2141, sep 0.49s, LP 1554 iters), LP rows 52584 (cut rows mean nnz 126), obj 8.1059640628e6 (30.78s)
+[   35.85] MIP: cut round 2: root cut time cap check: clock 43.213s of cap 16.00s (min rounds 8)
+[   36.58] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=50 lu_nnz=157595 fill=91389 upd=0 col_aq=0.0000
+[   38.15] PROGRESS main iter=1000 t=1.6s phase=B infeasible_rows=379 lu_nnz=159681 fill=93111 upd=46 col_aq=0.0187
+[   39.20] PROGRESS primal iter=0 t=0.0s obj=8.0155453916e6 dual_infeas=0 bland=false
+[   39.30] MIP: cut round 2: 50 cuts (of 2093, sep 0.65s, LP 1539 iters), LP rows 52625 (cut rows mean nnz 141), obj 8.1071513041e6 (34.25s)
+[   39.32] MIP: cut round 3: root cut time cap check: clock 45.462s of cap 16.00s (min rounds 8)
+[   40.17] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=50 lu_nnz=164468 fill=96161 upd=0 col_aq=0.0000
+[   41.92] PROGRESS main iter=1000 t=1.7s phase=B infeasible_rows=1501 lu_nnz=168194 fill=97130 upd=9 col_aq=0.0346
+[   43.87] PROGRESS main iter=2000 t=3.7s phase=B infeasible_rows=17 lu_nnz=165557 fill=101158 upd=81 col_aq=0.0612
+[   43.98] PROGRESS primal iter=0 t=0.0s obj=8.0165385031e6 dual_infeas=0 bland=false
+[   44.00] MIP: cut round 3: 50 cuts (of 2009, sep 0.77s, LP 2076 iters), LP rows 52666 (cut rows mean nnz 169), obj 8.1081444156e6 (38.94s)
+[   44.01] MIP: cut round 4: root cut time cap check: clock 48.517s of cap 16.00s (min rounds 8)
+[   44.96] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=50 lu_nnz=168840 fill=98592 upd=0 col_aq=0.0000
+[   46.76] PROGRESS main iter=1000 t=1.8s phase=B infeasible_rows=114 lu_nnz=172237 fill=102763 upd=73 col_aq=0.0180
+[   46.99] MIP: cut round 4: 50 cuts (of 2714, sep 0.82s, LP 1163 iters), LP rows 52710 (cut rows mean nnz 175), obj 8.1095379131e6 (41.94s)
+[   47.01] MIP: cut round 5: root cut time cap check: clock 50.454s of cap 16.00s (min rounds 8)
+[   47.77] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=50 lu_nnz=175072 fill=102643 upd=0 col_aq=0.0000
+[   49.63] PROGRESS main iter=1000 t=1.9s phase=B infeasible_rows=342 lu_nnz=176495 fill=112102 upd=116 col_aq=0.0571
+[   51.60] MIP: cut round 5: 50 cuts (of 1866, sep 0.68s, LP 1955 iters), LP rows 52744 (cut rows mean nnz 179), obj 8.1113708835e6 (46.54s)
+[   51.61] MIP: cut round 6: root cut time cap check: clock 53.621s of cap 16.00s (min rounds 8)
+[   53.10] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=50 lu_nnz=179872 fill=105545 upd=0 col_aq=0.0000
+[   54.88] MIP: cut round 6: 50 cuts did not move the objective; up to 100 cuts per round from now
+[   54.88] MIP: cut round 6: 50 cuts (of 1298, sep 1.41s, LP 976 iters), LP rows 52749 (cut rows mean nnz 190), obj 8.1119763136e6 (49.82s)
+[   54.89] MIP: cut round 7: root cut time cap check: clock 55.556s of cap 16.00s (min rounds 8)
+[   56.46] MIP: cut round 7: mpsep gate: optimal face width 3992 (threshold 26242, 52485 rows) -> narrow; stop
+[   56.59] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=100 lu_nnz=189192 fill=113138 upd=0 col_aq=0.0000
+[   58.92] PROGRESS main iter=1000 t=2.3s phase=B infeasible_rows=220 lu_nnz=257920 fill=174442 upd=110 col_aq=0.0625
+[   59.51] MIP: cut round 7: 100 cuts did not move the objective; up to 200 cuts per round from now
+[   59.51] MIP: cut round 7: 100 cuts (of 1128, sep 1.58s, LP 1219 iters), LP rows 52828 (cut rows mean nnz 197), obj 8.1125684864e6 (54.46s)
+[   59.53] MIP: cut round 8: root cut time cap check: clock 57.962s of cap 16.00s (min rounds 8) -> stop
+[   59.53] MIP: mpsep: 0 rounds with extra points, 0 points, 0 extra candidates, chosen 0 cuts (0 do not cut x*), 0.000s
+[   59.60] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=0 lu_nnz=184554 fill=106239 upd=0 col_aq=0.0000
+[   59.60] SEP cmirdelta: calls 28872 with_new 8019 new_deltas 22949 wins 402 (g 0 c 397 l 5, no_old 0) mean_gain 1.116 cands_new 402 chosen 5/450 eff_new 0.0172 eff_all 0.0437 time 0.061s
+[   59.60] MIP: cut loop done: 450 cuts added, 291 in LP, pool 2943 cuts (514025 nonzeros), obj 8.1025132194e6 -> 8.1125684864e6
+[   59.61] MIP: LMBOOST: not used (Local-MIP improvements 2, last at 27.74s, incumbent only from the FJ thread true, gap 0.984, 54.55s)
+[   59.67] MIP: find thread started (budget 20.0s, 54.61s)
+[   59.67] MIP: ROOTSTOP b: newly fixed 0 + fixable by reduced costs 0 at the background cut start, restart not expected; background cuts started (54.62s)
+[   59.67] MIP: background cuts: determ BgDeterm { win: 5, eps: 0.0001, unit: 17280, work_iters: 345600, rate: 0.0, cont: true, gap_eps: 0.0 } (root LP 17280 iters)
+[   59.70] MIP: the incumbent is a poor feasibility jump solution; background cuts use 1 threads
+[   59.70] MIP: background cuts: basis with the column values passed (root LP 6.67s)
+[   59.70] MIP: early root reduced costs stored (0 newly fixed integer columns, 54.64s)
+[   59.70] MIP: root heuristic simple rounding: none (0.00s)
+[   59.70] MIP: root heuristic ZI round: none (0.00s)
+[   59.70] MIP: root heuristic rounding: none (0.00s)
+[   59.70] MIP: root heuristic shifting: none (0.00s)
+[   59.71] MIP: root heuristic int shifting: none (0.00s)
+[   59.72] MIP: fixed-charge check: vb rows 31990 of 52485, continuous with vb 15995 of 16184
+[   59.73] MIP: fixed-charge check: vb rows 31990 of 52485, continuous with vb 15995 of 16184
+[   59.84] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2407 lu_nnz=184554 fill=106239 upd=0 col_aq=0.0000
+[   60.74] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=76 lu_nnz=183856 fill=105714 upd=0 col_aq=0.0000
+[   61.10] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=0 lu_nnz=184554 fill=106239 upd=0 col_aq=0.0000
+[   61.16] MIP: fixed-charge check: vb rows 31990 of 52485, continuous with vb 15995 of 16184
+[   61.16] MIP: fixed-charge check: vb rows 31990 of 52485, continuous with vb 15995 of 16184
+[   61.16] CUTMIX types restarts 0 m 52485 n 57359 vbrow 0.610 vbcol 0.988 fc 0 fcnode 1 cont 0.282 genint 0.000 knap 0.000 knaptight 0.000 knapgub 0.000 knapgubcol 0.000 mixknap 0.003 setp 0.387 introw 0.387 intsmall 0.387 flow 0.386
+[   61.53] MIP: fixed-charge check: vb rows 31990 of 52485, continuous with vb 15995 of 16184
+[   61.75] MIP: fixed-charge check: vb rows 31990 of 52485, continuous with vb 15995 of 16184
+[   61.79] MIP: fixed-charge check: vb rows 31990 of 52485, continuous with vb 15995 of 16184
+[   61.79] MCF detect: rows 52485 cols 59708 | flow cands 20327 flow rows 3791 commodities 15 cap cands 4368 arcs 2514 nodes 2237 incons 50.50 undirected | fail 'inconsistent' | networks [] fc_network false | 0.035s
+[   61.97] PROGRESS main iter=1000 t=2.1s phase=B infeasible_rows=1584 lu_nnz=186860 fill=120116 upd=171 col_aq=0.0075
+[   63.39] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=50 lu_nnz=191626 fill=115021 upd=0 col_aq=0.0000
+[   63.55] PROGRESS main iter=2000 t=3.7s phase=B infeasible_rows=1076 lu_nnz=187356 fill=113517 upd=114 col_aq=0.0031
+[   63.63] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2409 lu_nnz=184554 fill=106239 upd=0 col_aq=0.0000
+[   63.85] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=185941 fill=109436 upd=0 col_aq=0.0000
+[   63.89] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=185941 fill=109518 upd=1 col_aq=0.0000
+[   63.91] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=185941 fill=109553 upd=3 col_aq=0.0000
+[   63.94] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=185941 fill=109760 upd=5 col_aq=0.0000
+[   63.97] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=185941 fill=109765 upd=6 col_aq=0.0000
+[   63.99] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=185941 fill=109769 upd=7 col_aq=0.0000
+[   64.02] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=185941 fill=109879 upd=8 col_aq=0.0000
+[   64.04] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=185941 fill=109903 upd=10 col_aq=0.0000
+[   64.08] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=185941 fill=111133 upd=25 col_aq=0.0000
+[   64.10] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=185941 fill=111240 upd=26 col_aq=0.0000
+[   64.13] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=185941 fill=111245 upd=27 col_aq=0.0000
+[   64.15] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=185941 fill=111249 upd=28 col_aq=0.0000
+[   64.17] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=185941 fill=112184 upd=33 col_aq=0.0000
+[   64.20] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=185941 fill=112220 upd=39 col_aq=0.0000
+[   64.22] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=185941 fill=112230 upd=40 col_aq=0.0000
+[   64.24] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=185941 fill=112249 upd=43 col_aq=0.0000
+[   64.27] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=185941 fill=112388 upd=49 col_aq=0.0000
+[   64.30] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=185941 fill=112695 upd=57 col_aq=0.0000
+[   64.33] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=185941 fill=112715 upd=58 col_aq=0.0000
+[   64.35] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=185941 fill=112849 upd=59 col_aq=0.0000
+[   64.38] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=185941 fill=113059 upd=62 col_aq=0.0000
+[   64.40] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=185941 fill=113084 upd=63 col_aq=0.0000
+[   64.48] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=186547 fill=109916 upd=0 col_aq=0.0000
+[   64.51] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=186547 fill=111007 upd=4 col_aq=0.0000
+[   64.54] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=186547 fill=111042 upd=7 col_aq=0.0000
+[   64.58] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=186547 fill=111123 upd=16 col_aq=0.0000
+[   64.61] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=186547 fill=111109 upd=17 col_aq=0.0000
+[   64.65] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=186547 fill=111969 upd=27 col_aq=0.0000
+[   64.68] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=186547 fill=112126 upd=31 col_aq=0.0000
+[   64.70] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=186547 fill=112193 upd=33 col_aq=0.0000
+[   64.73] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=186547 fill=112348 upd=34 col_aq=0.0000
+[   64.75] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=186547 fill=112588 upd=35 col_aq=0.0000
+[   64.77] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=186547 fill=112623 upd=38 col_aq=0.0000
+[   64.81] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=186547 fill=113110 upd=46 col_aq=0.0000
+[   64.83] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=186547 fill=113248 upd=47 col_aq=0.0000
+[   64.85] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=186547 fill=113478 upd=49 col_aq=0.0000
+[   64.88] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=186547 fill=113516 upd=50 col_aq=0.0000
+[   64.90] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=186547 fill=113553 upd=51 col_aq=0.0000
+[   64.92] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=186547 fill=113595 upd=53 col_aq=0.0000
+[   65.11] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184495 fill=108565 upd=0 col_aq=0.0000
+[   65.14] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184495 fill=109119 upd=8 col_aq=0.0000
+[   65.16] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=184495 fill=109275 upd=15 col_aq=0.0000
+[   65.18] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184495 fill=109450 upd=16 col_aq=0.0000
+[   65.20] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184495 fill=109658 upd=17 col_aq=0.0000
+[   65.23] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184495 fill=109779 upd=22 col_aq=0.0000
+[   65.25] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184495 fill=109926 upd=23 col_aq=0.0000
+[   65.27] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184495 fill=110118 upd=26 col_aq=0.0000
+[   65.31] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184495 fill=110649 upd=43 col_aq=0.0000
+[   65.34] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184495 fill=111129 upd=51 col_aq=0.0000
+[   65.37] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184495 fill=111444 upd=62 col_aq=0.0000
+[   65.39] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=184495 fill=111595 upd=63 col_aq=0.0000
+[   65.47] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184909 fill=109066 upd=0 col_aq=0.0000
+[   65.49] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=184909 fill=109255 upd=1 col_aq=0.0000
+[   65.52] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184909 fill=109303 upd=7 col_aq=0.0000
+[   65.67] PROGRESS main iter=1000 t=2.0s phase=B infeasible_rows=1946 lu_nnz=189806 fill=117283 upd=143 col_aq=0.0021
+[   65.73] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=185074 fill=109390 upd=0 col_aq=0.0000
+[   65.77] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=185074 fill=109899 upd=8 col_aq=0.0000
+[   65.80] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=185074 fill=110068 upd=14 col_aq=0.0000
+[   65.83] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=185074 fill=110231 upd=19 col_aq=0.0000
+[   65.86] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=185074 fill=110366 upd=24 col_aq=0.0000
+[   65.89] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=185074 fill=110386 upd=27 col_aq=0.0000
+[   65.91] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=185074 fill=110565 upd=29 col_aq=0.0000
+[   65.96] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=185074 fill=112823 upd=47 col_aq=0.0000
+[   66.00] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=185074 fill=113281 upd=60 col_aq=0.0000
+[   66.09] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184335 fill=108954 upd=0 col_aq=0.0000
+[   66.12] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184335 fill=109461 upd=5 col_aq=0.0000
+[   66.15] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184335 fill=109748 upd=9 col_aq=0.0000
+[   66.19] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184335 fill=110417 upd=18 col_aq=0.0000
+[   66.21] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=184335 fill=110605 upd=20 col_aq=0.0000
+[   66.23] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184335 fill=111124 upd=21 col_aq=0.0000
+[   66.28] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184335 fill=113128 upd=41 col_aq=0.0000
+[   66.30] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184335 fill=113221 upd=45 col_aq=0.0000
+[   66.32] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184335 fill=113234 upd=46 col_aq=0.0000
+[   66.34] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184335 fill=113520 upd=47 col_aq=0.0000
+[   66.37] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=184335 fill=114469 upd=56 col_aq=0.0000
+[   66.44] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=185236 fill=108997 upd=0 col_aq=0.0000
+[   66.47] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=185236 fill=109180 upd=2 col_aq=0.0000
+[   66.50] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=185236 fill=109707 upd=7 col_aq=0.0000
+[   66.53] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=185236 fill=109725 upd=14 col_aq=0.0000
+[   66.56] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=185236 fill=109723 upd=17 col_aq=0.0000
+[   66.70] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=100 lu_nnz=200255 fill=123560 upd=0 col_aq=0.0000
+[   66.72] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184202 fill=109297 upd=0 col_aq=0.0000
+[   66.75] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184202 fill=109706 upd=4 col_aq=0.0000
+[   66.78] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184202 fill=109774 upd=13 col_aq=0.0000
+[   66.83] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=184202 fill=110407 upd=27 col_aq=0.0000
+[   67.06] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184068 fill=108455 upd=0 col_aq=0.0000
+[   67.08] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184068 fill=108534 upd=1 col_aq=0.0000
+[   67.10] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184068 fill=108712 upd=3 col_aq=0.0000
+[   67.13] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184068 fill=109168 upd=9 col_aq=0.0000
+[   67.16] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184068 fill=109223 upd=13 col_aq=0.0000
+[   67.18] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184068 fill=109238 upd=15 col_aq=0.0000
+[   67.20] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184068 fill=109243 upd=16 col_aq=0.0000
+[   67.22] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184068 fill=109469 upd=18 col_aq=0.0000
+[   67.24] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=184068 fill=109509 upd=20 col_aq=0.0000
+[   67.26] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184068 fill=109522 upd=22 col_aq=0.0000
+[   67.29] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184068 fill=109551 upd=24 col_aq=0.0000
+[   67.31] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=184068 fill=109562 upd=25 col_aq=0.0000
+[   67.33] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184068 fill=109598 upd=28 col_aq=0.0000
+[   67.35] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184068 fill=109573 upd=29 col_aq=0.0000
+[   67.39] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184068 fill=109906 upd=45 col_aq=0.0000
+[   67.50] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184196 fill=108205 upd=0 col_aq=0.0000
+[   67.52] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=184196 fill=108444 upd=1 col_aq=0.0000
+[   67.71] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=184139 fill=108531 upd=0 col_aq=0.0000
+[   67.78] PROGRESS main iter=2000 t=4.1s phase=B infeasible_rows=1726 lu_nnz=187693 fill=116910 upd=150 col_aq=0.0159
+[   67.79] MIP: root heuristic randomized rounding: none (8.08s)
+[   67.90] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=182612 fill=106797 upd=0 col_aq=0.0000
+[   67.94] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=182612 fill=107248 upd=15 col_aq=0.0000
+[   68.53] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=182972 fill=105418 upd=0 col_aq=0.0000
+[   68.56] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=182612 fill=107514 upd=29 col_aq=0.0000
+[   68.80] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=183612 fill=107786 upd=0 col_aq=0.0000
+[   68.83] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=183612 fill=108072 upd=3 col_aq=0.0000
+[   68.85] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=183612 fill=108282 upd=7 col_aq=0.0000
+[   68.88] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=183612 fill=108613 upd=13 col_aq=0.0000
+[   68.92] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=5 lu_nnz=183612 fill=108698 upd=15 col_aq=0.0000
+[   69.17] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=183326 fill=107728 upd=0 col_aq=0.0000
+[   69.20] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=183326 fill=107859 upd=1 col_aq=0.0000
+[   69.22] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=183326 fill=107996 upd=8 col_aq=0.0000
+[   69.29] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=183326 fill=109227 upd=42 col_aq=0.0000
+[   69.32] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=183326 fill=109237 upd=43 col_aq=0.0000
+[   69.37] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=183326 fill=109269 upd=44 col_aq=0.0000
+[   69.39] PROGRESS main iter=1000 t=2.7s phase=B infeasible_rows=75 lu_nnz=202202 fill=140861 upd=136 col_aq=0.0791
+[   69.43] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=183326 fill=110171 upd=57 col_aq=0.0000
+[   69.61] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=182546 fill=107000 upd=0 col_aq=0.0000
+[   69.67] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=182546 fill=107343 upd=10 col_aq=0.0000
+[   69.69] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=182546 fill=107551 upd=13 col_aq=0.0000
+[   69.72] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=182546 fill=107588 upd=15 col_aq=0.0000
+[   69.74] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=182546 fill=107647 upd=18 col_aq=0.0000
+[   69.78] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=182546 fill=108429 upd=32 col_aq=0.0000
+[   69.81] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=182546 fill=108657 upd=36 col_aq=0.0000
+[   69.83] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=182546 fill=108624 upd=37 col_aq=0.0000
+[   69.86] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=182546 fill=108645 upd=40 col_aq=0.0000
+[   69.88] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=182546 fill=108714 upd=43 col_aq=0.0000
+[   69.91] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=182546 fill=108740 upd=44 col_aq=0.0000
+[   69.96] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=182546 fill=108971 upd=55 col_aq=0.0000
+[   70.07] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=182318 fill=107394 upd=0 col_aq=0.0000
+[   70.09] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=182318 fill=107612 upd=1 col_aq=0.0000
+[   70.12] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=182318 fill=107672 upd=4 col_aq=0.0000
+[   70.15] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=182318 fill=107705 upd=6 col_aq=0.0000
+[   70.16] PROGRESS primal iter=0 t=0.0s obj=8.0221309945e6 dual_infeas=0 bland=false
+[   70.21] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=182318 fill=108180 upd=26 col_aq=0.0000
+[   70.26] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=182318 fill=108629 upd=40 col_aq=0.0000
+[   70.31] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=182318 fill=108990 upd=57 col_aq=0.0000
+[   70.56] MIP:   interior rounding: 1 interior points, vertex false (2.78s)
+[   70.56] MIP:   interior rounding: 0 rounded points tried, found false
+[   70.56] MIP: root heuristic interior rounding: none (2.78s)
+[   70.60] MIP:   root reduced cost: 9288 lurking bounds, fixing rate 0.52, free columns 0.6025
+[   70.65] MIP:   parallel sub-MIP started (root reduced cost): 35974 free columns of 59708
+[   70.65] MIP: root heuristic root reduced cost: none (0.08s)
+[   70.65] MIP:   LP face: only 9285 of 41175 integer columns fixed
+[   70.65] MIP: root heuristic LP face: none (0.00s)
+[   70.68] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=0 lu_nnz=184554 fill=106239 upd=0 col_aq=0.0000
+[   70.71] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=0 lu_nnz=184554 fill=106239 upd=0 col_aq=0.0000
+[   70.73] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=0 lu_nnz=184554 fill=106239 upd=0 col_aq=0.0000
+[   70.76] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=0 lu_nnz=184554 fill=106239 upd=0 col_aq=0.0000
+[   70.79] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=0 lu_nnz=184554 fill=106239 upd=0 col_aq=0.0000
+[   70.82] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=0 lu_nnz=184554 fill=106239 upd=0 col_aq=0.0000
+[   70.84] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=0 lu_nnz=184554 fill=106239 upd=0 col_aq=0.0000
+[   70.87] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=0 lu_nnz=184554 fill=106239 upd=0 col_aq=0.0000
+[   70.90] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=0 lu_nnz=184554 fill=106239 upd=0 col_aq=0.0000
+[   70.93] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=0 lu_nnz=184554 fill=106239 upd=0 col_aq=0.0000
+[   70.96] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=0 lu_nnz=184554 fill=106239 upd=0 col_aq=0.0000
+[   70.99] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=0 lu_nnz=184554 fill=106239 upd=0 col_aq=0.0000
+[   71.01] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=0 lu_nnz=184554 fill=106239 upd=0 col_aq=0.0000
+[   71.04] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=0 lu_nnz=184554 fill=106239 upd=0 col_aq=0.0000
+[   71.07] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=0 lu_nnz=184554 fill=106239 upd=0 col_aq=0.0000
+[   71.08] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=182129 fill=105665 upd=0 col_aq=0.0000
+[   71.08] MIP:   RENS: fixing rate 0.80 (target 0.80, 0 backtracks)
+[   71.12] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=182318 fill=109238 upd=62 col_aq=0.0000
+[   71.14] MIP:   parallel sub-MIP started (RENS): 24411 free columns of 59708
+[   71.14] MIP:   no-incumbent RENS (sub-MIP depth 0) try 1: target 0.80, fixing rate 0.80, found false (66.09s)
+[   71.14] MIP: root heuristic RENS: none (0.49s)
+[   71.22] MIP:   locks: fixing rate 0.71
+[   71.31] MIP:   parallel sub-MIP started (locks): 28116 free columns of 59708
+[   71.31] MIP: root heuristic locks: none (0.17s)
+[   71.31] MIP:   clique: fixing rate 0.00
+[   71.31] MIP: root heuristic clique: none (0.00s)
+[   71.41] MIP:   vbounds (loose): fixing rate 0.98
+[   72.04] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=181695 fill=105585 upd=0 col_aq=0.0000
+[   72.11] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=181770 fill=107182 upd=0 col_aq=0.0000
+[   72.19] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=193 lu_nnz=214024 fill=137283 upd=0 col_aq=0.0000
+[   72.63] CUTMIX clique edges total 466571 rows 14562 implonly 452009 implpairs 468370 bin 11411
+[   72.66] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=239 lu_nnz=14691 fill=0 upd=0 col_aq=0.0000
+[   72.67] PROGRESS main iter=1000 t=0.0s phase=B infeasible_rows=1939 lu_nnz=15994 fill=1905 upd=374 col_aq=0.0002
+[   72.68] PROGRESS main iter=2000 t=0.0s phase=B infeasible_rows=1322 lu_nnz=17560 fill=3955 upd=635 col_aq=0.0002
+[   72.69] PROGRESS main iter=3000 t=0.0s phase=B infeasible_rows=965 lu_nnz=22587 fill=6995 upd=260 col_aq=0.0007
+[   72.71] PROGRESS main iter=4000 t=0.1s phase=B infeasible_rows=497 lu_nnz=26636 fill=11223 upd=439 col_aq=0.0008
+[   72.76] PROGRESS main iter=5000 t=0.1s phase=B infeasible_rows=636 lu_nnz=24627 fill=8444 upd=4 col_aq=0.0029
+[   72.83] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=181364 fill=105504 upd=0 col_aq=0.0000
+[   72.83] PROGRESS main iter=6000 t=0.2s phase=B infeasible_rows=685 lu_nnz=28592 fill=11453 upd=105 col_aq=0.0066
+[   72.86] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=181770 fill=107595 upd=3 col_aq=0.0000
+[   72.93] PROGRESS main iter=7000 t=0.3s phase=B infeasible_rows=851 lu_nnz=35170 fill=16390 upd=75 col_aq=0.0169
+[   73.13] PROGRESS main iter=8000 t=0.5s phase=B infeasible_rows=858 lu_nnz=38591 fill=39969 upd=523 col_aq=0.0599
+[   73.28] PROGRESS main iter=9000 t=0.6s phase=B infeasible_rows=912 lu_nnz=29961 fill=18838 upd=490 col_aq=0.0245
+[   73.35] PROGRESS main iter=10000 t=0.7s phase=B infeasible_rows=983 lu_nnz=31451 fill=18540 upd=445 col_aq=0.0063
+[   73.55] PROGRESS main iter=11000 t=0.9s phase=B infeasible_rows=1100 lu_nnz=43236 fill=35150 upd=322 col_aq=0.0387
+[   73.58] CUTMIX clique edges total 100975 rows 12337 implonly 88638 implpairs 159621 bin 5808
+[   73.63] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2344 lu_nnz=12014 fill=0 upd=0 col_aq=0.0000
+[   73.66] PROGRESS main iter=1000 t=0.0s phase=B infeasible_rows=1313 lu_nnz=13138 fill=1883 upd=437 col_aq=0.0003
+[   73.68] PROGRESS main iter=2000 t=0.0s phase=B infeasible_rows=958 lu_nnz=16436 fill=3156 upd=111 col_aq=0.0004
+[   73.69] PROGRESS main iter=3000 t=0.1s phase=B infeasible_rows=848 lu_nnz=18391 fill=5606 upd=449 col_aq=0.0004
+[   73.70] PROGRESS main iter=4000 t=0.1s phase=B infeasible_rows=673 lu_nnz=20536 fill=7830 upd=710 col_aq=0.0005
+[   73.72] PROGRESS main iter=5000 t=0.1s phase=B infeasible_rows=522 lu_nnz=20645 fill=10248 upd=234 col_aq=0.0005
+[   73.75] CUTMIX clique edges total 767301 rows 87578 implonly 679723 implpairs 1345885 bin 18260
+[   73.75] PROGRESS main iter=6000 t=0.1s phase=B infeasible_rows=718 lu_nnz=22063 fill=13871 upd=359 col_aq=0.0040
+[   73.77] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=181442 fill=106163 upd=0 col_aq=0.0000
+[   73.77] PROGRESS main iter=12000 t=1.1s phase=B infeasible_rows=1152 lu_nnz=36160 fill=19906 upd=126 col_aq=0.0048
+[   73.80] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=181770 fill=107903 upd=7 col_aq=0.0000
+[   73.84] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=13989 lu_nnz=29488 fill=0 upd=0 col_aq=0.0000
+[   73.86] PROGRESS main iter=1000 t=0.0s phase=B infeasible_rows=1991 lu_nnz=31309 fill=1980 upd=93 col_aq=0.0001
+[   73.87] PROGRESS main iter=7000 t=0.2s phase=B infeasible_rows=232 lu_nnz=26429 fill=20133 upd=471 col_aq=0.0211
+[   73.88] PROGRESS main iter=2000 t=0.0s phase=B infeasible_rows=1482 lu_nnz=33511 fill=3624 upd=126 col_aq=0.0001
+[   73.89] PROGRESS main iter=3000 t=0.1s phase=B infeasible_rows=1265 lu_nnz=36083 fill=5148 upd=211 col_aq=0.0002
+[   73.90] PROGRESS main iter=4000 t=0.1s phase=B infeasible_rows=1038 lu_nnz=38660 fill=6694 upd=242 col_aq=0.0001
+[   73.92] PROGRESS main iter=5000 t=0.1s phase=B infeasible_rows=802 lu_nnz=42533 fill=8512 upd=219 col_aq=0.0001
+[   73.93] PROGRESS main iter=6000 t=0.1s phase=B infeasible_rows=528 lu_nnz=42533 fill=12476 upd=1219 col_aq=0.0002
+[   73.95] PROGRESS main iter=7000 t=0.1s phase=B infeasible_rows=584 lu_nnz=57649 fill=18861 upd=210 col_aq=0.0005
+[   73.99] PROGRESS main iter=8000 t=0.2s phase=B infeasible_rows=498 lu_nnz=44690 fill=16799 upd=292 col_aq=0.0005
+[   74.02] MIP: fixed-charge check: vb rows 9596 of 12014, continuous with vb 4798 of 5221
+[   74.07] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=22 lu_nnz=25236 fill=11743 upd=0 col_aq=0.0000
+[   74.08] PROGRESS main iter=13000 t=1.4s phase=B infeasible_rows=1268 lu_nnz=37861 fill=18274 upd=39 col_aq=0.0074
+[   74.08] PROGRESS main iter=9000 t=0.2s phase=B infeasible_rows=379 lu_nnz=46812 fill=17496 upd=34 col_aq=0.0050
+[   74.13] PROGRESS main iter=10000 t=0.3s phase=B infeasible_rows=299 lu_nnz=49283 fill=21563 upd=360 col_aq=0.0008
+[   74.23] PROGRESS main iter=11000 t=0.4s phase=B infeasible_rows=325 lu_nnz=53788 fill=28987 upd=648 col_aq=0.0111
+[   74.25] PROGRESS main iter=14000 t=1.6s phase=B infeasible_rows=1229 lu_nnz=42600 fill=36605 upd=407 col_aq=0.1013
+[   74.39] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=16 lu_nnz=26095 fill=12157 upd=0 col_aq=0.0000
+[   74.41] PROGRESS main iter=12000 t=0.6s phase=B infeasible_rows=533 lu_nnz=64681 fill=27529 upd=149 col_aq=0.0017
+[   74.53] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=181213 fill=105635 upd=0 col_aq=0.0000
+[   74.58] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=181770 fill=108170 upd=9 col_aq=0.0000
+[   74.67] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=6 lu_nnz=26221 fill=12296 upd=0 col_aq=0.0000
+[   74.72] PROGRESS primal iter=0 t=0.0s obj=-4.6718380235e8 dual_infeas=0 bland=false
+[   74.73] PROGRESS main iter=1000 t=2.5s phase=B infeasible_rows=652 lu_nnz=219273 fill=160256 upd=91 col_aq=0.0647
+[   74.79] PROGRESS main iter=15000 t=2.1s phase=B infeasible_rows=968 lu_nnz=50758 fill=59363 upd=424 col_aq=0.1152
+[   74.82] MIP: fixed-charge check: vb rows 20796 of 29488, continuous with vb 10398 of 10429
+[   74.93] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=50 lu_nnz=26879 fill=12850 upd=0 col_aq=0.0000
+[   75.02] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=5 lu_nnz=55725 fill=23708 upd=0 col_aq=0.0000
+[   75.13] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=27367 fill=12973 upd=0 col_aq=0.0000
+[   75.26] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=8 lu_nnz=55967 fill=23896 upd=0 col_aq=0.0000
+[   75.32] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=11 lu_nnz=27577 fill=13157 upd=0 col_aq=0.0000
+[   75.36] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=180893 fill=105437 upd=0 col_aq=0.0000
+[   75.39] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=181770 fill=108158 upd=10 col_aq=0.0000
+[   75.43] PROGRESS main iter=16000 t=2.8s phase=B infeasible_rows=622 lu_nnz=41001 fill=19108 upd=4 col_aq=0.0917
+[   75.57] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=34 lu_nnz=28192 fill=13801 upd=0 col_aq=0.0000
+[   75.68] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=50 lu_nnz=56757 fill=24578 upd=0 col_aq=0.0000
+[   75.73] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=11 lu_nnz=28443 fill=13778 upd=0 col_aq=0.0000
+[   75.73] PROGRESS main iter=17000 t=3.1s phase=B infeasible_rows=300 lu_nnz=40717 fill=27765 upd=522 col_aq=0.0061
+[   75.87] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=50 lu_nnz=29207 fill=14578 upd=0 col_aq=0.0000
+[   76.04] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=8 lu_nnz=29478 fill=14499 upd=0 col_aq=0.0000
+[   76.07] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=0 lu_nnz=29380 fill=14460 upd=0 col_aq=0.0000
+[   76.08] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1808 lu_nnz=29380 fill=14460 upd=0 col_aq=0.0000
+[   76.11] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=50 lu_nnz=58547 fill=25622 upd=0 col_aq=0.0000
+[   76.12] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=180629 fill=105068 upd=0 col_aq=0.0000
+[   76.21] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=181770 fill=108260 upd=11 col_aq=0.0000
+[   76.23] PROGRESS primal iter=0 t=0.0s obj=3.9807170606e7 dual_infeas=0 bland=false
+[   76.33] PROGRESS main iter=1000 t=0.2s phase=B infeasible_rows=378 lu_nnz=28178 fill=14027 upd=118 col_aq=0.0010
+[   76.39] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=50 lu_nnz=59834 fill=26553 upd=0 col_aq=0.0000
+[   76.52] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1874 lu_nnz=26084 fill=13867 upd=0 col_aq=0.0000
+[   76.55] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=902 lu_nnz=29380 fill=14460 upd=0 col_aq=0.0000
+[   76.67] PROGRESS main iter=1000 t=0.3s phase=B infeasible_rows=124 lu_nnz=64014 fill=34858 upd=227 col_aq=0.0096
+[   76.70] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=608 lu_nnz=29397 fill=14583 upd=4 col_aq=0.0000
+[   76.77] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=0 lu_nnz=61231 fill=27756 upd=0 col_aq=0.0000
+[   76.79] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1928 lu_nnz=61231 fill=27756 upd=0 col_aq=0.0000
+[   76.98] CUTMIX clique edges total 115 rows 91 implonly 24 implpairs 226 bin 156
+[   76.99] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=355 lu_nnz=962 fill=0 upd=0 col_aq=0.0000
+[   77.01] MIP: fixed-charge check: vb rows 766 of 962, continuous with vb 383 of 1666
+[   77.02] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=18 lu_nnz=2458 fill=1323 upd=0 col_aq=0.0000
+[   77.04] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=11 lu_nnz=2499 fill=1363 upd=0 col_aq=0.0000
+[   77.05] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=6 lu_nnz=2535 fill=1375 upd=0 col_aq=0.0000
+[   77.06] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=2546 fill=1395 upd=0 col_aq=0.0000
+[   77.08] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=9 lu_nnz=2618 fill=1457 upd=0 col_aq=0.0000
+[   77.09] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=10 lu_nnz=2660 fill=1502 upd=0 col_aq=0.0000
+[   77.11] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=6 lu_nnz=2701 fill=1529 upd=0 col_aq=0.0000
+[   77.11] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=181083 fill=105679 upd=0 col_aq=0.0000
+[   77.12] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=5 lu_nnz=2704 fill=1524 upd=0 col_aq=0.0000
+[   77.13] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2693 fill=1508 upd=0 col_aq=0.0000
+[   77.14] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=181770 fill=108261 upd=12 col_aq=0.0000
+[   77.15] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=7 lu_nnz=2731 fill=1543 upd=0 col_aq=0.0000
+[   77.16] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=18 lu_nnz=2842 fill=1634 upd=0 col_aq=0.0000
+[   77.18] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=5 lu_nnz=2848 fill=1663 upd=0 col_aq=0.0000
+[   77.19] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=7 lu_nnz=2899 fill=1692 upd=0 col_aq=0.0000
+[   77.20] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=0 lu_nnz=2863 fill=1662 upd=0 col_aq=0.0000
+[   77.20] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=72 lu_nnz=2863 fill=1662 upd=0 col_aq=0.0000
+[   77.21] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=72 lu_nnz=2863 fill=1662 upd=0 col_aq=0.0000
+[   77.23] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=274 lu_nnz=2863 fill=1662 upd=0 col_aq=0.0000
+[   77.24] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=201 lu_nnz=2626 fill=1535 upd=0 col_aq=0.0000
+[   77.24] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=0 lu_nnz=2863 fill=1662 upd=0 col_aq=0.0000
+[   77.25] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=6 lu_nnz=2863 fill=1662 upd=0 col_aq=0.0000
+[   77.25] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2863 fill=1602 upd=4 col_aq=0.0000
+[   77.26] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2863 fill=2005 upd=36 col_aq=0.0000
+[   77.26] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2863 fill=2046 upd=41 col_aq=0.0000
+[   77.27] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2863 fill=2079 upd=43 col_aq=0.0000
+[   77.27] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2863 fill=2077 upd=45 col_aq=0.0000
+[   77.28] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=2863 fill=2095 upd=46 col_aq=0.0000
+[   77.28] PROGRESS primal iter=1000 t=1.1s obj=3.9807170606e7 dual_infeas=7 bland=false
+[   77.29] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2863 fill=2116 upd=50 col_aq=0.0000
+[   77.29] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2863 fill=2155 upd=52 col_aq=0.0000
+[   77.30] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2863 fill=2160 upd=53 col_aq=0.0000
+[   77.32] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=7 lu_nnz=2863 fill=2163 upd=54 col_aq=0.0000
+[   77.32] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2863 fill=2184 upd=59 col_aq=0.0000
+[   77.33] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2863 fill=2185 upd=60 col_aq=0.0000
+[   77.34] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=5 lu_nnz=2863 fill=2191 upd=61 col_aq=0.0000
+[   77.34] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=200 lu_nnz=229641 fill=151504 upd=0 col_aq=0.0000
+[   77.34] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2742 fill=1550 upd=0 col_aq=0.0000
+[   77.36] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2742 fill=1551 upd=1 col_aq=0.0000
+[   77.36] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2742 fill=1603 upd=9 col_aq=0.0000
+[   77.37] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2742 fill=1602 upd=10 col_aq=0.0000
+[   77.38] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2742 fill=1601 upd=11 col_aq=0.0000
+[   77.39] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2742 fill=1603 upd=13 col_aq=0.0000
+[   77.40] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=59 lu_nnz=2742 fill=1604 upd=14 col_aq=0.0000
+[   77.41] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2742 fill=1549 upd=33 col_aq=0.0000
+[   77.42] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2742 fill=1547 upd=34 col_aq=0.0000
+[   77.42] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2742 fill=1544 upd=35 col_aq=0.0000
+[   77.44] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2742 fill=1590 upd=45 col_aq=0.0000
+[   77.44] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2742 fill=1595 upd=47 col_aq=0.0000
+[   77.45] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2742 fill=1624 upd=51 col_aq=0.0000
+[   77.46] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2742 fill=1631 upd=55 col_aq=0.0000
+[   77.46] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2742 fill=1692 upd=61 col_aq=0.0000
+[   77.47] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2742 fill=1699 upd=62 col_aq=0.0000
+[   77.47] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2543 fill=1390 upd=0 col_aq=0.0000
+[   77.48] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2543 fill=1414 upd=4 col_aq=0.0000
+[   77.48] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2543 fill=1422 upd=7 col_aq=0.0000
+[   77.48] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2543 fill=1446 upd=13 col_aq=0.0000
+[   77.49] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=52 lu_nnz=2543 fill=1487 upd=18 col_aq=0.0000
+[   77.50] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2432 fill=1315 upd=0 col_aq=0.0000
+[   77.50] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2432 fill=1313 upd=2 col_aq=0.0000
+[   77.50] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2432 fill=1318 upd=4 col_aq=0.0000
+[   77.51] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2432 fill=1317 upd=6 col_aq=0.0000
+[   77.51] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2432 fill=1323 upd=10 col_aq=0.0000
+[   77.52] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=15 lu_nnz=2432 fill=1440 upd=29 col_aq=0.0000
+[   77.52] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2863 fill=2079 upd=43 col_aq=0.0000
+[   77.53] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2766 fill=1576 upd=0 col_aq=0.0000
+[   77.54] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2766 fill=1646 upd=6 col_aq=0.0000
+[   77.54] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2766 fill=1665 upd=11 col_aq=0.0000
+[   77.55] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2766 fill=1667 upd=15 col_aq=0.0000
+[   77.55] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=7 lu_nnz=2766 fill=1673 upd=17 col_aq=0.0000
+[   77.56] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2766 fill=1685 upd=21 col_aq=0.0000
+[   77.56] PROGRESS main iter=1000 t=0.8s phase=B infeasible_rows=1446 lu_nnz=61118 fill=53531 upd=388 col_aq=0.0085
+[   77.56] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=55 lu_nnz=2766 fill=1682 upd=22 col_aq=0.0000
+[   77.57] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2631 fill=1498 upd=0 col_aq=0.0000
+[   77.58] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2631 fill=1496 upd=1 col_aq=0.0000
+[   77.58] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=58 lu_nnz=2631 fill=1498 upd=2 col_aq=0.0000
+[   77.58] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2631 fill=1598 upd=24 col_aq=0.0000
+[   77.59] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2631 fill=1597 upd=25 col_aq=0.0000
+[   77.59] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2631 fill=1596 upd=26 col_aq=0.0000
+[   77.60] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2631 fill=1604 upd=28 col_aq=0.0000
+[   77.60] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2631 fill=1603 upd=29 col_aq=0.0000
+[   77.61] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=2631 fill=1608 upd=32 col_aq=0.0000
+[   77.61] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=2631 fill=1779 upd=50 col_aq=0.0000
+[   77.61] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2631 fill=1781 upd=51 col_aq=0.0000
+[   77.62] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2631 fill=1825 upd=53 col_aq=0.0000
+[   77.62] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2631 fill=1897 upd=60 col_aq=0.0000
+[   77.63] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2631 fill=1897 upd=62 col_aq=0.0000
+[   77.63] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2631 fill=1901 upd=63 col_aq=0.0000
+[   77.64] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2560 fill=1488 upd=0 col_aq=0.0000
+[   77.64] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=5 lu_nnz=2560 fill=1486 upd=1 col_aq=0.0000
+[   77.64] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=2557 fill=1489 upd=0 col_aq=0.0000
+[   77.65] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=5 lu_nnz=2557 fill=1495 upd=5 col_aq=0.0000
+[   77.66] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2557 fill=1506 upd=18 col_aq=0.0000
+[   77.66] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2557 fill=1504 upd=19 col_aq=0.0000
+[   77.66] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=2557 fill=1589 upd=34 col_aq=0.0000
+[   77.67] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2557 fill=1600 upd=36 col_aq=0.0000
+[   77.67] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=57 lu_nnz=2557 fill=1598 upd=37 col_aq=0.0000
+[   77.68] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2766 fill=1667 upd=15 col_aq=0.0000
+[   77.69] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2766 fill=1673 upd=18 col_aq=0.0000
+[   77.69] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2766 fill=1675 upd=20 col_aq=0.0000
+[   77.70] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2766 fill=1678 upd=21 col_aq=0.0000
+[   77.70] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2766 fill=1683 upd=22 col_aq=0.0000
+[   77.71] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=2766 fill=1710 upd=25 col_aq=0.0000
+[   77.72] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2766 fill=1869 upd=45 col_aq=0.0000
+[   77.73] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2766 fill=1875 upd=47 col_aq=0.0000
+[   77.74] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2766 fill=1884 upd=51 col_aq=0.0000
+[   77.75] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2766 fill=1902 upd=52 col_aq=0.0000
+[   77.76] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2766 fill=1907 upd=53 col_aq=0.0000
+[   77.76] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=7 lu_nnz=2766 fill=1910 upd=54 col_aq=0.0000
+[   77.77] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=61 lu_nnz=2766 fill=1935 upd=61 col_aq=0.0000
+[   77.78] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2538 fill=1389 upd=0 col_aq=0.0000
+[   77.79] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2538 fill=1389 upd=1 col_aq=0.0000
+[   77.80] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2538 fill=1395 upd=3 col_aq=0.0000
+[   77.81] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2538 fill=1394 upd=4 col_aq=0.0000
+[   77.82] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2538 fill=1398 upd=5 col_aq=0.0000
+[   77.82] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=2538 fill=1396 upd=6 col_aq=0.0000
+[   77.83] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=54 lu_nnz=2538 fill=1398 upd=7 col_aq=0.0000
+[   77.84] PROGRESS main iter=2000 t=1.0s phase=B infeasible_rows=233 lu_nnz=60891 fill=29514 upd=815 col_aq=0.0002
+[   77.85] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2329 fill=1233 upd=0 col_aq=0.0000
+[   77.87] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2329 fill=1234 upd=2 col_aq=0.0000
+[   77.87] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=180208 fill=104937 upd=0 col_aq=0.0000
+[   77.87] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1928 lu_nnz=61231 fill=27756 upd=0 col_aq=0.0000
+[   77.87] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2329 fill=1232 upd=4 col_aq=0.0000
+[   77.88] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2329 fill=1231 upd=5 col_aq=0.0000
+[   77.89] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2329 fill=1235 upd=6 col_aq=0.0000
+[   77.89] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2329 fill=1233 upd=7 col_aq=0.0000
+[   77.90] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=2329 fill=1246 upd=9 col_aq=0.0000
+[   77.91] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=2329 fill=1248 upd=10 col_aq=0.0000
+[   77.92] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=181770 fill=108261 upd=13 col_aq=0.0000
+[   77.92] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2329 fill=1246 upd=11 col_aq=0.0000
+[   77.93] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2329 fill=1365 upd=26 col_aq=0.0000
+[   77.95] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=38 lu_nnz=2329 fill=1367 upd=30 col_aq=0.0000
+[   77.96] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2766 fill=1869 upd=45 col_aq=0.0000
+[   77.96] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=54 lu_nnz=2766 fill=1876 upd=47 col_aq=0.0000
+[   77.97] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=2766 fill=1803 upd=63 col_aq=0.0000
+[   77.98] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=8 lu_nnz=2605 fill=1446 upd=0 col_aq=0.0000
+[   77.99] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=55 lu_nnz=2791 fill=1592 upd=0 col_aq=0.0000
+[   77.99] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=60 lu_nnz=2791 fill=1800 upd=30 col_aq=0.0000
+[   78.00] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=2791 fill=1741 upd=50 col_aq=0.0000
+[   78.00] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=2791 fill=1745 upd=52 col_aq=0.0000
+[   78.01] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=2791 fill=1745 upd=54 col_aq=0.0000
+[   78.01] PROGRESS primal iter=2000 t=1.8s obj=3.9807170606e7 dual_infeas=14 bland=false
+[   78.02] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=2791 fill=1737 upd=56 col_aq=0.0000
+[   78.02] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=52 lu_nnz=2791 fill=1750 upd=60 col_aq=0.0000
+[   78.03] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2593 fill=1403 upd=0 col_aq=0.0000
+[   78.03] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2593 fill=1402 upd=2 col_aq=0.0000
+[   78.04] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=2593 fill=1405 upd=4 col_aq=0.0000
+[   78.04] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=11 lu_nnz=2593 fill=1408 upd=5 col_aq=0.0000
+[   78.04] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2593 fill=1438 upd=11 col_aq=0.0000
+[   78.05] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2593 fill=1437 upd=12 col_aq=0.0000
+[   78.05] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2593 fill=1434 upd=13 col_aq=0.0000
+[   78.06] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=2593 fill=1627 upd=32 col_aq=0.0000
+[   78.06] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=2593 fill=1629 upd=33 col_aq=0.0000
+[   78.07] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2593 fill=1646 upd=35 col_aq=0.0000
+[   78.07] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2593 fill=1646 upd=36 col_aq=0.0000
+[   78.08] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2593 fill=1646 upd=37 col_aq=0.0000
+[   78.08] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2593 fill=1665 upd=39 col_aq=0.0000
+[   78.08] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=5 lu_nnz=2593 fill=1673 upd=41 col_aq=0.0000
+[   78.09] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=2532 fill=1388 upd=0 col_aq=0.0000
+[   78.09] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2532 fill=1463 upd=18 col_aq=0.0000
+[   78.10] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2532 fill=1461 upd=19 col_aq=0.0000
+[   78.10] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2532 fill=1465 upd=21 col_aq=0.0000
+[   78.11] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2532 fill=1464 upd=23 col_aq=0.0000
+[   78.11] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2532 fill=1463 upd=24 col_aq=0.0000
+[   78.12] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2532 fill=1463 upd=25 col_aq=0.0000
+[   78.12] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2532 fill=1466 upd=26 col_aq=0.0000
+[   78.12] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2532 fill=1465 upd=28 col_aq=0.0000
+[   78.13] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=216 lu_nnz=2532 fill=1475 upd=32 col_aq=0.0000
+[   78.14] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2791 fill=1745 upd=54 col_aq=0.0000
+[   78.14] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2791 fill=1747 upd=56 col_aq=0.0000
+[   78.15] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2791 fill=1777 upd=60 col_aq=0.0000
+[   78.16] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2643 fill=1449 upd=0 col_aq=0.0000
+[   78.16] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2643 fill=1487 upd=8 col_aq=0.0000
+[   78.17] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2643 fill=1489 upd=10 col_aq=0.0000
+[   78.17] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2643 fill=1504 upd=14 col_aq=0.0000
+[   78.18] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2643 fill=1512 upd=16 col_aq=0.0000
+[   78.18] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=2643 fill=1523 upd=17 col_aq=0.0000
+[   78.18] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2643 fill=1567 upd=25 col_aq=0.0000
+[   78.19] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2643 fill=1594 upd=30 col_aq=0.0000
+[   78.20] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2643 fill=1610 upd=35 col_aq=0.0000
+[   78.20] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2643 fill=1650 upd=39 col_aq=0.0000
+[   78.21] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2643 fill=1661 upd=40 col_aq=0.0000
+[   78.22] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2643 fill=1755 upd=47 col_aq=0.0000
+[   78.24] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=48 lu_nnz=2643 fill=1809 upd=52 col_aq=0.0000
+[   78.25] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=6 lu_nnz=2583 fill=1414 upd=0 col_aq=0.0000
+[   78.27] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2583 fill=1419 upd=1 col_aq=0.0000
+[   78.28] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2583 fill=1419 upd=2 col_aq=0.0000
+[   78.29] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2583 fill=1421 upd=4 col_aq=0.0000
+[   78.29] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2583 fill=1422 upd=6 col_aq=0.0000
+[   78.30] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=11 lu_nnz=2583 fill=1425 upd=7 col_aq=0.0000
+[   78.31] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2583 fill=1453 upd=13 col_aq=0.0000
+[   78.32] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2583 fill=1457 upd=15 col_aq=0.0000
+[   78.33] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2583 fill=1456 upd=16 col_aq=0.0000
+[   78.33] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2583 fill=1456 upd=18 col_aq=0.0000
+[   78.34] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2583 fill=1465 upd=22 col_aq=0.0000
+[   78.35] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2583 fill=1464 upd=23 col_aq=0.0000
+[   78.36] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2643 fill=1487 upd=8 col_aq=0.0000
+[   78.37] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2643 fill=1526 upd=13 col_aq=0.0000
+[   78.38] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2643 fill=1597 upd=21 col_aq=0.0000
+[   78.38] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2643 fill=1638 upd=29 col_aq=0.0000
+[   78.39] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2643 fill=1697 upd=35 col_aq=0.0000
+[   78.40] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=55 lu_nnz=2823 fill=1596 upd=0 col_aq=0.0000
+[   78.41] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=60 lu_nnz=2823 fill=1801 upd=30 col_aq=0.0000
+[   78.41] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2823 fill=1724 upd=49 col_aq=0.0000
+[   78.42] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=2687 fill=1488 upd=0 col_aq=0.0000
+[   78.42] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2687 fill=1492 upd=2 col_aq=0.0000
+[   78.43] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=11 lu_nnz=2687 fill=1792 upd=57 col_aq=0.0000
+[   78.44] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=55 lu_nnz=2833 fill=1608 upd=0 col_aq=0.0000
+[   78.44] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=60 lu_nnz=2833 fill=1830 upd=35 col_aq=0.0000
+[   78.45] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2833 fill=1758 upd=54 col_aq=0.0000
+[   78.46] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2678 fill=1458 upd=0 col_aq=0.0000
+[   78.46] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=2678 fill=1852 upd=51 col_aq=0.0000
+[   78.47] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=2678 fill=1856 upd=53 col_aq=0.0000
+[   78.47] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=24 lu_nnz=2678 fill=1954 upd=63 col_aq=0.0000
+[   78.49] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=55 lu_nnz=2828 fill=1598 upd=0 col_aq=0.0000
+[   78.50] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=60 lu_nnz=2828 fill=2092 upd=52 col_aq=0.0000
+[   78.50] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2665 fill=1452 upd=0 col_aq=0.0000
+[   78.51] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=2665 fill=1629 upd=45 col_aq=0.0000
+[   78.52] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2665 fill=1630 upd=47 col_aq=0.0000
+[   78.53] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2665 fill=1647 upd=51 col_aq=0.0000
+[   78.53] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2656 fill=1460 upd=0 col_aq=0.0000
+[   78.54] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=25 lu_nnz=2665 fill=1647 upd=51 col_aq=0.0000
+[   78.55] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2619 fill=1437 upd=0 col_aq=0.0000
+[   78.57] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2619 fill=1467 upd=2 col_aq=0.0000
+[   78.57] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2619 fill=1570 upd=14 col_aq=0.0000
+[   78.58] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2619 fill=1570 upd=15 col_aq=0.0000
+[   78.59] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2619 fill=1636 upd=20 col_aq=0.0000
+[   78.59] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=2619 fill=1637 upd=22 col_aq=0.0000
+[   78.60] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2619 fill=1640 upd=26 col_aq=0.0000
+[   78.61] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=55 lu_nnz=2765 fill=1573 upd=0 col_aq=0.0000
+[   78.62] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=60 lu_nnz=2765 fill=1738 upd=27 col_aq=0.0000
+[   78.63] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2765 fill=1685 upd=47 col_aq=0.0000
+[   78.64] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=131 lu_nnz=2765 fill=1685 upd=47 col_aq=0.0000
+[   78.67] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=60 lu_nnz=2810 fill=1628 upd=0 col_aq=0.0000
+[   78.67] PROGRESS main iter=1000 t=0.8s phase=B infeasible_rows=1450 lu_nnz=61118 fill=53531 upd=388 col_aq=0.0085
+[   78.68] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=129 lu_nnz=2653 fill=1450 upd=0 col_aq=0.0000
+[   78.70] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=110 lu_nnz=2722 fill=1555 upd=0 col_aq=0.0000
+[   78.72] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=15 lu_nnz=2648 fill=1480 upd=0 col_aq=0.0000
+[   78.72] PROGRESS primal iter=3000 t=2.5s obj=3.9807170606e7 dual_infeas=4 bland=false
+[   78.73] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=111 lu_nnz=2734 fill=1565 upd=0 col_aq=0.0000
+[   78.75] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=15 lu_nnz=2734 fill=1867 upd=60 col_aq=0.0000
+[   78.77] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=5 lu_nnz=2615 fill=1439 upd=0 col_aq=0.0000
+[   78.79] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=7 lu_nnz=2626 fill=1443 upd=0 col_aq=0.0000
+[   78.81] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=46 lu_nnz=2676 fill=1470 upd=0 col_aq=0.0000
+[   78.83] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=17 lu_nnz=2676 fill=1801 upd=54 col_aq=0.0000
+[   78.83] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=38 lu_nnz=2654 fill=1465 upd=0 col_aq=0.0000
+[   78.84] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=17 lu_nnz=2654 fill=1737 upd=47 col_aq=0.0000
+[   78.84] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=117 lu_nnz=2766 fill=1584 upd=0 col_aq=0.0000
+[   78.85] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=15 lu_nnz=2784 fill=1625 upd=0 col_aq=0.0000
+[   78.85] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=117 lu_nnz=2781 fill=1594 upd=0 col_aq=0.0000
+[   78.86] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=15 lu_nnz=2687 fill=1506 upd=0 col_aq=0.0000
+[   78.87] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=117 lu_nnz=2765 fill=1585 upd=0 col_aq=0.0000
+[   78.87] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=15 lu_nnz=2800 fill=1635 upd=0 col_aq=0.0000
+[   78.88] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=11 lu_nnz=2675 fill=1473 upd=0 col_aq=0.0000
+[   78.89] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=11 lu_nnz=2646 fill=1461 upd=0 col_aq=0.0000
+[   78.90] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=150 lu_nnz=2646 fill=1775 upd=49 col_aq=0.0000
+[   78.91] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=179 lu_nnz=2480 fill=1385 upd=0 col_aq=0.0000
+[   78.92] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=117 lu_nnz=2774 fill=1585 upd=0 col_aq=0.0000
+[   78.92] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=16 lu_nnz=2680 fill=1503 upd=0 col_aq=0.0000
+[   78.93] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=117 lu_nnz=2769 fill=1584 upd=0 col_aq=0.0000
+[   78.94] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=17 lu_nnz=2677 fill=1500 upd=0 col_aq=0.0000
+[   78.94] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=51 lu_nnz=2707 fill=1494 upd=0 col_aq=0.0000
+[   78.95] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=15 lu_nnz=2744 fill=1524 upd=0 col_aq=0.0000
+[   78.95] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=11 lu_nnz=2640 fill=1430 upd=0 col_aq=0.0000
+[   78.96] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=140 lu_nnz=2640 fill=2113 upd=52 col_aq=0.0000
+[   78.97] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=148 lu_nnz=2442 fill=1350 upd=0 col_aq=0.0000
+[   78.98] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=117 lu_nnz=2792 fill=1595 upd=0 col_aq=0.0000
+[   78.99] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=15 lu_nnz=2702 fill=1510 upd=0 col_aq=0.0000
+[   78.99] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=12 lu_nnz=2666 fill=1467 upd=0 col_aq=0.0000
+[   79.00] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=11 lu_nnz=2666 fill=1469 upd=0 col_aq=0.0000
+[   79.01] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=167 lu_nnz=2666 fill=1791 upd=51 col_aq=0.0000
+[   79.02] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=117 lu_nnz=2772 fill=1587 upd=0 col_aq=0.0000
+[   79.04] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=11 lu_nnz=2668 fill=1471 upd=0 col_aq=0.0000
+[   79.06] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2668 fill=1796 upd=46 col_aq=0.0000
+[   79.06] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=7 lu_nnz=2668 fill=1801 upd=47 col_aq=0.0000
+[   79.07] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=11 lu_nnz=2667 fill=1471 upd=0 col_aq=0.0000
+[   79.08] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=8 lu_nnz=2628 fill=1460 upd=0 col_aq=0.0000
+[   79.08] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=51 lu_nnz=2706 fill=1483 upd=0 col_aq=0.0000
+[   79.09] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=180620 fill=105204 upd=0 col_aq=0.0000
+[   79.09] PROGRESS main iter=2000 t=1.2s phase=B infeasible_rows=233 lu_nnz=60891 fill=29514 upd=815 col_aq=0.0002
+[   79.09] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=9 lu_nnz=2628 fill=1456 upd=0 col_aq=0.0000
+[   79.10] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=134 lu_nnz=2628 fill=1705 upd=40 col_aq=0.0000
+[   79.10] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=135 lu_nnz=2628 fill=1705 upd=40 col_aq=0.0000
+[   79.11] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=13 lu_nnz=2639 fill=1460 upd=0 col_aq=0.0000
+[   79.11] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1955 lu_nnz=61231 fill=27756 upd=0 col_aq=0.0000
+[   79.12] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=142 lu_nnz=2639 fill=1793 upd=46 col_aq=0.0000
+[   79.12] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=144 lu_nnz=2639 fill=1793 upd=46 col_aq=0.0000
+[   79.13] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=51 lu_nnz=2700 fill=1474 upd=0 col_aq=0.0000
+[   79.14] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=15 lu_nnz=2742 fill=1514 upd=0 col_aq=0.0000
+[   79.14] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=63 lu_nnz=2649 fill=1450 upd=0 col_aq=0.0000
+[   79.15] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=54 lu_nnz=2689 fill=1470 upd=0 col_aq=0.0000
+[   79.15] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=181770 fill=108402 upd=14 col_aq=0.0000
+[   79.15] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=73 lu_nnz=2730 fill=1509 upd=0 col_aq=0.0000
+[   79.18] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=560 lu_nnz=29380 fill=14460 upd=0 col_aq=0.0000
+[   79.28] PROGRESS primal iter=4000 t=3.1s obj=3.9807170607e7 dual_infeas=6 bland=false
+[   79.37] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=0 lu_nnz=29380 fill=14460 upd=0 col_aq=0.0000
+[   79.38] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=5 lu_nnz=29380 fill=14460 upd=0 col_aq=0.0000
+[   79.42] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29319 fill=14623 upd=0 col_aq=0.0000
+[   79.43] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29319 fill=14690 upd=3 col_aq=0.0000
+[   79.44] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29319 fill=14692 upd=5 col_aq=0.0000
+[   79.45] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=29319 fill=14723 upd=7 col_aq=0.0000
+[   79.46] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29319 fill=14733 upd=9 col_aq=0.0000
+[   79.47] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=29319 fill=14782 upd=11 col_aq=0.0000
+[   79.48] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29319 fill=14898 upd=20 col_aq=0.0000
+[   79.48] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29319 fill=14920 upd=22 col_aq=0.0000
+[   79.49] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29319 fill=14938 upd=23 col_aq=0.0000
+[   79.50] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29319 fill=14964 upd=25 col_aq=0.0000
+[   79.50] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29319 fill=14971 upd=26 col_aq=0.0000
+[   79.51] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29319 fill=14979 upd=27 col_aq=0.0000
+[   79.52] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=29319 fill=15065 upd=31 col_aq=0.0000
+[   79.53] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29319 fill=15062 upd=34 col_aq=0.0000
+[   79.54] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29319 fill=15133 upd=38 col_aq=0.0000
+[   79.54] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=74 lu_nnz=29319 fill=15143 upd=40 col_aq=0.0000
+[   79.56] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=29071 fill=14475 upd=0 col_aq=0.0000
+[   79.58] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29071 fill=14521 upd=1 col_aq=0.0000
+[   79.59] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=29071 fill=14517 upd=2 col_aq=0.0000
+[   79.63] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28962 fill=14359 upd=0 col_aq=0.0000
+[   79.65] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28962 fill=14373 upd=1 col_aq=0.0000
+[   79.67] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28962 fill=14429 upd=4 col_aq=0.0000
+[   79.67] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=181186 fill=105845 upd=0 col_aq=0.0000
+[   79.69] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=15 lu_nnz=28962 fill=14702 upd=27 col_aq=0.0000
+[   79.70] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28962 fill=14780 upd=30 col_aq=0.0000
+[   79.71] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=28962 fill=14806 upd=33 col_aq=0.0000
+[   79.72] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28962 fill=15353 upd=56 col_aq=0.0000
+[   79.72] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28962 fill=15473 upd=61 col_aq=0.0000
+[   79.74] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28992 fill=14323 upd=0 col_aq=0.0000
+[   79.75] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=28992 fill=14499 upd=8 col_aq=0.0000
+[   79.75] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28992 fill=14517 upd=9 col_aq=0.0000
+[   79.76] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28992 fill=14559 upd=10 col_aq=0.0000
+[   79.76] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28992 fill=14639 upd=15 col_aq=0.0000
+[   79.77] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28992 fill=14728 upd=20 col_aq=0.0000
+[   79.78] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28992 fill=14925 upd=31 col_aq=0.0000
+[   79.79] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=28992 fill=14993 upd=37 col_aq=0.0000
+[   79.79] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=57 lu_nnz=28992 fill=15055 upd=47 col_aq=0.0000
+[   79.79] PROGRESS primal iter=5000 t=3.6s obj=3.9807170606e7 dual_infeas=0 bland=false
+[   79.80] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28992 fill=15573 upd=57 col_aq=0.0000
+[   79.81] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=28992 fill=15580 upd=60 col_aq=0.0000
+[   79.81] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28992 fill=15608 upd=62 col_aq=0.0000
+[   79.82] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28992 fill=15660 upd=63 col_aq=0.0000
+[   79.83] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28887 fill=14295 upd=0 col_aq=0.0000
+[   79.84] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28887 fill=14326 upd=2 col_aq=0.0000
+[   79.84] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28887 fill=14342 upd=3 col_aq=0.0000
+[   79.85] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28887 fill=14352 upd=4 col_aq=0.0000
+[   79.86] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28887 fill=14424 upd=11 col_aq=0.0000
+[   79.86] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28887 fill=14445 upd=12 col_aq=0.0000
+[   79.87] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28887 fill=14477 upd=13 col_aq=0.0000
+[   79.87] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28887 fill=14501 upd=15 col_aq=0.0000
+[   79.88] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=8 lu_nnz=28887 fill=14504 upd=16 col_aq=0.0000
+[   79.89] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28887 fill=14559 upd=18 col_aq=0.0000
+[   79.89] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28887 fill=14569 upd=19 col_aq=0.0000
+[   79.90] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28887 fill=14742 upd=30 col_aq=0.0000
+[   79.90] PROGRESS main iter=1000 t=0.8s phase=B infeasible_rows=1742 lu_nnz=61114 fill=51538 upd=388 col_aq=0.0044
+[   79.91] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28887 fill=14781 upd=35 col_aq=0.0000
+[   79.91] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28887 fill=14904 upd=37 col_aq=0.0000
+[   79.92] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28887 fill=14904 upd=38 col_aq=0.0000
+[   79.92] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28887 fill=14912 upd=39 col_aq=0.0000
+[   79.93] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28887 fill=14995 upd=41 col_aq=0.0000
+[   79.94] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28887 fill=14996 upd=42 col_aq=0.0000
+[   79.94] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28887 fill=15013 upd=43 col_aq=0.0000
+[   79.95] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28887 fill=15056 upd=49 col_aq=0.0000
+[   79.95] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28887 fill=15058 upd=50 col_aq=0.0000
+[   79.96] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28887 fill=15060 upd=51 col_aq=0.0000
+[   79.97] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28887 fill=15073 upd=53 col_aq=0.0000
+[   79.97] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28887 fill=15186 upd=61 col_aq=0.0000
+[   79.99] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28789 fill=14240 upd=0 col_aq=0.0000
+[   80.00] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28789 fill=14329 upd=5 col_aq=0.0000
+[   80.00] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28789 fill=14506 upd=12 col_aq=0.0000
+[   80.01] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28789 fill=14516 upd=13 col_aq=0.0000
+[   80.02] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28789 fill=14544 upd=15 col_aq=0.0000
+[   80.02] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28789 fill=14548 upd=16 col_aq=0.0000
+[   80.03] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28789 fill=14562 upd=17 col_aq=0.0000
+[   80.03] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28789 fill=14567 upd=18 col_aq=0.0000
+[   80.04] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28789 fill=14572 upd=19 col_aq=0.0000
+[   80.05] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28789 fill=14611 upd=21 col_aq=0.0000
+[   80.05] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28789 fill=14618 upd=22 col_aq=0.0000
+[   80.06] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28789 fill=14639 upd=23 col_aq=0.0000
+[   80.06] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28789 fill=14642 upd=24 col_aq=0.0000
+[   80.07] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28789 fill=14653 upd=25 col_aq=0.0000
+[   80.08] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28789 fill=14665 upd=26 col_aq=0.0000
+[   80.08] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28789 fill=14673 upd=27 col_aq=0.0000
+[   80.09] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28789 fill=14681 upd=28 col_aq=0.0000
+[   80.09] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28789 fill=14801 upd=31 col_aq=0.0000
+[   80.10] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=7 lu_nnz=28789 fill=14826 upd=34 col_aq=0.0000
+[   80.11] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28789 fill=14933 upd=38 col_aq=0.0000
+[   80.11] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28789 fill=14941 upd=40 col_aq=0.0000
+[   80.12] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28789 fill=14975 upd=44 col_aq=0.0000
+[   80.12] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28789 fill=14991 upd=45 col_aq=0.0000
+[   80.13] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=28789 fill=15017 upd=46 col_aq=0.0000
+[   80.14] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=28789 fill=15046 upd=48 col_aq=0.0000
+[   80.14] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28789 fill=15077 upd=50 col_aq=0.0000
+[   80.15] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28789 fill=15112 upd=52 col_aq=0.0000
+[   80.15] PROGRESS main iter=2000 t=1.0s phase=B infeasible_rows=229 lu_nnz=61011 fill=29619 upd=806 col_aq=0.0002
+[   80.16] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28789 fill=15129 upd=56 col_aq=0.0000
+[   80.17] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28551 fill=14377 upd=0 col_aq=0.0000
+[   80.17] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28551 fill=14381 upd=1 col_aq=0.0000
+[   80.18] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28551 fill=14399 upd=2 col_aq=0.0000
+[   80.18] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1156 lu_nnz=61231 fill=27756 upd=0 col_aq=0.0000
+[   80.19] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28551 fill=14572 upd=10 col_aq=0.0000
+[   80.19] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28551 fill=14563 upd=12 col_aq=0.0000
+[   80.20] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28551 fill=14566 upd=13 col_aq=0.0000
+[   80.20] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=28551 fill=14587 upd=14 col_aq=0.0000
+[   80.21] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28551 fill=14589 upd=15 col_aq=0.0000
+[   80.22] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28551 fill=14611 upd=17 col_aq=0.0000
+[   80.22] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28551 fill=14610 upd=18 col_aq=0.0000
+[   80.23] PROGRESS main iter=1000 t=2.9s phase=B infeasible_rows=518 lu_nnz=235185 fill=182773 upd=135 col_aq=0.0752
+[   80.23] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28551 fill=14617 upd=19 col_aq=0.0000
+[   80.23] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28551 fill=14628 upd=21 col_aq=0.0000
+[   80.24] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28551 fill=14653 upd=22 col_aq=0.0000
+[   80.25] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28551 fill=14656 upd=23 col_aq=0.0000
+[   80.25] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28551 fill=14659 upd=24 col_aq=0.0000
+[   80.26] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28551 fill=14663 upd=25 col_aq=0.0000
+[   80.26] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28551 fill=14687 upd=26 col_aq=0.0000
+[   80.27] PROGRESS primal iter=6000 t=4.0s obj=3.9807170606e7 dual_infeas=0 bland=false
+[   80.27] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=28551 fill=14771 upd=29 col_aq=0.0000
+[   80.28] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28551 fill=14777 upd=30 col_aq=0.0000
+[   80.28] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28551 fill=14784 upd=31 col_aq=0.0000
+[   80.29] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28551 fill=14792 upd=32 col_aq=0.0000
+[   80.29] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=28551 fill=14804 upd=34 col_aq=0.0000
+[   80.30] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28551 fill=14812 upd=36 col_aq=0.0000
+[   80.31] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28551 fill=14828 upd=37 col_aq=0.0000
+[   80.31] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28551 fill=14831 upd=38 col_aq=0.0000
+[   80.32] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28551 fill=14831 upd=39 col_aq=0.0000
+[   80.33] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28551 fill=14922 upd=44 col_aq=0.0000
+[   80.33] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=102 lu_nnz=28551 fill=14889 upd=45 col_aq=0.0000
+[   80.35] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28538 fill=14399 upd=0 col_aq=0.0000
+[   80.36] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29319 fill=14692 upd=5 col_aq=0.0000
+[   80.37] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=18 lu_nnz=29319 fill=14755 upd=11 col_aq=0.0000
+[   80.43] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28827 fill=14228 upd=0 col_aq=0.0000
+[   80.44] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28827 fill=14241 upd=1 col_aq=0.0000
+[   80.45] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=20 lu_nnz=28827 fill=14241 upd=2 col_aq=0.0000
+[   80.46] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28827 fill=14904 upd=35 col_aq=0.0000
+[   80.46] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=55 lu_nnz=28827 fill=14909 upd=41 col_aq=0.0000
+[   80.48] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=45 lu_nnz=28520 fill=14150 upd=0 col_aq=0.0000
+[   80.49] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28520 fill=14820 upd=55 col_aq=0.0000
+[   80.50] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28520 fill=14825 upd=57 col_aq=0.0000
+[   80.50] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28520 fill=14979 upd=60 col_aq=0.0000
+[   80.51] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=28520 fill=15017 upd=61 col_aq=0.0000
+[   80.52] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28585 fill=14254 upd=0 col_aq=0.0000
+[   80.53] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28585 fill=14288 upd=2 col_aq=0.0000
+[   80.54] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28585 fill=14300 upd=4 col_aq=0.0000
+[   80.55] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28585 fill=14309 upd=7 col_aq=0.0000
+[   80.56] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28585 fill=14401 upd=12 col_aq=0.0000
+[   80.57] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=28585 fill=14405 upd=13 col_aq=0.0000
+[   80.57] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=28585 fill=14407 upd=15 col_aq=0.0000
+[   80.58] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28585 fill=14425 upd=16 col_aq=0.0000
+[   80.58] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=28585 fill=14451 upd=17 col_aq=0.0000
+[   80.59] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28585 fill=14480 upd=18 col_aq=0.0000
+[   80.60] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28585 fill=14482 upd=19 col_aq=0.0000
+[   80.60] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28585 fill=14483 upd=20 col_aq=0.0000
+[   80.61] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=28585 fill=14514 upd=24 col_aq=0.0000
+[   80.62] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28585 fill=14698 upd=40 col_aq=0.0000
+[   80.63] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=28585 fill=14976 upd=51 col_aq=0.0000
+[   80.63] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28585 fill=15130 upd=57 col_aq=0.0000
+[   80.64] PROGRESS main iter=1000 t=0.5s phase=B infeasible_rows=217 lu_nnz=61091 fill=31592 upd=395 col_aq=0.0004
+[   80.64] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=28585 fill=15185 upd=58 col_aq=0.0000
+[   80.64] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28585 fill=15274 upd=60 col_aq=0.0000
+[   80.65] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28585 fill=15307 upd=61 col_aq=0.0000
+[   80.66] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=110 lu_nnz=28461 fill=14258 upd=0 col_aq=0.0000
+[   80.67] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=28461 fill=14247 upd=2 col_aq=0.0000
+[   80.67] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=28461 fill=14426 upd=12 col_aq=0.0000
+[   80.68] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28461 fill=14575 upd=22 col_aq=0.0000
+[   80.69] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28461 fill=14596 upd=23 col_aq=0.0000
+[   80.69] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=28461 fill=14604 upd=24 col_aq=0.0000
+[   80.70] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=28461 fill=14613 upd=25 col_aq=0.0000
+[   80.71] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28461 fill=14806 upd=30 col_aq=0.0000
+[   80.71] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=5 lu_nnz=28461 fill=14837 upd=31 col_aq=0.0000
+[   80.72] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=28461 fill=14862 upd=38 col_aq=0.0000
+[   80.73] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28461 fill=14894 upd=39 col_aq=0.0000
+[   80.73] PROGRESS primal iter=0 t=0.0s obj=-7.0679400559e7 dual_infeas=0 bland=false
+[   80.73] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=28461 fill=14913 upd=41 col_aq=0.0000
+[   80.74] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=28461 fill=14974 upd=48 col_aq=0.0000
+[   80.75] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=28461 fill=14977 upd=49 col_aq=0.0000
+[   80.75] PROGRESS primal iter=7000 t=4.5s obj=3.9807170606e7 dual_infeas=0 bland=false
+[   80.76] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28461 fill=15111 upd=57 col_aq=0.0000
+[   80.77] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28380 fill=14254 upd=0 col_aq=0.0000
+[   80.77] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3396 lu_nnz=64407 fill=29766 upd=0 col_aq=0.0000
+[   80.77] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=28380 fill=14273 upd=3 col_aq=0.0000
+[   80.78] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=28380 fill=14287 upd=5 col_aq=0.0000
+[   80.78] PROGRESS main iter=1000 t=0.0s phase=B infeasible_rows=1289 lu_nnz=64407 fill=33215 upd=1000 col_aq=0.0001
+[   80.79] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28380 fill=14294 upd=8 col_aq=0.0000
+[   80.79] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28827 fill=14241 upd=2 col_aq=0.0000
+[   80.81] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28827 fill=15109 upd=41 col_aq=0.0000
+[   80.82] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28827 fill=15135 upd=42 col_aq=0.0000
+[   80.83] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28827 fill=15321 upd=50 col_aq=0.0000
+[   80.84] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28827 fill=15353 upd=51 col_aq=0.0000
+[   80.86] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29393 fill=14441 upd=0 col_aq=0.0000
+[   80.88] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=905 lu_nnz=29393 fill=14985 upd=24 col_aq=0.0000
+[   80.98] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29393 fill=14985 upd=24 col_aq=0.0000
+[   81.02] CUTMIX clique edges total 449 rows 224 implonly 225 implpairs 829 bin 200
+[   81.04] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29427 fill=14512 upd=0 col_aq=0.0000
+[   81.05] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29427 fill=14891 upd=14 col_aq=0.0000
+[   81.06] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=445 lu_nnz=1111 fill=0 upd=0 col_aq=0.0000
+[   81.06] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29427 fill=14977 upd=16 col_aq=0.0000
+[   81.07] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29427 fill=15303 upd=32 col_aq=0.0000
+[   81.08] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=29427 fill=15548 upd=44 col_aq=0.0000
+[   81.09] MIP: fixed-charge check: vb rows 874 of 1111, continuous with vb 437 of 1734
+[   81.09] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29427 fill=15816 upd=51 col_aq=0.0000
+[   81.09] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=18 lu_nnz=2918 fill=1595 upd=0 col_aq=0.0000
+[   81.10] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29427 fill=16246 upd=63 col_aq=0.0000
+[   81.12] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29351 fill=14585 upd=0 col_aq=0.0000
+[   81.12] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=18 lu_nnz=2936 fill=1629 upd=0 col_aq=0.0000
+[   81.12] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29351 fill=14604 upd=1 col_aq=0.0000
+[   81.14] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=29351 fill=14924 upd=21 col_aq=0.0000
+[   81.14] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=24 lu_nnz=2924 fill=1627 upd=0 col_aq=0.0000
+[   81.15] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=29351 fill=15284 upd=34 col_aq=0.0000
+[   81.15] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=13 lu_nnz=3022 fill=1694 upd=0 col_aq=0.0000
+[   81.16] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29351 fill=15282 upd=36 col_aq=0.0000
+[   81.17] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=29351 fill=16204 upd=60 col_aq=0.0000
+[   81.17] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=3041 fill=1705 upd=0 col_aq=0.0000
+[   81.18] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29334 fill=14508 upd=0 col_aq=0.0000
+[   81.19] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=10 lu_nnz=3067 fill=1728 upd=0 col_aq=0.0000
+[   81.19] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29334 fill=14665 upd=3 col_aq=0.0000
+[   81.20] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=13 lu_nnz=3102 fill=1757 upd=0 col_aq=0.0000
+[   81.20] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=29334 fill=14715 upd=7 col_aq=0.0000
+[   81.21] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=0 lu_nnz=3102 fill=1966 upd=29 col_aq=0.0000
+[   81.21] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=263 lu_nnz=3102 fill=1966 upd=29 col_aq=0.0000
+[   81.21] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29334 fill=14745 upd=10 col_aq=0.0000
+[   81.23] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=263 lu_nnz=3102 fill=1966 upd=29 col_aq=0.0000
+[   81.23] PROGRESS primal iter=8000 t=5.0s obj=3.9807170606e7 dual_infeas=0 bland=false
+[   81.24] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=328 lu_nnz=3102 fill=1966 upd=29 col_aq=0.0000
+[   81.25] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29176 fill=14564 upd=0 col_aq=0.0000
+[   81.25] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=396 lu_nnz=2923 fill=1674 upd=0 col_aq=0.0000
+[   81.26] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=0 lu_nnz=3102 fill=1966 upd=29 col_aq=0.0000
+[   81.26] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3102 fill=1966 upd=29 col_aq=0.0000
+[   81.27] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29176 fill=15664 upd=37 col_aq=0.0000
+[   81.27] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=3102 fill=1970 upd=30 col_aq=0.0000
+[   81.28] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3064 fill=1736 upd=0 col_aq=0.0000
+[   81.28] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=3064 fill=1735 upd=1 col_aq=0.0000
+[   81.29] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=29252 fill=14521 upd=0 col_aq=0.0000
+[   81.29] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3064 fill=1759 upd=3 col_aq=0.0000
+[   81.29] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3064 fill=1782 upd=5 col_aq=0.0000
+[   81.30] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=3064 fill=1780 upd=6 col_aq=0.0000
+[   81.30] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3064 fill=1779 upd=7 col_aq=0.0000
+[   81.30] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3064 fill=1779 upd=8 col_aq=0.0000
+[   81.31] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=3045 fill=1732 upd=0 col_aq=0.0000
+[   81.31] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29252 fill=14827 upd=5 col_aq=0.0000
+[   81.32] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3045 fill=1735 upd=1 col_aq=0.0000
+[   81.32] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=3045 fill=1734 upd=2 col_aq=0.0000
+[   81.33] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=21 lu_nnz=3045 fill=1733 upd=3 col_aq=0.0000
+[   81.33] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=3045 fill=1769 upd=22 col_aq=0.0000
+[   81.34] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3045 fill=1770 upd=23 col_aq=0.0000
+[   81.34] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3045 fill=1772 upd=24 col_aq=0.0000
+[   81.35] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3045 fill=1773 upd=26 col_aq=0.0000
+[   81.35] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=3045 fill=1776 upd=28 col_aq=0.0000
+[   81.35] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3045 fill=1773 upd=29 col_aq=0.0000
+[   81.36] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=3045 fill=1775 upd=31 col_aq=0.0000
+[   81.36] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3045 fill=1774 upd=32 col_aq=0.0000
+[   81.37] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3045 fill=1775 upd=34 col_aq=0.0000
+[   81.38] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3045 fill=1775 upd=35 col_aq=0.0000
+[   81.38] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3045 fill=1778 upd=36 col_aq=0.0000
+[   81.38] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=3045 fill=1778 upd=37 col_aq=0.0000
+[   81.39] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3045 fill=1782 upd=39 col_aq=0.0000
+[   81.39] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=29583 fill=14983 upd=0 col_aq=0.0000
+[   81.39] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3045 fill=1787 upd=41 col_aq=0.0000
+[   81.40] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3045 fill=1786 upd=42 col_aq=0.0000
+[   81.40] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3045 fill=1785 upd=43 col_aq=0.0000
+[   81.41] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3045 fill=1783 upd=44 col_aq=0.0000
+[   81.41] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=77 lu_nnz=3045 fill=1781 upd=45 col_aq=0.0000
+[   81.42] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3064 fill=1735 upd=1 col_aq=0.0000
+[   81.42] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3064 fill=1733 upd=2 col_aq=0.0000
+[   81.43] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3064 fill=1730 upd=3 col_aq=0.0000
+[   81.44] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3064 fill=1732 upd=4 col_aq=0.0000
+[   81.44] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=3064 fill=1732 upd=5 col_aq=0.0000
+[   81.45] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3064 fill=1755 upd=7 col_aq=0.0000
+[   81.45] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=89 lu_nnz=3064 fill=1777 upd=9 col_aq=0.0000
+[   81.46] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3038 fill=1714 upd=0 col_aq=0.0000
+[   81.46] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3038 fill=1715 upd=1 col_aq=0.0000
+[   81.47] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3038 fill=1719 upd=2 col_aq=0.0000
+[   81.47] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3038 fill=1725 upd=3 col_aq=0.0000
+[   81.47] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=29583 fill=14983 upd=0 col_aq=0.0000
+[   81.48] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=3038 fill=1727 upd=4 col_aq=0.0000
+[   81.48] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3038 fill=1724 upd=5 col_aq=0.0000
+[   81.49] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=3038 fill=1721 upd=6 col_aq=0.0000
+[   81.49] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=3038 fill=1733 upd=8 col_aq=0.0000
+[   81.49] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3038 fill=1736 upd=9 col_aq=0.0000
+[   81.50] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=3038 fill=1733 upd=10 col_aq=0.0000
+[   81.50] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3038 fill=1736 upd=14 col_aq=0.0000
+[   81.51] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=3038 fill=1733 upd=15 col_aq=0.0000
+[   81.51] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3038 fill=1737 upd=19 col_aq=0.0000
+[   81.52] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3038 fill=1744 upd=20 col_aq=0.0000
+[   81.52] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3038 fill=1742 upd=21 col_aq=0.0000
+[   81.53] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3038 fill=1746 upd=22 col_aq=0.0000
+[   81.53] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=3038 fill=1743 upd=23 col_aq=0.0000
+[   81.53] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3038 fill=1747 upd=27 col_aq=0.0000
+[   81.54] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3038 fill=1754 upd=28 col_aq=0.0000
+[   81.54] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3038 fill=1753 upd=29 col_aq=0.0000
+[   81.55] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3038 fill=1754 upd=32 col_aq=0.0000
+[   81.55] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=378 lu_nnz=3038 fill=1760 upd=35 col_aq=0.0000
+[   81.56] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3107 fill=1776 upd=0 col_aq=0.0000
+[   81.57] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=29583 fill=14983 upd=0 col_aq=0.0000
+[   81.57] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=325 lu_nnz=3107 fill=1794 upd=2 col_aq=0.0000
+[   81.58] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=325 lu_nnz=3107 fill=1794 upd=2 col_aq=0.0000
+[   81.58] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29583 fill=15165 upd=12 col_aq=0.0000
+[   81.58] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=3107 fill=1794 upd=2 col_aq=0.0000
+[   81.59] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=29583 fill=15209 upd=17 col_aq=0.0000
+[   81.59] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3107 fill=2024 upd=42 col_aq=0.0000
+[   81.59] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=106 lu_nnz=3107 fill=2029 upd=43 col_aq=0.0000
+[   81.60] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29583 fill=15821 upd=40 col_aq=0.0000
+[   81.60] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=3048 fill=1694 upd=0 col_aq=0.0000
+[   81.61] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=3048 fill=1693 upd=1 col_aq=0.0000
+[   81.61] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29583 fill=15837 upd=41 col_aq=0.0000
+[   81.61] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3048 fill=1693 upd=2 col_aq=0.0000
+[   81.62] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=3048 fill=1718 upd=6 col_aq=0.0000
+[   81.62] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29583 fill=15915 upd=43 col_aq=0.0000
+[   81.62] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=3048 fill=1726 upd=7 col_aq=0.0000
+[   81.63] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=3048 fill=1726 upd=8 col_aq=0.0000
+[   81.63] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29583 fill=15932 upd=44 col_aq=0.0000
+[   81.63] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3048 fill=1725 upd=9 col_aq=0.0000
+[   81.64] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3048 fill=1724 upd=10 col_aq=0.0000
+[   81.64] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3048 fill=1728 upd=12 col_aq=0.0000
+[   81.64] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=18 lu_nnz=29388 fill=14433 upd=0 col_aq=0.0000
+[   81.64] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3048 fill=1728 upd=13 col_aq=0.0000
+[   81.65] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=3048 fill=1742 upd=14 col_aq=0.0000
+[   81.65] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3048 fill=1748 upd=15 col_aq=0.0000
+[   81.66] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=3048 fill=1755 upd=17 col_aq=0.0000
+[   81.66] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=3048 fill=1756 upd=18 col_aq=0.0000
+[   81.67] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=3048 fill=1770 upd=20 col_aq=0.0000
+[   81.67] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=3048 fill=1771 upd=21 col_aq=0.0000
+[   81.67] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3048 fill=1772 upd=22 col_aq=0.0000
+[   81.68] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=3048 fill=1779 upd=24 col_aq=0.0000
+[   81.68] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=43 lu_nnz=3048 fill=1780 upd=25 col_aq=0.0000
+[   81.68] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=91 lu_nnz=3048 fill=1936 upd=57 col_aq=0.0000
+[   81.69] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=15 lu_nnz=2985 fill=1678 upd=0 col_aq=0.0000
+[   81.70] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=21 lu_nnz=3107 fill=2029 upd=43 col_aq=0.0000
+[   81.70] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=3111 fill=1774 upd=0 col_aq=0.0000
+[   81.71] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=29028 fill=14096 upd=0 col_aq=0.0000
+[   81.71] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=317 lu_nnz=3111 fill=2025 upd=41 col_aq=0.0000
+[   81.72] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=317 lu_nnz=3111 fill=2025 upd=41 col_aq=0.0000
+[   81.72] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=21 lu_nnz=3111 fill=2025 upd=41 col_aq=0.0000
+[   81.72] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29028 fill=14384 upd=11 col_aq=0.0000
+[   81.73] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=3111 fill=2062 upd=59 col_aq=0.0000
+[   81.73] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3111 fill=2068 upd=60 col_aq=0.0000
+[   81.74] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=3044 fill=1702 upd=0 col_aq=0.0000
+[   81.74] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3044 fill=1701 upd=1 col_aq=0.0000
+[   81.74] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3044 fill=1717 upd=5 col_aq=0.0000
+[   81.74] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29028 fill=15386 upd=44 col_aq=0.0000
+[   81.75] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3044 fill=1716 upd=6 col_aq=0.0000
+[   81.75] PROGRESS primal iter=9000 t=5.5s obj=3.9807170606e7 dual_infeas=0 bland=false
+[   81.75] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3044 fill=1713 upd=7 col_aq=0.0000
+[   81.76] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29028 fill=15482 upd=48 col_aq=0.0000
+[   81.76] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=3044 fill=1776 upd=13 col_aq=0.0000
+[   81.76] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3024 fill=1695 upd=0 col_aq=0.0000
+[   81.77] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=29028 fill=15959 upd=57 col_aq=0.0000
+[   81.77] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3024 fill=1695 upd=4 col_aq=0.0000
+[   81.77] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3024 fill=1696 upd=5 col_aq=0.0000
+[   81.78] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=3024 fill=1694 upd=6 col_aq=0.0000
+[   81.78] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=21 lu_nnz=3024 fill=1693 upd=7 col_aq=0.0000
+[   81.79] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2970 fill=1648 upd=0 col_aq=0.0000
+[   81.79] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28953 fill=14126 upd=0 col_aq=0.0000
+[   81.79] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=2970 fill=1653 upd=1 col_aq=0.0000
+[   81.79] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=2970 fill=1654 upd=2 col_aq=0.0000
+[   81.80] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28953 fill=14169 upd=2 col_aq=0.0000
+[   81.80] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2970 fill=1654 upd=4 col_aq=0.0000
+[   81.80] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=2970 fill=1651 upd=5 col_aq=0.0000
+[   81.80] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=35 lu_nnz=2970 fill=1650 upd=6 col_aq=0.0000
+[   81.81] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=99 lu_nnz=2970 fill=1793 upd=40 col_aq=0.0000
+[   81.81] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=28953 fill=14419 upd=18 col_aq=0.0000
+[   81.81] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=3107 fill=1770 upd=0 col_aq=0.0000
+[   81.82] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=204 lu_nnz=3107 fill=2048 upd=58 col_aq=0.0000
+[   81.83] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=204 lu_nnz=3107 fill=2048 upd=58 col_aq=0.0000
+[   81.83] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3049 fill=1734 upd=0 col_aq=0.0000
+[   81.84] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=191 lu_nnz=3049 fill=1736 upd=2 col_aq=0.0000
+[   81.84] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28825 fill=14112 upd=0 col_aq=0.0000
+[   81.85] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=192 lu_nnz=3049 fill=1736 upd=2 col_aq=0.0000
+[   81.85] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=3049 fill=1736 upd=2 col_aq=0.0000
+[   81.85] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3049 fill=1737 upd=3 col_aq=0.0000
+[   81.85] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28825 fill=14117 upd=1 col_aq=0.0000
+[   81.86] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3049 fill=1739 upd=4 col_aq=0.0000
+[   81.86] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=3049 fill=1737 upd=5 col_aq=0.0000
+[   81.86] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3049 fill=1736 upd=6 col_aq=0.0000
+[   81.87] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28825 fill=14311 upd=12 col_aq=0.0000
+[   81.87] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3049 fill=1743 upd=8 col_aq=0.0000
+[   81.88] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3035 fill=1724 upd=0 col_aq=0.0000
+[   81.88] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=28825 fill=14334 upd=13 col_aq=0.0000
+[   81.88] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=3035 fill=1741 upd=2 col_aq=0.0000
+[   81.88] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=21 lu_nnz=3035 fill=1744 upd=4 col_aq=0.0000
+[   81.89] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=156 lu_nnz=3035 fill=1864 upd=63 col_aq=0.0000
+[   81.89] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3048 fill=1732 upd=0 col_aq=0.0000
+[   81.90] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=191 lu_nnz=3048 fill=1733 upd=2 col_aq=0.0000
+[   81.91] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=191 lu_nnz=3048 fill=1733 upd=2 col_aq=0.0000
+[   81.91] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3047 fill=1730 upd=0 col_aq=0.0000
+[   81.92] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=192 lu_nnz=3047 fill=1732 upd=2 col_aq=0.0000
+[   81.92] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=192 lu_nnz=3047 fill=1732 upd=2 col_aq=0.0000
+[   81.93] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28916 fill=14170 upd=0 col_aq=0.0000
+[   81.93] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3106 fill=1768 upd=0 col_aq=0.0000
+[   81.93] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=314 lu_nnz=3106 fill=1774 upd=2 col_aq=0.0000
+[   81.94] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28916 fill=14307 upd=5 col_aq=0.0000
+[   81.94] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=314 lu_nnz=3106 fill=1774 upd=2 col_aq=0.0000
+[   81.94] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=117 lu_nnz=3106 fill=1774 upd=2 col_aq=0.0000
+[   81.95] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28916 fill=14414 upd=10 col_aq=0.0000
+[   81.95] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=21 lu_nnz=3106 fill=1774 upd=2 col_aq=0.0000
+[   81.96] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3106 fill=1819 upd=22 col_aq=0.0000
+[   81.96] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=3106 fill=1815 upd=23 col_aq=0.0000
+[   81.96] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28916 fill=14661 upd=23 col_aq=0.0000
+[   81.97] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=13 lu_nnz=3106 fill=1816 upd=24 col_aq=0.0000
+[   81.97] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3047 fill=1730 upd=0 col_aq=0.0000
+[   81.98] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=192 lu_nnz=3047 fill=1730 upd=1 col_aq=0.0000
+[   81.98] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=28916 fill=15666 upd=48 col_aq=0.0000
+[   81.98] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3055 fill=1735 upd=0 col_aq=0.0000
+[   81.99] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=28916 fill=15733 upd=52 col_aq=0.0000
+[   81.99] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=194 lu_nnz=3055 fill=1734 upd=2 col_aq=0.0000
+[   82.00] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=194 lu_nnz=3055 fill=1734 upd=2 col_aq=0.0000
+[   82.01] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3058 fill=1738 upd=0 col_aq=0.0000
+[   82.01] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=197 lu_nnz=3058 fill=1742 upd=3 col_aq=0.0000
+[   82.02] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=197 lu_nnz=3058 fill=1742 upd=3 col_aq=0.0000
+[   82.02] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=3100 fill=1764 upd=0 col_aq=0.0000
+[   82.03] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=314 lu_nnz=3100 fill=1773 upd=1 col_aq=0.0000
+[   82.04] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=314 lu_nnz=3100 fill=1773 upd=1 col_aq=0.0000
+[   82.04] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=3100 fill=1773 upd=1 col_aq=0.0000
+[   82.05] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=23 lu_nnz=3100 fill=1777 upd=2 col_aq=0.0000
+[   82.05] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=3100 fill=1830 upd=22 col_aq=0.0000
+[   82.06] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3100 fill=1835 upd=24 col_aq=0.0000
+[   82.06] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3100 fill=1859 upd=26 col_aq=0.0000
+[   82.06] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=15 lu_nnz=3100 fill=1864 upd=28 col_aq=0.0000
+[   82.07] MIP:   parallel sub-MIP (RENS): status NodeLimit, nodes 62, objective Some(8133650.163082068), 10.93s
+[   82.08] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3062 fill=1738 upd=0 col_aq=0.0000
+[   82.08] MIP: fixed-integer LP dual check: c x 8.0490737825e6, dual bound 8.0310833588e6 -> solve
+[   82.08] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=200 lu_nnz=3062 fill=1740 upd=2 col_aq=0.0000
+[   82.09] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=200 lu_nnz=3062 fill=1740 upd=2 col_aq=0.0000
+[   82.09] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2999 fill=1666 upd=0 col_aq=0.0000
+[   82.10] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=203 lu_nnz=2999 fill=1667 upd=1 col_aq=0.0000
+[   82.10] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1991 lu_nnz=184554 fill=106239 upd=0 col_aq=0.0000
+[   82.10] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=203 lu_nnz=2999 fill=1667 upd=1 col_aq=0.0000
+[   82.11] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=2998 fill=1666 upd=0 col_aq=0.0000
+[   82.12] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=200 lu_nnz=2998 fill=1665 upd=1 col_aq=0.0000
+[   82.12] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=3100 fill=1770 upd=0 col_aq=0.0000
+[   82.13] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=314 lu_nnz=3100 fill=1777 upd=1 col_aq=0.0000
+[   82.13] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=314 lu_nnz=3100 fill=1777 upd=1 col_aq=0.0000
+[   82.14] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=3100 fill=1777 upd=1 col_aq=0.0000
+[   82.14] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=3100 fill=1781 upd=2 col_aq=0.0000
+[   82.15] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=25 lu_nnz=3100 fill=1786 upd=3 col_aq=0.0000
+[   82.15] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3100 fill=1840 upd=22 col_aq=0.0000
+[   82.16] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3100 fill=1842 upd=24 col_aq=0.0000
+[   82.16] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=3100 fill=1845 upd=25 col_aq=0.0000
+[   82.16] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3100 fill=1848 upd=26 col_aq=0.0000
+[   82.17] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3100 fill=1848 upd=27 col_aq=0.0000
+[   82.17] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3100 fill=1857 upd=29 col_aq=0.0000
+[   82.18] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3100 fill=1859 upd=30 col_aq=0.0000
+[   82.18] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=93 lu_nnz=3100 fill=1857 upd=31 col_aq=0.0000
+[   82.19] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3001 fill=1669 upd=0 col_aq=0.0000
+[   82.20] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=197 lu_nnz=3001 fill=1668 upd=2 col_aq=0.0000
+[   82.20] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=197 lu_nnz=3001 fill=1668 upd=2 col_aq=0.0000
+[   82.21] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=3001 fill=1669 upd=0 col_aq=0.0000
+[   82.21] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=3029 fill=1705 upd=0 col_aq=0.0000
+[   82.22] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=275 lu_nnz=3029 fill=1714 upd=2 col_aq=0.0000
+[   82.22] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=13 lu_nnz=3029 fill=1714 upd=2 col_aq=0.0000
+[   82.23] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=61 lu_nnz=3027 fill=1705 upd=0 col_aq=0.0000
+[   82.24] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=11 lu_nnz=3106 fill=1770 upd=0 col_aq=0.0000
+[   82.24] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=19 lu_nnz=3106 fill=1904 upd=31 col_aq=0.0000
+[   82.25] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=71 lu_nnz=3016 fill=1673 upd=0 col_aq=0.0000
+[   82.25] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=21 lu_nnz=3016 fill=2006 upd=50 col_aq=0.0000
+[   82.26] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=68 lu_nnz=2947 fill=1606 upd=0 col_aq=0.0000
+[   82.26] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=21 lu_nnz=3015 fill=1679 upd=0 col_aq=0.0000
+[   82.27] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=157 lu_nnz=2944 fill=1610 upd=0 col_aq=0.0000
+[   82.28] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=22 lu_nnz=3005 fill=1670 upd=0 col_aq=0.0000
+[   82.28] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=13 lu_nnz=3099 fill=1769 upd=0 col_aq=0.0000
+[   82.29] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=259 lu_nnz=3099 fill=1861 upd=29 col_aq=0.0000
+[   82.30] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=259 lu_nnz=3099 fill=1861 upd=29 col_aq=0.0000
+[   82.30] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=3099 fill=1861 upd=29 col_aq=0.0000
+[   82.31] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=112 lu_nnz=2953 fill=1600 upd=0 col_aq=0.0000
+[   82.32] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=108 lu_nnz=3099 fill=1861 upd=29 col_aq=0.0000
+[   82.34] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=752 lu_nnz=61231 fill=27756 upd=0 col_aq=0.0000
+[   82.44] PROGRESS primal iter=10000 t=6.2s obj=3.9807170606e7 dual_infeas=0 bland=false
+[   82.66] PROGRESS main iter=1000 t=0.3s phase=B infeasible_rows=234 lu_nnz=62561 fill=37181 upd=364 col_aq=0.0049
+[   82.72] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=0 lu_nnz=61231 fill=27756 upd=0 col_aq=0.0000
+[   82.73] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61231 fill=27756 upd=0 col_aq=0.0000
+[   82.75] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=66 lu_nnz=61231 fill=28094 upd=28 col_aq=0.0000
+[   82.84] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=27535 upd=0 col_aq=0.0000
+[   82.85] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=27549 upd=3 col_aq=0.0000
+[   82.86] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=27636 upd=5 col_aq=0.0000
+[   82.87] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=27659 upd=6 col_aq=0.0000
+[   82.88] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=27691 upd=7 col_aq=0.0000
+[   82.89] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=27709 upd=8 col_aq=0.0000
+[   82.90] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=27732 upd=9 col_aq=0.0000
+[   82.91] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=0 lu_nnz=223753 fill=133634 upd=0 col_aq=0.0000
+[   82.91] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=27739 upd=10 col_aq=0.0000
+[   82.92] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=27747 upd=11 col_aq=0.0000
+[   82.93] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=27746 upd=12 col_aq=0.0000
+[   82.94] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=27748 upd=13 col_aq=0.0000
+[   82.94] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=27781 upd=14 col_aq=0.0000
+[   82.95] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=27789 upd=15 col_aq=0.0000
+[   82.96] PROGRESS primal iter=11000 t=6.7s obj=3.9807170606e7 dual_infeas=0 bland=false
+[   82.96] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=27788 upd=16 col_aq=0.0000
+[   82.97] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=27789 upd=17 col_aq=0.0000
+[   82.98] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=61292 fill=27789 upd=18 col_aq=0.0000
+[   82.99] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=61292 fill=27818 upd=20 col_aq=0.0000
+[   83.00] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=27832 upd=22 col_aq=0.0000
+[   83.00] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=61292 fill=27872 upd=24 col_aq=0.0000
+[   83.01] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=27883 upd=27 col_aq=0.0000
+[   83.02] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=27925 upd=28 col_aq=0.0000
+[   83.03] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=27932 upd=30 col_aq=0.0000
+[   83.04] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=27945 upd=31 col_aq=0.0000
+[   83.05] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=27948 upd=33 col_aq=0.0000
+[   83.06] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=61292 fill=27957 upd=34 col_aq=0.0000
+[   83.06] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=27964 upd=35 col_aq=0.0000
+[   83.07] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=28167 upd=36 col_aq=0.0000
+[   83.08] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=28255 upd=39 col_aq=0.0000
+[   83.09] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=61292 fill=28265 upd=41 col_aq=0.0000
+[   83.10] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=28266 upd=42 col_aq=0.0000
+[   83.11] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=28292 upd=43 col_aq=0.0000
+[   83.15] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61531 fill=27839 upd=0 col_aq=0.0000
+[   83.17] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61531 fill=28002 upd=29 col_aq=0.0000
+[   83.18] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61531 fill=28205 upd=42 col_aq=0.0000
+[   83.20] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61531 fill=28476 upd=55 col_aq=0.0000
+[   83.21] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61531 fill=28803 upd=60 col_aq=0.0000
+[   83.22] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61531 fill=28832 upd=61 col_aq=0.0000
+[   83.23] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61531 fill=28874 upd=62 col_aq=0.0000
+[   83.24] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61531 fill=28898 upd=63 col_aq=0.0000
+[   83.26] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61561 fill=27971 upd=0 col_aq=0.0000
+[   83.27] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61561 fill=28034 upd=2 col_aq=0.0000
+[   83.28] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61561 fill=28043 upd=3 col_aq=0.0000
+[   83.29] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61561 fill=28042 upd=4 col_aq=0.0000
+[   83.29] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61561 fill=28041 upd=5 col_aq=0.0000
+[   83.30] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=61561 fill=28042 upd=6 col_aq=0.0000
+[   83.31] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=61561 fill=28052 upd=8 col_aq=0.0000
+[   83.32] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61561 fill=28095 upd=11 col_aq=0.0000
+[   83.33] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=61561 fill=28097 upd=12 col_aq=0.0000
+[   83.34] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61561 fill=28105 upd=26 col_aq=0.0000
+[   83.35] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61561 fill=28125 upd=27 col_aq=0.0000
+[   83.36] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61561 fill=28087 upd=28 col_aq=0.0000
+[   83.37] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61561 fill=28096 upd=29 col_aq=0.0000
+[   83.38] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=61561 fill=28100 upd=30 col_aq=0.0000
+[   83.52] PROGRESS primal iter=12000 t=7.3s obj=3.9807170606e7 dual_infeas=0 bland=false
+[   83.60] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=62490 fill=28638 upd=0 col_aq=0.0000
+[   83.61] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=62490 fill=28685 upd=4 col_aq=0.0000
+[   83.62] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=62490 fill=28737 upd=6 col_aq=0.0000
+[   83.63] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=62490 fill=28786 upd=8 col_aq=0.0000
+[   83.65] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=62490 fill=29045 upd=32 col_aq=0.0000
+[   83.66] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=62490 fill=29220 upd=38 col_aq=0.0000
+[   83.67] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=62490 fill=29274 upd=41 col_aq=0.0000
+[   83.69] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=30 lu_nnz=62490 fill=29812 upd=59 col_aq=0.0000
+[   83.78] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=27549 upd=3 col_aq=0.0000
+[   83.79] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=27586 upd=7 col_aq=0.0000
+[   83.81] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=27591 upd=8 col_aq=0.0000
+[   83.82] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=27686 upd=12 col_aq=0.0000
+[   83.83] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=27864 upd=16 col_aq=0.0000
+[   83.85] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=27899 upd=18 col_aq=0.0000
+[   83.86] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=27908 upd=19 col_aq=0.0000
+[   83.87] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=61292 fill=27914 upd=20 col_aq=0.0000
+[   83.88] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=28245 upd=38 col_aq=0.0000
+[   83.89] PROGRESS main iter=1000 t=1.8s phase=B infeasible_rows=1320 lu_nnz=194967 fill=125191 upd=99 col_aq=0.0366
+[   83.90] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=28419 upd=44 col_aq=0.0000
+[   83.91] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61292 fill=28462 upd=45 col_aq=0.0000
+[   83.94] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61193 fill=27781 upd=0 col_aq=0.0000
+[   83.95] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61193 fill=27820 upd=1 col_aq=0.0000
+[   83.97] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61193 fill=27836 upd=2 col_aq=0.0000
+[   83.99] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=61193 fill=28310 upd=41 col_aq=0.0000
+[   84.08] PROGRESS primal iter=13000 t=7.9s obj=3.9807170606e7 dual_infeas=0 bland=false
+[   84.12] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61413 fill=28015 upd=0 col_aq=0.0000
+[   84.14] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61413 fill=28059 upd=2 col_aq=0.0000
+[   84.15] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61413 fill=28062 upd=3 col_aq=0.0000
+[   84.17] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61413 fill=28092 upd=5 col_aq=0.0000
+[   84.18] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61413 fill=28099 upd=6 col_aq=0.0000
+[   84.19] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=61413 fill=28116 upd=7 col_aq=0.0000
+[   84.20] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61413 fill=28116 upd=7 col_aq=0.0000
+[   84.21] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61413 fill=28181 upd=9 col_aq=0.0000
+[   84.23] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61413 fill=28476 upd=20 col_aq=0.0000
+[   84.24] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61413 fill=28506 upd=23 col_aq=0.0000
+[   84.25] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61413 fill=28585 upd=25 col_aq=0.0000
+[   84.27] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61413 fill=29371 upd=45 col_aq=0.0000
+[   84.28] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61413 fill=29388 upd=46 col_aq=0.0000
+[   84.30] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61413 fill=29562 upd=52 col_aq=0.0000
+[   84.31] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61413 fill=29667 upd=56 col_aq=0.0000
+[   84.34] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61436 fill=28046 upd=0 col_aq=0.0000
+[   84.36] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61436 fill=28073 upd=2 col_aq=0.0000
+[   84.37] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61436 fill=28097 upd=3 col_aq=0.0000
+[   84.38] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=61436 fill=28147 upd=8 col_aq=0.0000
+[   84.39] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=61436 fill=28413 upd=16 col_aq=0.0000
+[   84.41] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=5 lu_nnz=61436 fill=28445 upd=17 col_aq=0.0000
+[   84.42] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=61436 fill=28610 upd=25 col_aq=0.0000
+[   84.43] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=74 lu_nnz=61436 fill=28854 upd=32 col_aq=0.0000
+[   84.61] PROGRESS primal iter=14000 t=8.4s obj=3.9807170606e7 dual_infeas=0 bland=false
+[   84.88] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=11437 lu_nnz=29613 fill=0 upd=0 col_aq=0.0000
+[   84.93] MIP:   global fixed integers 3054 of 43524 (newly 705 since the root LP)
+[   84.93] MIP: new incumbent 8.1336501631e6 at node 0 (79.87s) [RENS]
+[   84.93] MIP:   parallel sub-MIP (vbounds (loose)): time limit 88.91s cut to the remaining 75.47s
+[   84.93] MIP:   parallel sub-MIP started (vbounds (loose)): 16923 free columns of 59708
+[   84.93] MIP: root heuristic vbounds (loose): none (13.62s)
+[   84.95] PROGRESS main iter=1000 t=0.1s phase=B infeasible_rows=1908 lu_nnz=31467 fill=1856 upd=127 col_aq=0.0002
+[   84.96] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=200 lu_nnz=240397 fill=159177 upd=0 col_aq=0.0000
+[   84.97] MIP:   parallel sub-MIP (vbounds (loose)): status Infeasible, nodes 0, objective None, 0.03s
+[   84.97] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=11437 lu_nnz=29613 fill=0 upd=0 col_aq=0.0000
+[   85.04] PROGRESS main iter=1000 t=0.1s phase=B infeasible_rows=1908 lu_nnz=31467 fill=1856 upd=127 col_aq=0.0002
+[   85.12] PROGRESS main iter=2000 t=0.2s phase=B infeasible_rows=1538 lu_nnz=33570 fill=3338 upd=162 col_aq=0.0001
+[   85.16] PROGRESS primal iter=15000 t=8.9s obj=3.9807170606e7 dual_infeas=0 bland=false
+[   85.21] PROGRESS main iter=3000 t=0.2s phase=B infeasible_rows=2037 lu_nnz=35847 fill=4156 upd=230 col_aq=0.0002
+[   85.27] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=11437 lu_nnz=29613 fill=0 upd=0 col_aq=0.0000
+[   85.34] PROGRESS main iter=1000 t=0.1s phase=B infeasible_rows=1908 lu_nnz=31467 fill=1856 upd=127 col_aq=0.0002
+[   85.42] PROGRESS main iter=2000 t=0.2s phase=B infeasible_rows=1538 lu_nnz=33570 fill=3338 upd=162 col_aq=0.0001
+[   85.50] PROGRESS main iter=3000 t=0.2s phase=B infeasible_rows=2037 lu_nnz=35847 fill=4156 upd=230 col_aq=0.0002
+[   85.56] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=11437 lu_nnz=29613 fill=0 upd=0 col_aq=0.0000
+[   85.66] PROGRESS main iter=1000 t=0.1s phase=B infeasible_rows=1907 lu_nnz=31445 fill=1866 upd=137 col_aq=0.0002
+[   85.70] PROGRESS primal iter=16000 t=9.5s obj=3.9807170606e7 dual_infeas=0 bland=false
+[   85.74] PROGRESS main iter=2000 t=0.2s phase=B infeasible_rows=1538 lu_nnz=33524 fill=3350 upd=173 col_aq=0.0001
+[   85.84] PROGRESS main iter=3000 t=0.3s phase=B infeasible_rows=2043 lu_nnz=35766 fill=4125 upd=240 col_aq=0.0002
+[   85.92] PROGRESS main iter=4000 t=0.4s phase=B infeasible_rows=2623 lu_nnz=37959 fill=5897 upd=292 col_aq=0.0002
+[   86.01] PROGRESS main iter=5000 t=0.5s phase=B infeasible_rows=3022 lu_nnz=40997 fill=8046 upd=320 col_aq=0.0002
+[   86.11] PROGRESS main iter=6000 t=0.5s phase=B infeasible_rows=3013 lu_nnz=44461 fill=10277 upd=274 col_aq=0.0003
+[   86.21] PROGRESS main iter=7000 t=0.6s phase=B infeasible_rows=1669 lu_nnz=46998 fill=10202 upd=53 col_aq=0.0001
+[   86.30] PROGRESS main iter=8000 t=0.7s phase=B infeasible_rows=539 lu_nnz=46998 fill=14008 upd=1053 col_aq=0.0003
+[   86.34] PROGRESS primal iter=17000 t=10.1s obj=3.9807170606e7 dual_infeas=0 bland=false
+[   86.42] PROGRESS main iter=9000 t=0.9s phase=B infeasible_rows=692 lu_nnz=55022 fill=20337 upd=733 col_aq=0.0007
+[   86.56] PROGRESS main iter=10000 t=1.0s phase=B infeasible_rows=675 lu_nnz=45095 fill=17419 upd=207 col_aq=0.0007
+[   86.74] PROGRESS main iter=11000 t=1.2s phase=B infeasible_rows=699 lu_nnz=46678 fill=17771 upd=62 col_aq=0.0038
+[   86.89] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=11437 lu_nnz=29613 fill=0 upd=0 col_aq=0.0000
+[   86.94] PROGRESS primal iter=18000 t=10.7s obj=3.9807170606e7 dual_infeas=0 bland=false
+[   86.96] PROGRESS main iter=1000 t=0.1s phase=B infeasible_rows=1907 lu_nnz=31467 fill=1856 upd=127 col_aq=0.0002
+[   87.04] PROGRESS main iter=2000 t=0.2s phase=B infeasible_rows=1538 lu_nnz=33570 fill=3337 upd=162 col_aq=0.0001
+[   87.14] PROGRESS main iter=3000 t=0.2s phase=B infeasible_rows=2043 lu_nnz=35816 fill=4150 upd=230 col_aq=0.0002
+[   87.23] PROGRESS main iter=4000 t=0.3s phase=B infeasible_rows=2554 lu_nnz=37997 fill=6204 upd=281 col_aq=0.0002
+[   87.33] PROGRESS main iter=5000 t=0.4s phase=B infeasible_rows=2859 lu_nnz=40795 fill=8003 upd=328 col_aq=0.0002
+[   87.43] PROGRESS main iter=6000 t=0.5s phase=B infeasible_rows=2933 lu_nnz=44665 fill=9997 upd=279 col_aq=0.0004
+[   87.50] PROGRESS primal iter=19000 t=11.3s obj=3.9807170606e7 dual_infeas=0 bland=false
+[   87.50] PROGRESS main iter=1000 t=2.5s phase=B infeasible_rows=657 lu_nnz=247454 fill=190748 upd=186 col_aq=0.1121
+[   87.54] PROGRESS main iter=7000 t=0.6s phase=B infeasible_rows=1390 lu_nnz=47802 fill=10775 upd=44 col_aq=0.0003
+[   87.63] PROGRESS main iter=8000 t=0.7s phase=B infeasible_rows=667 lu_nnz=47802 fill=15359 upd=1044 col_aq=0.0001
+[   87.76] PROGRESS main iter=9000 t=0.9s phase=B infeasible_rows=704 lu_nnz=56456 fill=20788 upd=715 col_aq=0.0008
+[   87.91] PROGRESS main iter=10000 t=1.0s phase=B infeasible_rows=634 lu_nnz=45206 fill=17257 upd=162 col_aq=0.0002
+[   87.98] PROGRESS primal iter=20000 t=11.8s obj=3.9807170606e7 dual_infeas=0 bland=false
+[   87.99] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=239 lu_nnz=14691 fill=0 upd=0 col_aq=0.0000
+[   88.00] PROGRESS main iter=1000 t=0.0s phase=B infeasible_rows=1939 lu_nnz=15994 fill=1905 upd=374 col_aq=0.0002
+[   88.01] PROGRESS main iter=2000 t=0.0s phase=B infeasible_rows=1322 lu_nnz=17560 fill=3955 upd=635 col_aq=0.0002
+[   88.03] PROGRESS main iter=3000 t=0.0s phase=B infeasible_rows=965 lu_nnz=22587 fill=6995 upd=260 col_aq=0.0007
+[   88.05] PROGRESS main iter=4000 t=0.1s phase=B infeasible_rows=497 lu_nnz=26636 fill=11237 upd=439 col_aq=0.0008
+[   88.09] PROGRESS main iter=11000 t=1.2s phase=B infeasible_rows=627 lu_nnz=45768 fill=23039 upd=463 col_aq=0.0095
+[   88.10] PROGRESS main iter=5000 t=0.1s phase=B infeasible_rows=633 lu_nnz=24625 fill=8480 upd=4 col_aq=0.0029
+[   88.17] PROGRESS main iter=6000 t=0.2s phase=B infeasible_rows=724 lu_nnz=29222 fill=13983 upd=96 col_aq=0.0246
+[   88.30] PROGRESS main iter=7000 t=0.3s phase=B infeasible_rows=818 lu_nnz=28280 fill=13163 upd=155 col_aq=0.0069
+[   88.34] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=11437 lu_nnz=29613 fill=0 upd=0 col_aq=0.0000
+[   88.37] PROGRESS main iter=8000 t=0.4s phase=B infeasible_rows=759 lu_nnz=29295 fill=13839 upd=156 col_aq=0.0038
+[   88.45] PROGRESS main iter=9000 t=0.5s phase=B infeasible_rows=828 lu_nnz=37159 fill=18346 upd=109 col_aq=0.0239
+[   88.47] PROGRESS main iter=1000 t=0.1s phase=B infeasible_rows=1908 lu_nnz=31445 fill=1865 upd=137 col_aq=0.0001
+[   88.56] PROGRESS main iter=2000 t=0.2s phase=B infeasible_rows=1537 lu_nnz=33524 fill=3350 upd=173 col_aq=0.0001
+[   88.58] PROGRESS main iter=10000 t=0.6s phase=B infeasible_rows=923 lu_nnz=38717 fill=33741 upd=537 col_aq=0.0135
+[   88.66] PROGRESS main iter=3000 t=0.3s phase=B infeasible_rows=2041 lu_nnz=35768 fill=4127 upd=240 col_aq=0.0002
+[   88.76] PROGRESS main iter=4000 t=0.4s phase=B infeasible_rows=2619 lu_nnz=37961 fill=5897 upd=292 col_aq=0.0002
+[   88.77] PROGRESS main iter=11000 t=0.8s phase=B infeasible_rows=1006 lu_nnz=33590 fill=20829 upd=389 col_aq=0.0134
+[   88.86] PROGRESS main iter=12000 t=0.9s phase=B infeasible_rows=1227 lu_nnz=35050 fill=19490 upd=257 col_aq=0.0012
+[   88.87] PROGRESS main iter=5000 t=0.5s phase=B infeasible_rows=3015 lu_nnz=41021 fill=8024 upd=320 col_aq=0.0002
+[   88.98] PROGRESS main iter=6000 t=0.6s phase=B infeasible_rows=2980 lu_nnz=44466 fill=10252 upd=273 col_aq=0.0004
+[   89.06] PROGRESS main iter=13000 t=1.1s phase=B infeasible_rows=1273 lu_nnz=48623 fill=27897 upd=153 col_aq=0.0429
+[   89.09] PROGRESS main iter=7000 t=0.7s phase=B infeasible_rows=1650 lu_nnz=47027 fill=10236 upd=50 col_aq=0.0002
+[   89.19] PROGRESS main iter=8000 t=0.8s phase=B infeasible_rows=537 lu_nnz=47027 fill=14067 upd=1050 col_aq=0.0003
+[   89.32] PROGRESS main iter=9000 t=1.0s phase=B infeasible_rows=691 lu_nnz=55069 fill=20190 upd=730 col_aq=0.0005
+[   89.34] PROGRESS main iter=14000 t=1.3s phase=B infeasible_rows=943 lu_nnz=48857 fill=53016 upd=588 col_aq=0.0426
+[   89.47] PROGRESS main iter=10000 t=1.1s phase=B infeasible_rows=868 lu_nnz=45094 fill=17687 upd=221 col_aq=0.0005
+[   89.65] PROGRESS main iter=11000 t=1.3s phase=B infeasible_rows=639 lu_nnz=47215 fill=18149 upd=63 col_aq=0.0029
+[   89.71] PROGRESS main iter=15000 t=1.7s phase=B infeasible_rows=767 lu_nnz=39500 fill=40569 upd=488 col_aq=0.0554
+[   89.87] PROGRESS main iter=12000 t=1.5s phase=B infeasible_rows=457 lu_nnz=57842 fill=36755 upd=447 col_aq=0.0274
+[   89.94] PROGRESS main iter=16000 t=1.9s phase=B infeasible_rows=757 lu_nnz=41192 fill=25814 upd=464 col_aq=0.0214
+[   90.19] PROGRESS main iter=13000 t=1.9s phase=B infeasible_rows=478 lu_nnz=70638 fill=45446 upd=797 col_aq=0.0252
+[   90.35] PROGRESS main iter=17000 t=2.4s phase=B infeasible_rows=458 lu_nnz=40889 fill=41910 upd=371 col_aq=0.0410
+[   90.37] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=183 lu_nnz=247784 fill=163443 upd=0 col_aq=0.0000
+[   90.59] PROGRESS main iter=14000 t=2.2s phase=B infeasible_rows=350 lu_nnz=81945 fill=48005 upd=124 col_aq=0.0121
+[   90.70] PROGRESS main iter=18000 t=2.7s phase=B infeasible_rows=56 lu_nnz=40169 fill=30078 upd=399 col_aq=0.0176
+[   90.79] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=0 lu_nnz=39207 fill=19158 upd=0 col_aq=0.0000
+[   90.80] MIP:   parallel sub-MIP (locks): status Infeasible, nodes 0, objective None, 19.49s
+[   91.27] PROGRESS main iter=15000 t=2.9s phase=B infeasible_rows=99 lu_nnz=85641 fill=62139 upd=423 col_aq=0.0190
+[   92.02] PROGRESS main iter=16000 t=3.7s phase=B infeasible_rows=99 lu_nnz=58367 fill=24843 upd=51 col_aq=0.0003
+[   92.11] PROGRESS primal iter=0 t=0.0s obj=-4.6691049612e8 dual_infeas=0 bland=false
+[   92.15] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=58888 fill=25091 upd=0 col_aq=0.0000
+[   92.16] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=58888 fill=25317 upd=7 col_aq=0.0000
+[   92.18] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=58888 fill=25457 upd=42 col_aq=0.0000
+[   92.23] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=5 lu_nnz=58853 fill=25209 upd=0 col_aq=0.0000
+[   92.24] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=58853 fill=25266 upd=4 col_aq=0.0000
+[   92.25] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=58853 fill=25300 upd=5 col_aq=0.0000
+[   92.31] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=59294 fill=25388 upd=0 col_aq=0.0000
+[   92.32] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=59294 fill=25437 upd=1 col_aq=0.0000
+[   92.33] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=59294 fill=25457 upd=2 col_aq=0.0000
+[   92.34] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=59294 fill=25470 upd=3 col_aq=0.0000
+[   92.35] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=59294 fill=25476 upd=4 col_aq=0.0000
+[   92.36] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=59294 fill=25512 upd=5 col_aq=0.0000
+[   92.37] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=59294 fill=25518 upd=6 col_aq=0.0000
+[   92.38] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=59294 fill=25525 upd=7 col_aq=0.0000
+[   92.39] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=59294 fill=25528 upd=8 col_aq=0.0000
+[   92.39] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=59294 fill=25534 upd=9 col_aq=0.0000
+[   92.40] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=59294 fill=25551 upd=10 col_aq=0.0000
+[   92.41] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=59294 fill=25604 upd=11 col_aq=0.0000
+[   92.42] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=59294 fill=25608 upd=12 col_aq=0.0000
+[   92.43] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=59294 fill=25613 upd=13 col_aq=0.0000
+[   92.44] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=59294 fill=25618 upd=14 col_aq=0.0000
+[   92.45] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=59294 fill=25618 upd=15 col_aq=0.0000
+[   92.46] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=59294 fill=25663 upd=16 col_aq=0.0000
+[   92.46] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=59294 fill=25725 upd=19 col_aq=0.0000
+[   92.47] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=59294 fill=25772 upd=21 col_aq=0.0000
+[   92.48] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=59294 fill=25783 upd=23 col_aq=0.0000
+[   92.49] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=59294 fill=25873 upd=24 col_aq=0.0000
+[   92.50] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=59294 fill=25874 upd=25 col_aq=0.0000
+[   92.51] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=59294 fill=25899 upd=26 col_aq=0.0000
+[   92.52] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=59294 fill=25941 upd=28 col_aq=0.0000
+[   92.52] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=59294 fill=25976 upd=29 col_aq=0.0000
+[   92.53] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=59294 fill=26095 upd=31 col_aq=0.0000
+[   92.54] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=59294 fill=26135 upd=32 col_aq=0.0000
+[   92.55] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=59294 fill=26135 upd=33 col_aq=0.0000
+[   92.56] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=59294 fill=26144 upd=34 col_aq=0.0000
+[   92.57] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=59294 fill=26151 upd=35 col_aq=0.0000
+[   92.58] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=59294 fill=26156 upd=36 col_aq=0.0000
+[   92.58] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=59294 fill=26196 upd=37 col_aq=0.0000
+[   92.63] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=59427 fill=25896 upd=0 col_aq=0.0000
+[   92.64] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=59427 fill=25893 upd=1 col_aq=0.0000
+[   92.65] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=59427 fill=25906 upd=2 col_aq=0.0000
+[   92.65] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=59427 fill=25993 upd=3 col_aq=0.0000
+[   92.66] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=138 lu_nnz=59427 fill=25994 upd=4 col_aq=0.0000
+[   92.76] PROGRESS main iter=1000 t=2.4s phase=B infeasible_rows=165 lu_nnz=251602 fill=233666 upd=379 col_aq=0.0588
+[   92.88] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=18 lu_nnz=61167 fill=27550 upd=0 col_aq=0.0000
+[   93.02] PROGRESS primal iter=0 t=0.0s obj=-4.6718675998e8 dual_infeas=0 bland=false
+[   93.08] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=61218 fill=27401 upd=0 col_aq=0.0000
+[   93.13] PROGRESS primal iter=0 t=0.0s obj=-4.6718662549e8 dual_infeas=0 bland=false
+[   93.17] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=82 lu_nnz=61105 fill=27469 upd=0 col_aq=0.0000
+[   93.54] PROGRESS primal iter=0 t=0.0s obj=-4.6718226904e8 dual_infeas=0 bland=false
+[   93.59] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=62969 fill=29147 upd=0 col_aq=0.0000
+[   93.61] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=62969 fill=29303 upd=7 col_aq=0.0000
+[   93.64] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=62969 fill=29341 upd=11 col_aq=0.0000
+[   93.66] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=62969 fill=29450 upd=15 col_aq=0.0000
+[   93.67] PROGRESS primal iter=0 t=0.0s obj=-4.6718220662e8 dual_infeas=0 bland=false
+[   93.69] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=62969 fill=29520 upd=21 col_aq=0.0000
+[   93.71] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=62969 fill=29568 upd=22 col_aq=0.0000
+[   93.72] PROGRESS primal iter=0 t=0.0s obj=-4.6718217569e8 dual_infeas=0 bland=false
+[   93.74] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=62969 fill=29829 upd=32 col_aq=0.0000
+[   93.75] PROGRESS primal iter=0 t=0.0s obj=-4.6718216054e8 dual_infeas=0 bland=false
+[   93.77] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=62969 fill=29918 upd=40 col_aq=0.0000
+[   93.79] PROGRESS primal iter=0 t=0.0s obj=-4.6718214975e8 dual_infeas=0 bland=false
+[   93.81] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=62969 fill=30248 upd=55 col_aq=0.0000
+[   93.88] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=62769 fill=29323 upd=0 col_aq=0.0000
+[   93.90] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=62769 fill=29398 upd=2 col_aq=0.0000
+[   93.92] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=62769 fill=29405 upd=3 col_aq=0.0000
+[   93.97] PROGRESS primal iter=0 t=0.0s obj=-4.6718635692e8 dual_infeas=0 bland=false
+[   94.01] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=63334 fill=29724 upd=0 col_aq=0.0000
+[   94.04] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=63334 fill=29765 upd=2 col_aq=0.0000
+[   94.05] PROGRESS primal iter=0 t=0.0s obj=-4.6718633152e8 dual_infeas=0 bland=false
+[   94.07] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=63334 fill=29911 upd=12 col_aq=0.0000
+[   94.35] PROGRESS primal iter=0 t=0.0s obj=-4.6718569882e8 dual_infeas=0 bland=false
+[   94.40] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=66870 fill=31544 upd=1 col_aq=0.0000
+[   94.44] PROGRESS primal iter=0 t=0.0s obj=-4.6718565712e8 dual_infeas=0 bland=false
+[   94.47] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=66870 fill=33710 upd=58 col_aq=0.0000
+[   94.52] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=63823 fill=30004 upd=0 col_aq=0.0000
+[   94.55] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=63823 fill=30279 upd=11 col_aq=0.0000
+[   94.57] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=63823 fill=30318 upd=14 col_aq=0.0000
+[   94.65] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=63804 fill=30206 upd=0 col_aq=0.0000
+[   94.70] PROGRESS primal iter=0 t=0.0s obj=-4.6718530897e8 dual_infeas=0 bland=false
+[   94.74] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=63667 fill=30106 upd=0 col_aq=0.0000
+[   94.76] PROGRESS primal iter=0 t=0.0s obj=-4.6718529464e8 dual_infeas=0 bland=false
+[   94.78] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=63667 fill=30241 upd=14 col_aq=0.0000
+[   94.80] PROGRESS primal iter=0 t=0.0s obj=-4.6718528603e8 dual_infeas=0 bland=false
+[   94.82] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=63667 fill=30385 upd=24 col_aq=0.0000
+[   94.83] PROGRESS primal iter=0 t=0.0s obj=-4.6718527447e8 dual_infeas=0 bland=false
+[   94.86] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=63667 fill=30480 upd=30 col_aq=0.0000
+[   94.87] PROGRESS primal iter=0 t=0.0s obj=-4.6718525427e8 dual_infeas=0 bland=false
+[   94.90] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=63667 fill=30712 upd=41 col_aq=0.0000
+[   94.93] PROGRESS primal iter=0 t=0.0s obj=-4.6717473314e8 dual_infeas=0 bland=false
+[   94.97] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=63698 fill=30281 upd=0 col_aq=0.0000
+[   94.99] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=63698 fill=30345 upd=7 col_aq=0.0000
+[   95.01] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=2 lu_nnz=63698 fill=30359 upd=8 col_aq=0.0000
+[   95.31] PROGRESS primal iter=0 t=0.0s obj=-4.6717204133e8 dual_infeas=0 bland=false
+[   95.40] MIP:   parallel sub-MIP (root reduced cost): status NodeLimit, nodes 76, objective Some(8192394.577073649), 24.75s
+[   95.40] MIP: find thread asked to stop (incumbent Some(8133650.163082068), 90.35s)
+[   95.40] MIP: find thread done: objective None, accepted false (incumbent Some(8133650.163082068)) (90.35s, node 0)
+[   95.47] MIP:   RINS (HiGHS fill): fixing rate 0.94 from agreeing columns, 0.94 after fill (40470 free integer columns)
+[   95.59] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=0 lu_nnz=236351 fill=139172 upd=0 col_aq=0.0000
+[   96.08] CUTMIX clique edges total 61277 rows 5080 implonly 56197 implpairs 103859 bin 1106
+[   96.10] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=385 lu_nnz=2351 fill=0 upd=0 col_aq=0.0000
+[   96.12] PROGRESS main iter=1000 t=0.0s phase=B infeasible_rows=219 lu_nnz=4839 fill=6342 upd=243 col_aq=0.0500
+[   96.17] MIP: fixed-charge check: vb rows 1538 of 2351, continuous with vb 769 of 1860
+[   96.19] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=11 lu_nnz=5899 fill=3100 upd=0 col_aq=0.0000
+[   96.25] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=10 lu_nnz=6397 fill=3408 upd=0 col_aq=0.0000
+[   96.30] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=16 lu_nnz=6472 fill=3430 upd=0 col_aq=0.0000
+[   96.35] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=7 lu_nnz=6475 fill=3506 upd=0 col_aq=0.0000
+[   96.40] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=6 lu_nnz=6544 fill=3545 upd=0 col_aq=0.0000
+[   96.45] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=6581 fill=3559 upd=0 col_aq=0.0000
+[   96.52] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=42 lu_nnz=7005 fill=3933 upd=0 col_aq=0.0000
+[   96.60] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=3 lu_nnz=6819 fill=3733 upd=0 col_aq=0.0000
+[   96.66] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=6833 fill=3760 upd=0 col_aq=0.0000
+[   96.72] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=50 lu_nnz=7432 fill=4275 upd=0 col_aq=0.0000
+[   96.77] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=4 lu_nnz=7249 fill=4108 upd=0 col_aq=0.0000
+[   96.81] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=11 lu_nnz=7376 fill=4180 upd=0 col_aq=0.0000
+[   96.85] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=38 lu_nnz=7834 fill=4677 upd=0 col_aq=0.0000
+[   96.90] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=50 lu_nnz=8437 fill=5221 upd=0 col_aq=0.0000
+[   96.98] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=5 lu_nnz=8031 fill=4740 upd=0 col_aq=0.0000
+[   97.04] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=1 lu_nnz=7872 fill=4621 upd=0 col_aq=0.0000
+[   97.10] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=20 lu_nnz=8264 fill=4992 upd=0 col_aq=0.0000
+[   97.17] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=44 lu_nnz=8724 fill=5388 upd=0 col_aq=0.0000
+[   97.23] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=35 lu_nnz=9092 fill=5497 upd=0 col_aq=0.0000
+[   97.31] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=13 lu_nnz=8989 fill=5434 upd=0 col_aq=0.0000
+[   97.33] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=0 lu_nnz=8767 fill=5220 upd=0 col_aq=0.0000
+[   97.33] MIP:   sub-MIP: 18519 free columns of 59708, status TimeLimit, nodes 0, objective None, 1.80s, 3741 LP iterations, TICKS cpu 1.281 lp 10003020 prop 47784411 sep 14257510 pre 2116777 heur 0 node 0 lpit 3740 lu 116427925 lum 33904673
+[   97.33] MIP: root heuristic RINS: none (1.93s)
+[   97.33] MIP: after root heuristics: incumbent Some(8133650.163082068) (92.27s)
+[   97.96] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=192 lu_nnz=257639 fill=170338 upd=0 col_aq=0.0000
+[  100.62] PROGRESS main iter=1000 t=2.7s phase=B infeasible_rows=16 lu_nnz=262843 fill=198602 upd=186 col_aq=0.0862
+[  103.00] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=179 lu_nnz=260464 fill=171449 upd=0 col_aq=0.0000
+[  105.50] PROGRESS main iter=1000 t=2.5s phase=B infeasible_rows=117 lu_nnz=264184 fill=181176 upd=63 col_aq=0.1018
+[  107.90] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=182 lu_nnz=265808 fill=177960 upd=0 col_aq=0.0000
+[  112.08] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=189 lu_nnz=269445 fill=179686 upd=0 col_aq=0.0000
+[  116.25] MIP: background cuts: determ: waited 18.92s (safety cap 18.92s, cap, background end -), 10 rounds, 11273 LP iters (0.65 x 17280 of cap 345600), obj Some(8117086.930457712) (111.20s)
+[  116.25] MIP: background cuts: rounds so far [8113068.7 at 59.89s, 8113736.9 at 65.20s, 8114445.7 at 70.91s, 8115522.5 at 77.86s, 8115933.7 at 82.92s, 8116355.2 at 90.54s, 8116531.8 at 95.80s, 8116776.1 at 100.72s, 8116917.6 at 104.70s, 8117086.9 at 109.35s]
+[  116.70] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=5 lu_nnz=258853 fill=167309 upd=0 col_aq=0.0000
+[  117.56] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=0 lu_nnz=256830 fill=166317 upd=0 col_aq=0.0000
+[  117.62] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=0 lu_nnz=184554 fill=106239 upd=0 col_aq=0.0000
+[  117.63] MIP: background cuts: root LP re-solved before replacing the cuts: Optimal, 1 iters (112.57s)
+[  119.39] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=0 lu_nnz=234706 fill=134934 upd=0 col_aq=0.0000
+[  119.40] MIP: background cuts: LP solve time with the replaced cuts 1.737s
+[  119.40] MIP: background cuts: LP with the replaced cuts: Optimal, 1 iters (114.34s)
+[  119.40] MIP: background cuts: 11 rounds, 603 cut rows (was 291), obj 8.1125684864e6 -> 8.1171533353e6 (waited 20.26s, 114.34s)
+[  119.40] MIP: root reduced costs re-stored after the background cuts (958 newly fixed integer columns)
+[  119.89] MIP: root objective probing: gap 2.028e-3, 1890 fractional binaries, 472 probed (1 passes), 0 fixed, 29858 implications (cutoff 8.1336501549e6, redcost row 0, 603 cut rows, 0.48s)
+[  119.89] MIP: GAP1 u: LP probing skipped (gap 2.028e-3)
+[  119.89] MIP: restart check: newly fixed 958, integer columns 43524, free at the root 41175, threshold 435.2, root LP 6.67s
+[  119.91] MIP: restart 1 (958 of 43524 integer columns newly fixed at the root, 603 cuts kept) (114.85s)
+[  119.91] MIP: restart 1: pseudocost observations: columns up 0, down 0, both 0 (free integer columns 40217); observations up 0, down 0; nodes 0
+[  119.91] MIP: GAP4 r: released the LP, cut pool and queue of the solver before restart 1
+[  119.91] MIP: RESTART_DROP_FIXED: not used (symmetry tables)
+[  119.91] MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+[  127.09] MIP: presolve: merged 82 parallel rows (0 new equations)
+[  127.09] MIP: presolve: rows 53088 -> 48751, free columns 56401 -> 51992, nonzeros 400589 -> 335667, postsolve steps 1144 (parallel columns merged: 0 integer, 0 continuous)
+[  130.02] MIP: probing: 36673 of 36675 binaries probed (1 passes), 50 fixed, 0 bounds tightened, 2074420 implications (2.92s, cpu 0.01s, work 170935, pwork 1251581689, chg 94410)
+[  130.02] MIP: probing: PREPAR 1 threads, 298 windows, 36193 of 36673 probes from the windows
+[  130.02] MIP: probing: 93 equivalent binary pairs
+[  130.04] MIP: probing: fixed 309 columns of width within tolerance
+[  130.04] MIP: presolve again after probing (round 1)
+[  130.04] MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+[  130.20] MIP: presolve: merged 84 parallel rows (0 new equations)
+[  130.20] MIP: presolve: rows 48751 -> 48058, free columns 51322 -> 51321, nonzeros 335667 -> 332590, postsolve steps 1 (parallel columns merged: 0 integer, 0 continuous)
+[  132.59] MIP: probing: 31568 of 36622 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 1885229 implications (2.38s, cpu 0.00s, work 0, pwork 1150378691, chg 0)
+[  132.59] MIP: probing: PREPAR 1 threads, 248 windows, 31568 of 31568 probes from the windows
+[  132.59] MIP: probing: 70 equivalent binary pairs
+[  132.96] MIP: presolve: 0 dominated binaries fixed (0.36s)
+[  133.01] MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+[  133.14] MIP: presolve: merged 151 parallel rows (0 new equations)
+[  133.14] MIP: presolve: rows 48128 -> 47988, free columns 51321 -> 51251, nonzeros 332730 -> 332380, postsolve steps 70 (parallel columns merged: 0 integer, 0 continuous)
+[  135.43] MIP: probing: 31712 of 36552 binaries probed (1 passes), 0 fixed, 0 bounds tightened, 1883785 implications (2.28s, cpu 0.00s, work 0, pwork 1150184295, chg 0)
+[  135.43] MIP: probing: PREPAR 1 threads, 249 windows, 31712 of 31712 probes from the windows
+[  135.43] MIP: probing: 0 equivalent binary pairs
+[  135.78] MIP: presolve: 0 dominated binaries fixed (0.34s)
+[  135.79] MIP: presolve again after probing: rows 48751 -> 47988 (less than 10% fewer), the result is not used
+[  135.85] HNFPRE: round 0 eq 18427 int_eq 18188 rat_skip 0 comps 187 done 187 gave_up 0 cols 36599 rank 18140 fixes 4 congs 0 (gen 0, tighten 0, max_mod 0) infeasible false (0.059s) gave_up_why 0/0/0
+[  135.85] HNFPRE: round 0 tightened 4 columns
+[  143.64] HNFPRE: round 1 eq 18232 int_eq 18064 rat_skip 0 comps 189 done 189 gave_up 0 cols 36472 rank 18015 fixes 0 congs 0 (gen 0, tighten 0, max_mod 0) infeasible false (0.064s) gave_up_why 0/0/0
+[  143.64] HNFPRE: round 1 tightened 0 columns
+[  143.64] MIP: the start solution is not feasible in the presolved problem; dropped
+[  144.04] CUTMIX clique edges total 1287617 rows 285915 implonly 1001702 implpairs 1878666 bin 36496
+[  144.08] MIP: clique extension: 0 rows extended, 0 nonzeros added, 0 columns fixed, 0 duplicate and 0 dominated rows removed (1287617 edges, 0.44s)
+[  144.11] MIP: symmetry: orbital fixing after the restart keeps 0 of 2 generators
+[  144.17] MIP: objective step with implied integers: None (without: None); costed non-integer columns 14699 (e.g. [(0, 0.353573, 0.0, 129.0, 3), (1, 0.393982, 0.0, 150.4, 3), (2, 0.444492, 0.0, 172.0, 3), (3, 0.515207, 0.0, 193.0, 3), (4, 0.57582, 0.0, 226.8, 4)])
+[  144.17] MIP: OBJINT c: lattice None (offset 1.8711177546e5), step None
+[  144.17] MIP: fixed-charge check: vb rows 29020 of 47938, continuous with vb 14510 of 14699
+[  144.23] MIP: root LP basis from the presolve LP probing: none
+[  144.26] MIP: root LP basis from before the restart: 45876 of 47938 rows matched
+[  144.73] MIP: clique graph: 1287617 edges (285915 from rows, probing implications 1878666)
+[  144.76] MIP:   VB01 (loose, best): 448 fixings, 2 backtracks, infeasible, fixing rate 0.04 (all columns 0.17)
+[  144.77] MIP:   VB01 (loose, worst): 326 fixings, 2 backtracks, infeasible, fixing rate 0.04 (all columns 0.16)
+[  144.77] MIP:   VB01 (tight): 114 fixings, 11 backtracks, fixing rate 0.05 (all columns 0.17)
+[  144.82] MIP:   VB01 (tight, best): 4671 fixings, 0 backtracks, fixing rate 0.99 (all columns 0.75)
+[  144.92] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=592 lu_nnz=1191 fill=0 upd=0 col_aq=0.0000
+[  144.93] MIP:   sub-MIP: 15195 free columns of 59708, status Infeasible, nodes 0, objective None, 0.06s, 674 LP iterations, TICKS cpu 0.080 lp 805165 prop 42089 sep 0 pre 716941 heur 0 node 0 lpit 673 lu 2285504 lum 2599953
+[  144.93] MIP:   VB01 (tight, worst): 110 fixings, 11 backtracks, fixing rate 0.05 (all columns 0.17)
+[  144.94] MIP: VBCLQ e: VB01 before the root LP (the first LP of this solve): none (0.61s)
+[  144.95] MIP: VBCLQ: pseudo-objective with cliques: 13 objective columns substituted, 0 fixed in 1 passes, slack 3.599825e8, free integers now 36496, cutoff 8.1336501549e6 (0.01s)
+[  144.95] MIP: solving the root LP (0.84s)
+[  144.95] ROOTLP_SCALE: rows 47938 cols 59708 range 3.903e6 warm true applies true
+[  145.00] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=865 lu_nnz=47938 fill=0 upd=0 col_aq=0.0000
+[  145.01] PROGRESS main iter=1000 t=0.0s phase=B infeasible_rows=2304 lu_nnz=47938 fill=4159 upd=1000 col_aq=0.0002
+[  145.04] PROGRESS main iter=2000 t=0.0s phase=B infeasible_rows=2371 lu_nnz=53130 fill=10209 upd=986 col_aq=0.0002
+[  145.11] PROGRESS main iter=3000 t=0.1s phase=B infeasible_rows=2037 lu_nnz=80030 fill=19078 upd=295 col_aq=0.0129
+[  145.23] PROGRESS main iter=4000 t=0.2s phase=B infeasible_rows=1999 lu_nnz=60739 fill=17404 upd=510 col_aq=0.0020
+[  145.31] PROGRESS main iter=5000 t=0.3s phase=B infeasible_rows=2032 lu_nnz=66043 fill=18549 upd=200 col_aq=0.0034
+[  145.41] PROGRESS main iter=6000 t=0.4s phase=B infeasible_rows=1942 lu_nnz=71016 fill=27054 upd=511 col_aq=0.0029
+[  145.75] PROGRESS main iter=7000 t=0.8s phase=B infeasible_rows=1893 lu_nnz=128120 fill=55272 upd=52 col_aq=0.0115
+[  146.08] PROGRESS main iter=8000 t=1.1s phase=B infeasible_rows=1893 lu_nnz=128120 fill=124594 upd=1052 col_aq=0.0200
+[  146.43] PROGRESS main iter=9000 t=1.4s phase=B infeasible_rows=1849 lu_nnz=80580 fill=33296 upd=257 col_aq=0.0041
+[  146.72] PROGRESS main iter=10000 t=1.7s phase=B infeasible_rows=2011 lu_nnz=84710 fill=55152 upd=411 col_aq=0.0278
+[  146.83] MIP: FJ problem (FJ_P3): rows 52485 -> 52479, free columns 57359 -> 57185, 0 continuous bounds tightened (2.60s)
+[  147.12] PROGRESS main iter=11000 t=2.1s phase=B infeasible_rows=2072 lu_nnz=115396 fill=83696 upd=609 col_aq=0.0386
+[  148.21] PROGRESS main iter=12000 t=3.2s phase=B infeasible_rows=2167 lu_nnz=139531 fill=159233 upd=685 col_aq=0.0475
+[  148.68] PROGRESS main iter=13000 t=3.7s phase=B infeasible_rows=2002 lu_nnz=93671 fill=64283 upd=826 col_aq=0.0054
+[  149.15] PROGRESS main iter=14000 t=4.2s phase=B infeasible_rows=1752 lu_nnz=101917 fill=50007 upd=6 col_aq=0.0050
+[  149.37] PROGRESS main iter=15000 t=4.4s phase=B infeasible_rows=2183 lu_nnz=101917 fill=69272 upd=1006 col_aq=0.0258
+[  150.23] PROGRESS main iter=16000 t=5.2s phase=B infeasible_rows=2379 lu_nnz=144516 fill=171970 upd=997 col_aq=0.0422
+[  150.47] PROGRESS main iter=17000 t=5.5s phase=B infeasible_rows=2108 lu_nnz=109098 fill=81381 upd=999 col_aq=0.0388
+[  150.92] PROGRESS main iter=18000 t=5.9s phase=B infeasible_rows=2382 lu_nnz=113550 fill=91127 upd=933 col_aq=0.0335
+[  151.34] PROGRESS main iter=19000 t=6.3s phase=B infeasible_rows=2314 lu_nnz=118196 fill=86811 upd=912 col_aq=0.0030
+[  151.93] PROGRESS main iter=20000 t=6.9s phase=B infeasible_rows=2043 lu_nnz=148258 fill=143412 upd=781 col_aq=0.0337
+[  152.82] PROGRESS main iter=21000 t=7.8s phase=B infeasible_rows=2458 lu_nnz=123279 fill=111542 upd=729 col_aq=0.0294
+[  153.35] PROGRESS main iter=22000 t=8.3s phase=B infeasible_rows=2171 lu_nnz=126249 fill=98477 upd=756 col_aq=0.0313
+[  153.73] PROGRESS main iter=23000 t=8.7s phase=B infeasible_rows=2784 lu_nnz=129861 fill=83171 upd=682 col_aq=0.0358
+[  154.44] PROGRESS main iter=24000 t=9.4s phase=B infeasible_rows=2355 lu_nnz=163193 fill=123508 upd=489 col_aq=0.0305
+[  155.51] PROGRESS main iter=25000 t=10.5s phase=B infeasible_rows=2326 lu_nnz=207611 fill=154308 upd=389 col_aq=0.0365
+[  156.79] PROGRESS main iter=26000 t=11.8s phase=B infeasible_rows=2328 lu_nnz=139316 fill=89726 upd=301 col_aq=0.0014
+[  157.54] PROGRESS main iter=27000 t=12.5s phase=B infeasible_rows=2448 lu_nnz=143689 fill=88521 upd=132 col_aq=0.0137
+[  158.37] PROGRESS main iter=28000 t=13.4s phase=B infeasible_rows=2125 lu_nnz=145887 fill=88800 upd=44 col_aq=0.0290
+[  159.02] PROGRESS main iter=29000 t=14.0s phase=B infeasible_rows=1914 lu_nnz=145887 fill=132628 upd=1044 col_aq=0.0589
+[  159.93] PROGRESS main iter=30000 t=14.9s phase=B infeasible_rows=1956 lu_nnz=151618 fill=141937 upd=870 col_aq=0.0471
+[  160.47] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=865 lu_nnz=47938 fill=0 upd=0 col_aq=0.0000
+[  160.48] PROGRESS main iter=0 t=0.0s phase=B infeasible_rows=865 lu_nnz=47938 fill=0 upd=0 col_aq=0.0000
+[  160.48] MIP: root LP after the restart: TimeLimit, 30499 iters (16.37s)
+[  160.48] MIP: root LP stopped at the time limit (16.37s, 0.08s past the deadline)
+[  160.51] MIP: Local-MIP solution accepted false (16.40s)
+[  160.51] MIP: Local-MIP solution accepted false (16.40s)
+[  160.51] MIP: Local-MIP solution accepted false (16.41s)
+[  160.51] MIP: Local-MIP solution accepted false (16.41s)
+[  160.51] MIP: Local-MIP solution accepted false (16.41s)
+[  160.52] MIP: Local-MIP solution accepted false (16.41s)
+[  160.52] MIP: Local-MIP solution accepted false (16.41s)
+[  160.52] MIP: finish start TimeLimit (16.41s)
+[  160.52] MIP: MEMCAP: tid 0 limit 12826 MB peak rss 0 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0
+[  160.52] MIP:    16.41s nodes        0 open       0 lb inf ub inf lp_iters 30499 sb_iters 0 sb_lps 0 sb_secs 0.00 node_iters 0 (first 0, lps 0) heur_iters 674 dive_iters 0 lp_rows 47938 node_cut_secs 0.00
+[  160.52] MIP: TICKS cpu 193.596 total 193596355975 lp 5463138779 prop 109999827 sep 72380777 pre 108260166 heur 0 node 0 lpit 105695 lu 58639926365 lum 17960972035
+[  160.52] MIP: dual proofs and conflicts 0 (conflicts added 0 (from proofs 0), Farkas 0, pruned 0 nodes, tightened 0 bounds, rejected as numerically unreliable 0)
+[  160.52] MIP: propagation conflicts: analysed 0, no 1-UIP 0, 1-UIP not a row 0, no decision set 0, decision set not a row 0; not a row because continuous 0, general integer 0, both sides 0
+[  160.52] MIP: cut pool propagation: calls 0, pruned 0 nodes, tightened 0 bounds, 0.00s, pool 0 cuts (0 nonzeros); updated terms 0, candidates 0 (0 nonzeros), rebuilds 0
+[  160.52] MIP: TC r: reduced-cost fixings passed to children 0; child change lists: mean length 0.0 (mean depth 0.0), max 0, open nodes now 0
+[  160.52] MIP: DFSBB4: d 0.0 (frac), L 10, root fractional 0, integers 43524, mean depth of dive bottoms 0.0 (0 dives)
+[  160.52] MIP: DFSBB: kind 2, W 5000 (root LP iterations 0), plunges 0, ended by the work limit 0, ended at a leaf or by pruning 0
+[  160.52] MIP: GAP1 u: child selection down 0 up 0; branching selections 0, with ties 0 (candidates in ties 0), changed by the queue counts 0; objective proofs not violated beyond the tolerance 0
+[  160.52] MIP: objective propagation: pruned 0 nodes, tightened 0 bounds; strong branching children infeasible by propagation 0, propagated bounds passed to child LPs 0
+[  160.52] MIP: literal conflicts: added 0, in pool 0 (aged out 0), pruned 0 nodes, tightened 0 bounds
+[  160.52] MIP: proof CMIR cuts: tried 0, added 0, entered the cut pool 0
+[  160.52] MIP: conflict analysis (HiGHS style): calls 0, conflicts 0, added 0, mean length 0.0, max length 13157, 0.00s
+[  160.52] MIP: conflict score diag: analyses 0, bumped columns per analysis 0.00, analyses without conflict 0.000, lit reasons asked per analysis 0.00 (max 0), used 0.00, analyses cut by the budget 0.000
+[  160.52] MIP: cw ramp diag: scored 0, weight > 0 0, mean weight 0.00e0, top changed 0, r_bar -1.000
+[  160.52] MIP: lit explain budget (all threads): resolved 0, analyses cut by the budget 1, arena rows 0, per analysis (0,1,2,3-4,5-8,9-16,17-32,33-64,65-) [0, 0, 0, 0, 0, 0, 0, 0, 0]
+[  160.52] MIP: conflict analysis failures (all calls): no decision 0, too long midway 0, reason row lacks column 0, empty 0, too long at the end 0 (total length 0), max length 50
+[  160.52] MIP: branching: 0 selections, 0 without strong branching for dual degeneracy; sb LPs 0 iters 0
+[  160.52] MIP: inference: branchings counted 0, mean bound changes after a branching 0.00 (ENOMOTO_MIP_INF_ALL false)
+[  160.52] MIP: conflict weight FLAT (tid 0): hybrid scores 0, with the flat condition 0; positive gains 0 of 0 observations
+[  160.52] MIP: PLSB (tid 0): undecided 0 (few samples 0, no gap 0, depth>=50 0), continue 0, stop 0, continued past lookahead 0, stopped before lookahead 0; tree gains n 0 zero 0
+[  160.52] MIP: marginal LP infeasibility (all threads, cumulative): checked with a fresh LP 0 no conclusion 0 strong branching children unknown 0 root and LP probing 0 fresh LP feasible 0
+[  160.52] MIP: integral-looking node LP solutions outside the domain (LP bounds behind the domain), re-solved: 0
+[  160.52] MIP: LP infeasibility certificates, minimum uniform violation (log10 bins <-12 .. >=-4, other): [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+[  160.52] MIP: sibling backtracks 0; basis restores 0 (basic count mismatch 0), first LP iterations after a restore 0
+[  160.52] MIP: mem1 sibling LU (all threads): held at most 1, pushed 263, dropped 203, adopted 3
+[  160.52] MIP: cut small-coefficient floor (all threads): coefficients absorbed only by the floor 0, in cuts 0, cuts emptied 0, cuts dropped (infinite bound) 0
+[  160.52] MIP: GAP4 c: dense cuts kept out of the cut pool propagation (all threads, counted per rebuild): 0
+[  160.52] MIP: memc (all threads): packed nodes 0, changes 0 (0 bytes packed, 0 unpacked), bases 0 (0 bytes packed, 0 unpacked)
+[  160.52] MIP: basis nb diag: tree first LPs restored 0 iters 0 (0.0/LP), others 0 iters 0 (0.0/LP); root LPs: submip 8 lps 80632 iters (10079.0/LP) 19.57s, bgcopy 1 lps 1 iters (1.0/LP) 1.36s, find 1 lps 22 iters (22.0/LP) 1.03s, restart 1 lps 30499 iters (30499.0/LP) 15.53s, main 1 lps 17280 iters (17280.0/LP) 6.67s; nb hints applied 65 solves, 198120 given, 4010 changed
+[  160.52] MIP: node diag: nodes 0 node LPs 0 mean rows 0.0 iters 0 (0.0/LP) LP secs 0.00 sep rounds 0 added 0 node cut secs 0.00 final rows 47938
+[  160.52] MIP: adaptive node cuts: rounds 0 effective 0 skipped 0 (rate 1.000), node cut secs 0.00, outcomes cutoff/<0.02/<0.1/<0.3/>=0.3 [0, 0, 0, 0, 0], cut nnz None (rows mean 6.9)
+[  160.52] MIP: symmetry: 0 heuristic solutions mapped to the symmetry-reduced problem, 8 could not be
+[  160.52] MIP: finish done (16.41s)
+[  160.55] MIP: SUBFIX summary: dives 0 sub-MIPs 0 accepted 0 root-infeasible retries 0 below 0.1 0; success 0 (mean rate NaN), infeasible 0 (mean rate NaN)
+[  160.56] MIP: solve returned TimeLimit after 160.14s (time limit 160.00s)
+[  160.56] MIP: polished the solution (160.14s)
