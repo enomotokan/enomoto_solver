@@ -24,3 +24,4 @@ glc の誤答 (analysis/rootgap_20261121/wrong_widden、README 8 節) の直し�
 - P 1: 1c6643db2 (b0fd1173a 以降、pip install -e .、0.1.10)。58 行・crash 0。
 - P 4: 1c6643db2 (b0fd1173a 以降、pip install -e .、0.1.10)。58 行・crash 0。
 - P 5: 1c6643db2 (b0fd1173a 以降、pip install -e .、0.1.10)。58 行・crash 0。
+- P 2: 1c6643db2 (b0fd1173a 以降、pip install -e .、0.1.10)。58 行・crash 0。
