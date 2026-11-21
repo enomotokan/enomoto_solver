@@ -120,3 +120,12 @@
 - P 1: c3bdeaa7c (d0a9eea36・1cb61bc9a 以降、`pip install -e .`、0.1.10)。58 行・crash 0。
 - P 3: c3bdeaa7c (d0a9eea36・1cb61bc9a 以降、`pip install -e .`、0.1.10)。58 行・crash 0。
 - P 0: c3bdeaa7c (d0a9eea36・1cb61bc9a 以降、`pip install -e .`、0.1.10)。58 行・crash 0。
+
+## 7. 広い計測 P の結果 (6 分担そろい、ci_P.txt)
+
+- `python ../rootgap_20261121/ci.py 60 sft0 def res_P_s*.jsonl`: def/sft0 (直しあり/なし) のずらし幾何平均の比 1.005 (95% [0.992, 1.018])、解けた sft0 137 / def 136。
+- 全種で 1.25 倍超の遅れ: なし。optimal 同士の目的値の食い違い: なし。crash 0。
+- 解けた数の差 1 は neos5 種 2 (sft0 は 42.8 秒で最適、def は時間切れで暫定解 15・下界 14.35)。他の種の neos5 は両方解けている。
+- 1 回だけの遅速は両向きに散らばる (10teams は種 1・2 で def が遅く、種 3 で def が速い)。
+- 0 ノードで Infeasible の sub-MIP は分担により増減し、根の分はほぼ変わらない。P では誤判定の起きる問題が少なく、momentum1 (M) のような効きは P では見えない。
+- 解けた数が 1 減ったので、neos5 を種を増やして確かめる。
