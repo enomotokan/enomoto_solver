@@ -19,4 +19,6 @@ glc の誤答 (analysis/rootgap_20261121/wrong_widden、README 8 節) の直し�
 
 ### 回したビルド
 
-- P 0: b0fd1173a (6a6cc51ba + 63e236dba を含む、pip install -e .、0.1.10)。
+- P 0: b0fd1173a (6a6cc51ba + 63e236dba を含む、pip install -e .、0.1.10)。58 行・crash 0。
+- P 3: 1c6643db2 (b0fd1173a 以降、pip install -e .、0.1.10)。58 行・crash 0。
+- P 1: 1c6643db2 (b0fd1173a 以降、pip install -e .、0.1.10)。58 行・crash 0。
