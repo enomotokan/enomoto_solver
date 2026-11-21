@@ -1,0 +1,33 @@
+MIP: root LP basis from the presolve LP probing: used (columns only)
+MIP: root LP 5.4416666667e1 (1612 iters, 1.25s)
+MIP: root LP size: rows 3472, free columns 10209, nonzeros 455021
+MIP: root LP work: 0.201841 tick-s (1612 iters, 0.183s)
+CUTTK round 0 obj 5.4416666667e1 tk 999850690
+MIP: cut round 0: 24 cuts (of 854, sep 0.30s, LP 221 iters), LP rows 3496 (cut rows mean nnz 146), obj 5.6000000000e1 (4.99s)
+CUTTK round 1 obj 5.6000000000e1 tk 1498761699
+MIP: cut round 1: 13 cuts (of 437, sep 0.11s, LP 185 iters), LP rows 3508 (cut rows mean nnz 135), obj 5.6500000000e1 (5.20s)
+CUTTK round 2 obj 5.6500000000e1 tk 1684185187
+MIP: cut round 2: 19 cuts (of 1231, sep 0.48s, LP 331 iters), LP rows 3526 (cut rows mean nnz 190), obj 5.7000000000e1 (5.81s)
+MIP: cut round 2: SEPALLOC s: window rate 7.011e-10 < overall rate 9.939e-10; stop (obj 5.7000000000e1)
+SEPLEARN root restarts 0 root: gain 2.583333e0 sep secs 0.817 ticks 1134269872
+SEPLEARN root restarts 0 root extra      calls 3 cands 0 chosen 0 act1 0 gain 0.0000e0 (0.0%) surv 0/0 (0%) secs 0.013 ticks 0 work 3 skipped 0 capped 0 score 0.10
+SEPLEARN root restarts 0 root rows_cmir  calls 3 cands 0 chosen 0 act1 0 gain 0.0000e0 (0.0%) surv 0/0 (0%) secs 0.089 ticks 236236103 work 3 skipped 0 capped 0 score 0.10
+SEPLEARN root restarts 0 root zerohalf   calls 3 cands 926 chosen 27 act1 2 gain 8.1667e-1 (31.6%) surv 1/6 (17%) secs 0.114 ticks 62958726 work 1622258 skipped 0 capped 0 score 0.55
+SEPLEARN root restarts 0 root clique     calls 3 cands 0 chosen 0 act1 0 gain 0.0000e0 (0.0%) surv 0/0 (0%) secs 0.002 ticks 1210776 work 3 skipped 0 capped 0 score 0.10
+SEPLEARN root restarts 0 root implbd     calls 3 cands 0 chosen 0 act1 0 gain 0.0000e0 (0.0%) surv 0/0 (0%) secs 0.021 ticks 10978428 work 3 skipped 0 capped 0 score 0.10
+SEPLEARN root restarts 0 root path_highs calls 3 cands 0 chosen 0 act1 0 gain 0.0000e0 (0.0%) surv 0/0 (0%) secs 0.032 ticks 139760006 work 3 skipped 0 capped 0 score 0.10
+SEPLEARN root restarts 0 root path       calls 3 cands 0 chosen 0 act1 0 gain 0.0000e0 (0.0%) surv 0/0 (0%) secs 0.006 ticks 0 work 3 skipped 0 capped 0 score 0.10
+SEPLEARN root restarts 0 root tableau    calls 3 cands 1596 chosen 29 act1 4 gain 1.7667e0 (68.4%) surv 3/18 (17%) secs 0.534 ticks 683125833 work 4415645 skipped 0 capped 0 score 0.79
+SEPLEARN root restarts 0 root mcf        calls 3 cands 0 chosen 0 act1 0 gain 0.0000e0 (0.0%) surv 0/0 (0%) secs 0.000 ticks 0 work 3 skipped 0 capped 0 score 0.10
+SEPLEARN root restarts 0 root modk       calls 3 cands 0 chosen 0 act1 0 gain 0.0000e0 (0.0%) surv 0/0 (0%) secs 0.006 ticks 0 work 3 skipped 0 capped 0 score 0.10
+SEPEFF face restarts 0 rounds 3 stall 0 width 2123 nonbasic 9526 rows 3526 nfrac 424 nint 10250 obj 5.7000000000e1
+CUTSTOP {"reason":"sepalloc_stop","restarts":0,"bg":false,"second":false,"rounds":3,"max_rounds":25,"phase2":false,"stall":0,"intobj_stall":0,"obj0":5.4416666667e1,"obj1":5.7000000000e1,"lp_ok":true,"inc":2.3300000000e2,"nfrac":424,"fsum":133.4306,"nint":10209,"ncuts":53,"t_loop":2.030,"t":5.865,"sense":1,"tk_loop":2399394780,"tk_lp":201841425}
+SEPALLOC rounds 3 zerohalf run 3 skip 0 path_highs run 2 skip 1 path run 3 skip 0 tableau run 2 skip 1
+MIP: root LP basis from the presolve LP probing: none
+MIP: root LP basis from before the restart: 61 of 1677 rows matched; not used (ENOMOTO_MIP_TREE3_RBASIS)
+MIP: root LP 5.8000000000e1 (1024 iters, 1.02s)
+MIP: root LP size: rows 1677, free columns 1455, nonzeros 15331
+MIP: root LP work: 0.060444 tick-s (1024 iters, 0.047s)
+SEPEFF face restarts 1 rounds 0 stall 0 width 916 nonbasic 993 rows 1677 nfrac 20 nint 10250 obj 5.8000000000e1
+CUTSTOP {"reason":"gap_closed","restarts":1,"bg":false,"second":false,"rounds":0,"max_rounds":25,"phase2":false,"stall":0,"intobj_stall":0,"obj0":5.8000000000e1,"obj1":5.8000000000e1,"lp_ok":true,"inc":null,"nfrac":20,"fsum":10.0000,"nint":1455,"ncuts":0,"t_loop":0.003,"t":1.028,"sense":1,"tk_loop":1005890,"tk_lp":60443892}
+SEPALLOC rounds 0 zerohalf run 0 skip 0 path_highs run 0 skip 0 path run 0 skip 0 tableau run 0 skip 0

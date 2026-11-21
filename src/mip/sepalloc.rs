@@ -50,6 +50,10 @@ struct State {
     /// 動かしたラウンドの数・飛ばしたラウンドの数 (ログ)
     nrun: [usize; 4],
     nskip: [usize; 4],
+    /// 候補がなくてやり直したラウンドの数
+    redo: usize,
+    /// 直前のラウンドがやり直しだった (手間が 2 回分なので u_k の測り直しに使わない)
+    redone: bool,
 }
 
 thread_local! {
@@ -101,7 +105,7 @@ pub(super) fn begin_round(st: &[seplearn::Stat; seplearn::NSRC], obj: f64, verbo
             let t = st[KINDS[i]].ticks;
             let d = t - a.last_ticks[i];
             a.last_ticks[i] = t;
-            if a.rounds > 0 && a.run[i] && d > 0.0 {
+            if a.rounds > 0 && a.run[i] && d > 0.0 && !a.redone {
                 if a.scale[i] <= 1.0 {
                     a.unit[i] = d;
                 } else {
@@ -109,6 +113,7 @@ pub(super) fn begin_round(st: &[seplearn::Stat; seplearn::NSRC], obj: f64, verbo
                 }
             }
         }
+        a.redone = false;
         a.rounds += 1;
         // 伸びは数値の誤差 (目的値の 1e-9 倍) 以下を 0 と見る
         let tol = 1e-9 * obj.abs().max(1.0);
@@ -163,11 +168,33 @@ pub(super) fn begin_round(st: &[seplearn::Stat; seplearn::NSRC], obj: f64, verbo
     });
 }
 
+/// このラウンドに飛ばした分離器があれば、全部を倍率 1 で動かすように直して真を返す (候補が 1 本もなかったラウンドのやり直し用)
+pub(super) fn run_all_if_skipped() -> bool {
+    ST.with(|s| {
+        let mut b = s.borrow_mut();
+        let Some(a) = b.as_mut() else { return false };
+        if a.run.iter().all(|&r| r) {
+            return false;
+        }
+        for i in 0..4 {
+            if !a.run[i] {
+                a.nskip[i] -= 1;
+                a.nrun[i] += 1;
+            }
+        }
+        a.run = [true; 4];
+        a.scale = [1.0; 4];
+        a.redo += 1;
+        a.redone = true;
+        true
+    })
+}
+
 /// ループの終わりのまとめ (ログの 1 行。使っていなければ空)
 pub(super) fn summary() -> Option<String> {
     ST.with(|s| {
         s.borrow().as_ref().map(|a| {
-            let mut msg = format!("SEPALLOC rounds {}", a.rounds);
+            let mut msg = format!("SEPALLOC rounds {} redo {}", a.rounds, a.redo);
             for i in 0..4 {
                 msg += &format!(" {} run {} skip {}", NAMES[i], a.nrun[i], a.nskip[i]);
             }
