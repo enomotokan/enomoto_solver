@@ -1,0 +1,50 @@
+MIP: root LP basis from the presolve LP probing: none
+MIP: root LP 1.1433337474e5 (132 iters, 0.25s)
+MIP: root LP size: rows 4453, free columns 22120, nonzeros 178395
+MIP: root LP work: 0.042668 tick-s (132 iters, 0.033s)
+CUTTK round 0 obj 1.1433337474e5 tk 482653841
+MIP: cut round 0: 3 cuts (of 109, sep 0.16s, LP 91 iters), LP rows 4456 (cut rows mean nnz 2827), obj 1.1872206203e5 (0.86s)
+CUTTK round 1 obj 1.1872206203e5 tk 709694229
+MIP: cut round 1: 1 cuts (of 28, sep 0.04s, LP 70 iters), LP rows 4457 (cut rows mean nnz 3499), obj 1.1980666667e5 (0.93s)
+CUTTK round 2 obj 1.1980666667e5 tk 778971324
+MIP: cut round 2: 1 cuts (of 45, sep 0.05s, LP 103 iters), LP rows 4458 (cut rows mean nnz 3391), obj 1.1998543071e5 (1.03s)
+MIP: cut round 2: SEPALLOC s: window rate 1.430e-6 < overall rate 5.970e-6; stop (obj 1.1998543071e5)
+SEPLEARN root restarts 0 root: gain 5.652056e3 sep secs 0.223 ticks 263450514
+SEPLEARN root restarts 0 root extra      calls 3 cands 0 chosen 0 act1 0 gain 0.0000e0 (0.0%) surv 0/0 (0%) secs 0.004 ticks 0 work 3 skipped 0 capped 0 score 0.10
+SEPLEARN root restarts 0 root rows_cmir  calls 3 cands 40 chosen 3 act1 3 gain 2.6866e3 (47.5%) surv 1/1 (100%) secs 0.052 ticks 67861458 work 339148 skipped 0 capped 0 score 0.91
+SEPLEARN root restarts 0 root zerohalf   calls 3 cands 40 chosen 0 act1 0 gain 0.0000e0 (0.0%) surv 0/0 (0%) secs 0.032 ticks 4471228 work 604022 skipped 0 capped 0 score 0.10
+SEPLEARN root restarts 0 root clique     calls 3 cands 0 chosen 0 act1 0 gain 0.0000e0 (0.0%) surv 0/0 (0%) secs 0.000 ticks 266000 work 3 skipped 0 capped 0 score 0.10
+SEPLEARN root restarts 0 root implbd     calls 3 cands 0 chosen 0 act1 0 gain 0.0000e0 (0.0%) surv 0/0 (0%) secs 0.001 ticks 530880 work 3 skipped 0 capped 0 score 0.10
+SEPLEARN root restarts 0 root path_highs calls 3 cands 54 chosen 1 act1 1 gain 1.4658e3 (25.9%) surv 1/1 (100%) secs 0.041 ticks 79411353 work 389545 skipped 0 capped 0 score 0.63
+SEPLEARN root restarts 0 root path       calls 3 cands 0 chosen 0 act1 0 gain 0.0000e0 (0.0%) surv 0/0 (0%) secs 0.000 ticks 0 work 3 skipped 0 capped 0 score 0.10
+SEPLEARN root restarts 0 root tableau    calls 3 cands 48 chosen 1 act1 1 gain 1.4997e3 (26.5%) surv 1/1 (100%) secs 0.090 ticks 110909595 work 929348 skipped 0 capped 0 score 0.54
+SEPLEARN root restarts 0 root mcf        calls 3 cands 0 chosen 0 act1 0 gain 0.0000e0 (0.0%) surv 0/0 (0%) secs 0.000 ticks 0 work 3 skipped 0 capped 0 score 0.10
+SEPLEARN root restarts 0 root modk       calls 3 cands 0 chosen 0 act1 0 gain 0.0000e0 (0.0%) surv 0/0 (0%) secs 0.001 ticks 0 work 3 skipped 0 capped 0 score 0.10
+SEPEFF face restarts 0 rounds 3 stall 0 width 227 nonbasic 22120 rows 4458 nfrac 25 nint 22120 obj 1.1998543071e5
+CUTSTOP {"reason":"sepalloc_stop","restarts":0,"bg":false,"second":false,"rounds":3,"max_rounds":25,"phase2":false,"stall":0,"intobj_stall":0,"obj0":1.1433337474e5,"obj1":1.1998543071e5,"lp_ok":true,"inc":1.6160000000e5,"nfrac":25,"fsum":4.8082,"nint":22120,"ncuts":5,"t_loop":0.782,"t":1.045,"sense":1,"tk_loop":904928655,"tk_lp":42668122}
+SEPALLOC rounds 3 zerohalf run 3 skip 0 path_highs run 2 skip 1 path run 3 skip 0 tableau run 1 skip 2
+MIP: root LP basis from the presolve LP probing: none
+MIP: root LP basis from before the restart: 4458 of 4458 rows matched
+MIP: root LP after the restart: Optimal, 1 iters (0.24s)
+MIP: root LP 1.1998543071e5 (1 iters, 0.24s)
+MIP: root LP size: rows 4458, free columns 17200, nonzeros 149996
+MIP: root LP work: 0.084797 tick-s (1 iters, 0.006s)
+CUTTK round 0 obj 1.1998543071e5 tk 0
+MIP: cut round 0: 2 cuts (of 97, sep 0.15s, LP 43 iters), LP rows 4460 (cut rows mean nnz 3822), obj 1.2030801170e5 (0.41s)
+CUTTK round 1 obj 1.2030801170e5 tk 180262686
+MIP: cut round 1: 1 cuts (of 100, sep 0.16s, LP 5 iters), LP rows 4461 (cut rows mean nnz 3843), obj 1.2032103621e5 (0.59s)
+MIP: cut round 1: SEPALLOC s: window rate 7.341e-8 < overall rate 7.585e-7; stop (obj 1.2032103621e5)
+SEPLEARN root restarts 1 root: gain 3.356055e2 sep secs 0.283 ticks 314122127
+SEPLEARN root restarts 1 root extra      calls 2 cands 0 chosen 0 act1 0 gain 0.0000e0 (0.0%) surv 0/0 (0%) secs 0.003 ticks 0 work 2 skipped 0 capped 0 score 0.10
+SEPLEARN root restarts 1 root rows_cmir  calls 2 cands 22 chosen 3 act1 3 gain 3.3561e2 (100.0%) surv 0/0 (0%) secs 0.029 ticks 38038986 work 187056 skipped 0 capped 0 score 0.90
+SEPLEARN root restarts 1 root zerohalf   calls 2 cands 29 chosen 0 act1 0 gain 0.0000e0 (0.0%) surv 0/0 (0%) secs 0.021 ticks 2894776 work 392266 skipped 0 capped 0 score 0.10
+SEPLEARN root restarts 1 root clique     calls 2 cands 0 chosen 0 act1 0 gain 0.0000e0 (0.0%) surv 0/0 (0%) secs 0.000 ticks 137910 work 2 skipped 0 capped 0 score 0.10
+SEPLEARN root restarts 1 root implbd     calls 2 cands 0 chosen 0 act1 0 gain 0.0000e0 (0.0%) surv 0/0 (0%) secs 0.001 ticks 201992 work 2 skipped 0 capped 0 score 0.10
+SEPLEARN root restarts 1 root path_highs calls 2 cands 44 chosen 0 act1 0 gain 0.0000e0 (0.0%) surv 0/0 (0%) secs 0.036 ticks 64010605 work 258815 skipped 0 capped 0 score 0.10
+SEPLEARN root restarts 1 root path       calls 2 cands 0 chosen 0 act1 0 gain 0.0000e0 (0.0%) surv 0/0 (0%) secs 0.000 ticks 0 work 2 skipped 0 capped 0 score 0.10
+SEPLEARN root restarts 1 root tableau    calls 2 cands 102 chosen 0 act1 0 gain 0.0000e0 (0.0%) surv 0/0 (0%) secs 0.191 ticks 208837858 work 1711220 skipped 0 capped 0 score 0.10
+SEPLEARN root restarts 1 root mcf        calls 2 cands 0 chosen 0 act1 0 gain 0.0000e0 (0.0%) surv 0/0 (0%) secs 0.002 ticks 0 work 2 skipped 0 capped 0 score 0.10
+SEPLEARN root restarts 1 root modk       calls 2 cands 0 chosen 0 act1 0 gain 0.0000e0 (0.0%) surv 0/0 (0%) secs 0.001 ticks 0 work 2 skipped 0 capped 0 score 0.10
+SEPEFF face restarts 1 rounds 2 stall 0 width 184 nonbasic 17200 rows 4461 nfrac 27 nint 17200 obj 1.2032103621e5
+CUTSTOP {"reason":"sepalloc_stop","restarts":1,"bg":false,"second":false,"rounds":2,"max_rounds":25,"phase2":false,"stall":0,"intobj_stall":0,"obj0":1.1998543071e5,"obj1":1.2032103621e5,"lp_ok":true,"inc":1.3620000000e5,"nfrac":27,"fsum":4.7545,"nint":17200,"ncuts":3,"t_loop":0.360,"t":0.607,"sense":1,"tk_loop":357838018,"tk_lp":84796992}
+SEPALLOC rounds 2 zerohalf run 2 skip 0 path_highs run 2 skip 0 path run 2 skip 0 tableau run 2 skip 0

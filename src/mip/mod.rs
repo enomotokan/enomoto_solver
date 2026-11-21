@@ -6100,7 +6100,7 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
     }
     pretime::add("lpprobe_first", root_secs);
     let root_iters = lp.total_iterations();
-    // 試作 `ENOMOTO_MIP_LPPROBE_TICKS` ([`lpprobe_ticks`]): 最初の LP の決定的な手間 (`crate::ticks`) と、子の LP の手間を数え始める点
+    // 試作 `ENOMOTO_MIP_LPPROBE_TICKS` (既定にせず閉じた、2026-11-21、analysis/scipsym_20261120 の README の「結論」。[`lpprobe_ticks`]): 最初の LP の決定的な手間 (`crate::ticks`) と、子の LP の手間を数え始める点
     let root_ticks = crate::ticks::total() - tk_first0;
     let tk_probe0 = crate::ticks::total();
     let tk_extra = std::cell::Cell::new(0.0f64);
