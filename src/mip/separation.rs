@@ -8773,14 +8773,14 @@ pub(crate) fn lose6_2_tie() -> bool {
     env_str!("ENOMOTO_MIP_LOSE6_2_TIE").is_some_and(|v| v != "0")
 }
 
-/// 試作 `ENOMOTO_MIP_CUTSEL_PROBE_FIT` (既定では使わない。analysis/biglp_20261121 7 節): カットの選び方の比べ
+/// `ENOMOTO_MIP_CUTSEL_PROBE_FIT` (**既定で使う** (未設定は `1`)、`=0` で切る。2026-11-21 採用、analysis/biglp_20261121 7 節・docs/improvement_history.md): カットの選び方の比べ
 /// (`ENOMOTO_MIP_CUTSEL_PROBE`) を時間の予算 (全体の `ENOMOTO_T_MIP_CUTSEL_PROBE_TIME_FRAC` 倍) に収める。値は部品の文字 (`1` なら全部):
 /// - `p`: 根の LP の秒が予算の半分 (片側の取り分) を超えるなら比べない。比べの 1 ラウンドは分離と、カットを足した LP の解き直しで、
 ///   解き直しは根の LP と同じ程度までかかりうる (rail01: 根の LP 26.7 秒、0 ラウンド目のカットの LP 約 18 秒)
 /// - `d`: 比べの中の LP の期限を比べの期限で切り、2 つ目の側も 1 ラウンド目の前に期限を見る (今は 1 ラウンド目は期限を見ずに回り、
 ///   LP の期限は 1 回の LP の上限なので、rail01 では予算 16〜30 秒に対して 27〜53 秒使い、両側とも LP が終わらず 0 ラウンドで比べていた)
 pub(crate) fn cutsel_probe_fit(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_CUTSEL_PROBE_FIT").is_some_and(|v| v != "0" && (v == "1" || v.contains(c)))
+    env_def!("ENOMOTO_MIP_CUTSEL_PROBE_FIT", "1").is_some_and(|v| v == "1" || v.contains(c))
 }
 
 thread_local! {

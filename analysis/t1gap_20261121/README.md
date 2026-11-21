@@ -130,6 +130,8 @@ tbfp-network 0.19、rail507 0.54、istanbul-no-cutoff 0.88、dano3_5 1.0、mcsch
 
 ## 6. 案 1 (1 スレッドの根の FJ + Local-MIP、T1MIX) と案 3 (1 スレッドの根の RENS、T1RENS) の試作 (`mix/`)
 
+閉じた (2026-11-21、利用者の判断): T1MIX・T1RENS とも既定オフのまま。M の 1 スレッドの広い計測 (`shards_Mw.json`) は回さない。
+
 ### 試作
 
 - `ENOMOTO_MIP_T1MIX=1` (既定オフ): 1 スレッド (`mip_threads() == 1`) で、根の切除の後に `fj_lmip_mix` を本体で短く回す

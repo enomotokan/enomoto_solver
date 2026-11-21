@@ -3969,7 +3969,7 @@ pub(crate) fn in_submip_thread() -> bool {
     super::heuristics::SUBMIP_DEPTH.with(|d| d.get()) > 0
 }
 
-/// 試作 `ENOMOTO_MIP_ROOTCAP=<文字>` (課題 ROOTCAP、既定では使わない。analysis/rootcap_20261111.md): 外側の根で、根のヒューリスティクス・サブ MIP・
+/// 試作 `ENOMOTO_MIP_ROOTCAP=<文字>` (課題 ROOTCAP、analysis/rootcap_20261111.md。**未設定は `k` で既定で使う** (2026-11-21 採用、analysis/biglp_20261121 7 節)、`=0` で切る。ほかの文字は試作): 外側の根で、根のヒューリスティクス・サブ MIP・
 /// LP プロービングの最初の LP に時間を使いすぎて木に入るのが遅れるのを防ぐ。
 /// - `h`: 根のヒューリスティクスの時間を根の LP の重さ T (根の LP の秒と、前処理の LP による固定の最初の LP の秒 (打ち切られたものも) の大きい方) に
 ///   比べた上限で打ち切る。1 本 (Feasibility Pump・ダイビング・interior rounding・外側の根のサブ MIP 1 本) は
@@ -3991,7 +3991,8 @@ pub(crate) fn in_submip_thread() -> bool {
 ///   T の項が時間の上限の項を上回る (T > 0.02 x 時間の上限) 問題だけにかける (根の LP の軽い問題は既定と同じ)
 pub(crate) fn rootcap(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    let v = V.get_or_init(|| env_str!("ENOMOTO_MIP_ROOTCAP").map_or(String::new(), |v| v.to_string()));
+    // 未設定は `k` (2026-11-21 採用、analysis/biglp_20261121 7 節)。`=0`・`off` で切る
+    let v = V.get_or_init(|| env_def!("ENOMOTO_MIP_ROOTCAP", "k").map_or(String::new(), |v| v.to_string()));
     v.contains(c) || (c == 'h' && v.contains('k'))
 }
 
@@ -10931,7 +10932,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let rc_t_lp = self.root_lp_secs.max(f64::from_bits(ROOTCAP_PROBE_SECS.load(std::sync::atomic::Ordering::Relaxed)));
                 let rc_tl = if self.params.frac_tl().is_finite() { self.params.frac_tl() } else { 0.0 };
                 let rc_heavy = tunable!("ENOMOTO_T_MIP_ROOTCAP_EACH", 1.0, f64) * rc_t_lp > tunable!("ENOMOTO_T_MIP_ROOTCAP_EACH_TL", 0.02, f64) * rc_tl;
-                let rc_k_only = rootcap('k') && env_str!("ENOMOTO_MIP_ROOTCAP").is_some_and(|v| !v.contains('h'));
+                let rc_k_only = rootcap('k') && env_def!("ENOMOTO_MIP_ROOTCAP", "k").is_some_and(|v| !v.contains('h'));
                 if rootcap('h') && !self.params.submip && self.snap.is_none() && !(rc_k_only && !rc_heavy) {
                     let t_lp = rc_t_lp;
                     let tl = rc_tl;
