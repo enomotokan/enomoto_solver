@@ -130,11 +130,46 @@ fn dbg_skip(name: &str) -> bool {
 }
 
 pub(crate) fn infeas_tol(base: f64, scale: f64) -> f64 {
-    if tunable!("ENOMOTO_T_PRESOLVE_REL_TOL", crate::params::presolve::PRESOLVE_REL_TOL, usize) != 0 && scale.is_finite() {
+    let tol = if tunable!("ENOMOTO_T_PRESOLVE_REL_TOL", crate::params::presolve::PRESOLVE_REL_TOL, usize) != 0 && scale.is_finite() {
         base * (1.0 + scale.abs())
     } else {
         base
+    };
+    if SUBMIP_FEAS_TOL.with(|f| f.get()) {
+        tol.max(crate::mip::domain::FEASTOL)
+    } else {
+        tol
     }
+}
+
+thread_local! {
+    /// [`SubmipFeasTolScope`] の中 (サブ MIP の前処理) か
+    static SUBMIP_FEAS_TOL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `ENOMOTO_MIP_SUBMIP_FEASTOL` (既定、`=0` で以前の動き): サブ MIP の求解の間は、前処理の実行不能の判定 ([`infeas_tol`]) を
+/// MIP の実行可能性の許容誤差 ([`crate::mip::domain::FEASTOL`] = 1e-6) より厳しくしない。許容誤差の内の破れは実行不能とせず、
+/// 強制行・境界の交差の固定として扱う (サブ MIP の解は元の問題で確かめてから使う)。
+/// momentum1 では外側の前処理 (プロービングの後の代入) が `-x + 2 y + 0.027 z <= -2e-9` のような許容誤差の大きさの右辺を作り、
+/// 連続列の下限が 2e-9 になる。根の被約費用・locks などのサブ MIP が y を 0、x を下限に固定すると、行 `x <= 5.98 y` の破れ 2e-9 を
+/// 相対 1e-9 の判定が実行不能とし、根の大近傍探索のサブ MIP が 4 種とも 0.02 秒で解なしになっていた
+/// (SCIP はこのサブ MIP で 115670 を出す。analysis/primalgap_20261121/)
+pub(crate) struct SubmipFeasTolScope(bool);
+
+impl SubmipFeasTolScope {
+    pub(crate) fn enter() -> Self {
+        SubmipFeasTolScope(SUBMIP_FEAS_TOL.with(|f| f.replace(true)))
+    }
+}
+
+impl Drop for SubmipFeasTolScope {
+    fn drop(&mut self) {
+        SUBMIP_FEAS_TOL.with(|f| f.set(self.0));
+    }
+}
+
+pub(crate) fn submip_feastol_on() -> bool {
+    env_def!("ENOMOTO_MIP_SUBMIP_FEASTOL", "1").is_some()
 }
 
 /// モデルの変数・制約から `(A, b, G, h)` を組み立てる。
