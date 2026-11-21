@@ -26911,6 +26911,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let rs: Vec<u64> = POOL2_REF_STATS.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
                 eprintln!("MIP: pool2 ref (all threads): branched nodes at the reference bound {}, of which the LP stayed at the reference {}", rs[0], rs[1]);
             }
+            if env_str!("ENOMOTO_MIP_LOG").is_some() {
+                let st: Vec<u64> = super::separation::SMALL_FLOOR_STATS.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
+                eprintln!("MIP: cut small-coefficient floor (all threads): coefficients absorbed only by the floor {}, in cuts {}, cuts emptied {}, cuts dropped (infinite bound) {}", st[0], st[1], st[2], st[3]);
+            }
             if gap4('l') {
                 eprintln!("MIP: GAP4 l: cuts shortened to 100 + 0.15 n nonzeros (all threads): {}", super::separation::GAP4_CUT_SHORTENED.load(std::sync::atomic::Ordering::Relaxed));
             }
