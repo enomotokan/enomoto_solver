@@ -288,6 +288,11 @@ impl Domain {
         (lo, up)
     }
 
+    /// LP へ反映していない境界の変更があるか ([`Self::take_changed`] の前)。
+    pub fn has_changed(&self) -> bool {
+        !self.changed.is_empty()
+    }
+
     /// 前回呼んでから境界が変わった列を取り出す (LP への反映用)。
     pub fn take_changed(&mut self) -> Vec<usize> {
         for &j in &self.changed {
