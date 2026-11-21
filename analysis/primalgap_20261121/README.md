@@ -78,3 +78,54 @@
 2. **kakapo / brazil3: 目的を外したダイビング (objpscostdiving 相当) を足す、またはダイビングの反復上限を見直す。** 今の上限式は成功しないと縮み、LP 反復の 1% 未満しか使っていない。SCIP は各ダイビングに `maxlpiterquot` 0.05 前後を別々に与えている。
 3. **sorrell3: 背景の切除平面が終わって LP が締まった後に RENS をもう一度回す** (固定率が上がっていれば)。差は 1〜3 と小さいので優先度は低め。
 4. momentum1 の木のノードの遅さ (強分枝 119 秒、1 ノード数秒) は別件として記録だけ。
+
+## 6. 直す案 1 の結果: momentum1 の根の sub-MIP が 0.01〜0.02 秒で Infeasible になる件
+
+### 原因
+- LP probing の後、presolve の集約で等式行 135 (`x54 = x1046+0.7x1048+x1050+x1055+x1057+2y`) を通して代入した結果、`-x54 + 2·y + 0.0274·z ≤ -2e-9` のような行ができる。伝播 (src/presolve/propagate.rs の `lb[k] = candidate`) がそこから連続列に 2e-9 / 1.7e-9 / 1.4e-9 といった下限を付ける。これは外側の presolve 済み問題 `self.p` の側で起きる。
+- root reduced cost と locks の sub-MIP は、連続列を下限 (2e-9) に、2 値列 y を 0 に固定する。sub-MIP の presolve の propagate_split は行 `x54 - 5.98·y ≤ 0` の最小活動 2e-9 を `PROPAGATE_EPS` (1e-9)·(1+scale) と比べ、超えているので実行不能と判定する (0.003 秒で Presolved::Infeasible)。2e-9 は可能性の許容誤差 1e-6 よりはるかに小さく、誤判定である。sub-MIP を書き出して SCIP で解くと 115670 が出る。
+- 既定の SUBMIP_HIGHS では sub-MIP の presolve に `submip=false` で入るので、判定は `params.submip` (solve_problem の入口) で切り替える。
+
+### 直し (コミット d0a9eea36)
+- sub-MIP を解いている間だけ、presolve の実行不能判定の許容誤差 `infeas_tol` を `max(従来値, crate::mip::domain::FEASTOL=1e-6)` にする。新しい閾値は置かず、既存の可能性の許容誤差を使う。許容誤差内の違反は forcing 行として扱う。sub-MIP の解は元問題で検査されてから受け取るので、緩めても誤った解は入らない。
+- 既定で入。`ENOMOTO_MIP_SUBMIP_FEASTOL=0` で以前の動きに戻る。
+- 診断用に `ENOMOTO_MIP_DEBUG_DUMP_SUBINF=<prefix>` を足した。sub-MIP の presolve が Infeasible を返したとき、その問題を `<prefix>_<n>.mps` に書き出す。
+- 直した後も RENS (SUBFIX)・clique・vbounds (tight) は Infeasible で終わる。書き出した 4 問題を SCIP で解くと 4 問題とも infeasible だったので、これは本当の実行不能 (固定が強すぎる) であり、誤判定ではない。
+
+### 確かめ
+- fuzz (analysis/rootgap_20261121/fuzz.sh の組を `fuzz.sh` で既定のまま回した): tiny 0/400, highs 0/300, objint 0/1000, slack の食い違い 0, tiny2 0/400, objint2 0/1000, slack2 の食い違い 0。
+- cargo test: 419 passed, 0 failed。
+
+### momentum1 (4 スレッド、種 1〜4、600 秒): def (直しあり) と sft0 (`ENOMOTO_MIP_SUBMIP_FEASTOL=0`)
+結果は res_F.jsonl、ログは logs/momentum1_{def,sft0}_s*.log.gz。「最初の改善」は vbounds (loose) の 527463 より良い解が最初に出た時刻と、その値・出どころ。
+
+| 種 | def 最終 | def 最初の改善 | sft0 最終 | sft0 最初の改善 |
+|---|---|---|---|---|
+| 1 | 173337 | 43.3 秒 211815 (locks) | 527463 | なし |
+| 2 | 154070 | 49.9 秒 237923 (root reduced cost) | 193178 | 399.5 秒 469735 (木の local branching) |
+| 3 | 154136 | 50.9 秒 211815 (locks) | 218955 | 503.5 秒 469735 (木の local branching) |
+| 4 | 154135 | 44.0 秒 211815 (locks) | 347586 | 545.0 秒 469735 (木の local branching) |
+
+- 4 種とも def の方が良い。最初の改善は 400〜545 秒 (種 1 はなし) から 43〜51 秒に早まった。最終値も 19.3〜52.7 万から 15.4〜17.3 万になった。それでも SCIP (11.6 万) との差は残る。
+- 根の sub-MIP が「0 ノードで Infeasible」で終わった数は、1 回の実行につき sft0 で 5、def で 3 (RENS・clique・vbounds (tight)、いずれも本当の実行不能)。
+
+### 同じ型がほかの問題にあるか
+- 以前のログ (B〜E の組) で数えると、0 ノードで Infeasible の sub-MIP は momentum1 で 8 回中 5 回、sorrell3 で 1 回 (clique)、kakapo で 1 回 (RENS) だった。後の 2 つが誤判定かどうかは未確認。
+- P・M の広い計測で数える。台本は `wrun.py`、分担表は `shards_P.json` (6 組、348 回、各 0.47 時間) と `shards_M.json` (20 組、372 回、各 1.83〜1.85 時間)。def と sft0 を比べる。実行は `python analysis/primalgap_20261121/wrun.py P K` (K=0..5) と `python analysis/primalgap_20261121/wrun.py M K` (K=0..19)。d0a9eea36 を含むコミットからビルドすること。結果 res_SET_sK.jsonl の `submip` 欄に、sub-MIP の数、0 ノードで Infeasible の回数と時間、そのうち根で起きた分、ラベル別の内訳が入る。
+
+### 回したビルド
+- P 2: c3bdeaa7c (d0a9eea36・1cb61bc9a 以降) を `pip install -e .` で入れて回した (0.1.10)。58 行・crash 0。
+- P 5: c3bdeaa7c (1cb61bc9a・d0a9eea36 を含む、リポジトリの根で `pip install -e .`、0.1.10)。58 行・crash 0。
+- P 4: c3bdeaa7c (d0a9eea36・1cb61bc9a 以降、`pip install -e .`、0.1.10)。58 行・crash 0。
+- P 1: c3bdeaa7c (d0a9eea36・1cb61bc9a 以降、`pip install -e .`、0.1.10)。58 行・crash 0。
+- P 3: c3bdeaa7c (d0a9eea36・1cb61bc9a 以降、`pip install -e .`、0.1.10)。58 行・crash 0。
+- P 0: c3bdeaa7c (d0a9eea36・1cb61bc9a 以降、`pip install -e .`、0.1.10)。58 行・crash 0。
+
+## 7. 広い計測 P の結果 (6 分担そろい、ci_P.txt)
+
+- `python ../rootgap_20261121/ci.py 60 sft0 def res_P_s*.jsonl`: def/sft0 (直しあり/なし) のずらし幾何平均の比 1.005 (95% [0.992, 1.018])、解けた sft0 137 / def 136。
+- 全種で 1.25 倍超の遅れ: なし。optimal 同士の目的値の食い違い: なし。crash 0。
+- 解けた数の差 1 は neos5 種 2 (sft0 は 42.8 秒で最適、def は時間切れで暫定解 15・下界 14.35)。他の種の neos5 は両方解けている。
+- 1 回だけの遅速は両向きに散らばる (10teams は種 1・2 で def が遅く、種 3 で def が速い)。
+- 0 ノードで Infeasible の sub-MIP は分担により増減し、根の分はほぼ変わらない。P では誤判定の起きる問題が少なく、momentum1 (M) のような効きは P では見えない。
+- 解けた数が 1 減ったので、neos5 を種を増やして確かめる。

@@ -1515,6 +1515,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     dive_iters: u64,
     dive_calls: u64,
     dive_succ: u64,
+    /// 試作 `ENOMOTO_MIP_DIVEQUOTA` ([`divequota`]): 種類ごと ([`super::heuristics::DiveKind::idx`]) の (呼び出し回数, 解を見つけた回数, LP 反復数)。
+    dive_k: [(u64, u64, u64); 8],
     /// 証明の段階の検出 (`ENOMOTO_MIP_PROOF_SWITCH`、[`Self::proof_phase_check`]): 木を分け合わないときの印、最初の
     /// 暫定解の目的値、最後に最良値が良くなった (と気づいた) 時刻とその値、前回調べた時刻。
     proof_phase: bool,
@@ -3911,6 +3913,25 @@ pub(crate) fn incumb_on(c: char) -> bool {
     V.get_or_init(|| env_str!("ENOMOTO_MIP_INCUMB").map_or(String::new(), |v| v.to_string())).contains(c)
 }
 
+/// 試作 `ENOMOTO_MIP_OBJDIVE` (analysis/objdive_20261121、既定では使わない): 木のダイビングの種類の巡回に目的を外したダイビング
+/// ([`super::heuristics::DiveKind::ObjPscost`]) を足す。
+pub(crate) fn objdive_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_MIP_OBJDIVE").is_some_and(|v| v != "0" && v != "off"))
+}
+
+/// 試作 `ENOMOTO_MIP_DIVEQUOTA` (analysis/objdive_20261121、既定では使わない) の文字。木のダイビングの LP 反復の配り方:
+/// - `s`: SCIP の配り方 (`heur_dive` の maxlpiterquot): 種類ごとに上限 (1 + 10 × (解を見つけた回数 + 1) / (呼び出し回数 + 1))
+///   × `ENOMOTO_T_MIP_DIVEQUOTA_FRAC` (0.05) × ノードの LP 反復 + 1000 を別々に持ち、巡回の順で上限に余裕のある種類を回す。
+///   既定 (全種類で 1 つの上限 0.05 × (解を見つけた回数 + 1) / (呼び出し回数 + 1) × ノードの LP 反復 + 1000) は、見つからないと
+///   上限が 0 に向かって縮む (SCIP の式の「1 +」と「10 ×」がない)
+/// - `e`: 手間あたりの実績で配る: 種類ごとの割合を `ENOMOTO_T_MIP_DIVEQUOTA_FRAC` × (種類の解の数 + 1) / (種類の LP 反復 / ノードの LP 反復 + 1)
+///   で決める (`s` の呼び出し回数の代わりに使った手間で割る。見つけるほど増え、使って見つけないほど減るが 0 にはならない)
+pub(crate) fn divequota(c: char) -> bool {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| env_str!("ENOMOTO_MIP_DIVEQUOTA").map_or(String::new(), |v| v.to_string())).contains(c)
+}
+
 pub(crate) fn subcap(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     V.get_or_init(|| env_str!("ENOMOTO_MIP_SUBCAP").map_or(String::new(), |v| v.to_string())).contains(c)
@@ -3962,9 +3983,16 @@ pub(crate) fn in_submip_thread() -> bool {
 /// - `q`: `p` の前に、止まった LP をそのまま (尺度・DSE 重み・摂動を保ったまま) 続けて解き、解ければその最適基底を渡す
 /// - `w`: 根のヒューリスティクスの後に裏のカットを待つのも `h` の期限の残り (最低 1 秒) まで
 /// - `d`: 根の LP が重い問題の根のカットのループで、1 ラウンドに足すカットの非零の和に上限 (`separation.rs` の `ROOTCAP d`)
+/// - `k` (analysis/biglp_20261121 10 節): `h` の上限を根の LP の重さ T に比例する側で締める (`h` を含む)。1 本は `ENOMOTO_T_MIP_ROOTCAP_EACH` の
+///   既定を 5 → 1 (1 本の上限 = max(1 秒, 0.02 x 時間の上限, T))、全体は `ENOMOTO_T_MIP_ROOTCAP_TOT` の既定を 20 → 2 (= max(0.05 x 時間の上限, 2T)、
+///   残り時間の割合の上限はそのまま)。あわせて interior rounding は、根の LP の秒がその予算を超えるなら内点法を始めない
+///   (`ENOMOTO_MIP_IPM_HEUR_LPGATE` と同じ判定。内点法の準備 (順序付け・記号分解) は止めの合図を見ないので予算を大きく超える:
+///   sorrell3 (根の LP 46 秒) で予算 30 秒に対して 72 秒使い、失敗していた)。`h` を書かずに `k` だけなら、上限 (と interior rounding の判定) は
+///   T の項が時間の上限の項を上回る (T > 0.02 x 時間の上限) 問題だけにかける (根の LP の軽い問題は既定と同じ)
 pub(crate) fn rootcap(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_str!("ENOMOTO_MIP_ROOTCAP").map_or(String::new(), |v| v.to_string())).contains(c)
+    let v = V.get_or_init(|| env_str!("ENOMOTO_MIP_ROOTCAP").map_or(String::new(), |v| v.to_string()));
+    v.contains(c) || (c == 'h' && v.contains('k'))
 }
 
 /// [`rootcap`] の `h` 用: 外側の前処理の LP による固定の最初の LP の秒 (期限で止まったものも。f64 のビット、なければ 0)
@@ -5889,6 +5917,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         dive_iters: 0,
         dive_calls: 0,
         dive_succ: 0,
+        dive_k: [(0, 0, 0); 8],
         proof_phase: false,
         proof_first_z: f64::INFINITY,
         proof_last_best: (f64::INFINITY, Instant::now()),
@@ -10197,6 +10226,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if restart_basis_used && self.params.verbose {
             eprintln!("MIP: root LP after the restart: {root_st:?}, {} iters ({:.2}s)", self.lp.total_iterations() - root_iters0, self.start.elapsed().as_secs_f64());
+            // 診断 (`ENOMOTO_MIP_NODELP_DIAG` のとき、振る舞いは変えない。analysis/biglp_20261121 9 節): 再スタートの後の warm start の出発の状態
+            if crate::simplex::slope_intercept_dual::nodelp_diag() {
+                let r = crate::simplex::slope_intercept_dual::NODELP_REC.with(|c| c.get());
+                let i3 = crate::simplex::slope_intercept_dual::NODELP_INF3.with(|c| c.get());
+                eprintln!(
+                    "MIP: root LP after the restart (diag): warm {} primal infeasible rows {} (columns {}, rows {}, cut rows {}), cost-shifted columns {}, refactorizations {}, DSE {}, phase A {} ({} iters), perturbed {}",
+                    r[0], r[1], i3[0], i3[1], i3[2], r[2], r[3], r[4], r[5], r[6], r[7]
+                );
+            }
         }
         // 診断用 (`ENOMOTO_MIP_DEBUG_RESTART_CUT_USE`): 再スタートの後の根の LP 解で、カットプールのカットと LP のカットの行が
         // 破られている・等号で効いている・緩んでいる数
@@ -10883,15 +10921,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 // 試作 `ENOMOTO_MIP_ROOTCAP` の `h` ([`rootcap`]): 根のヒューリスティクスの期限と 1 本の上限を根の LP の重さから決める
                 self.rootcap_until = None;
-                if rootcap('h') && !self.params.submip && self.snap.is_none() {
-                    let t_lp = self.root_lp_secs.max(f64::from_bits(ROOTCAP_PROBE_SECS.load(std::sync::atomic::Ordering::Relaxed)));
-                    let tl = if self.params.frac_tl().is_finite() { self.params.frac_tl() } else { 0.0 };
+                // `k` だけ (`h` を書かない) なら、T の項 (`ENOMOTO_T_MIP_ROOTCAP_EACH` x T) が時間の上限の項 (`ENOMOTO_T_MIP_ROOTCAP_EACH_TL` x 時間の上限)
+                // を上回る (根の LP が重い) 問題だけ上限をかける。根の LP の軽い問題では時間の上限の床で根のサブ MIP を切らない (既定と同じ動き。
+                // 10teams: 床の 1 本 1.2 秒で LP face のサブ MIP が 0 ノードで止まり、既定なら見つかる最適値を逃していた。analysis/biglp_20261121 7.6・7.7 節)
+                let rc_t_lp = self.root_lp_secs.max(f64::from_bits(ROOTCAP_PROBE_SECS.load(std::sync::atomic::Ordering::Relaxed)));
+                let rc_tl = if self.params.frac_tl().is_finite() { self.params.frac_tl() } else { 0.0 };
+                let rc_heavy = tunable!("ENOMOTO_T_MIP_ROOTCAP_EACH", 1.0, f64) * rc_t_lp > tunable!("ENOMOTO_T_MIP_ROOTCAP_EACH_TL", 0.02, f64) * rc_tl;
+                let rc_k_only = rootcap('k') && env_str!("ENOMOTO_MIP_ROOTCAP").is_some_and(|v| !v.contains('h'));
+                if rootcap('h') && !self.params.submip && self.snap.is_none() && !(rc_k_only && !rc_heavy) {
+                    let t_lp = rc_t_lp;
+                    let tl = rc_tl;
                     let each = tunable!("ENOMOTO_T_MIP_ROOTCAP_EACH_MIN", 1.0, f64)
                         .max(tunable!("ENOMOTO_T_MIP_ROOTCAP_EACH_TL", 0.02, f64) * tl)
-                        .max(tunable!("ENOMOTO_T_MIP_ROOTCAP_EACH", 5.0, f64) * t_lp);
+                        .max(tunable!("ENOMOTO_T_MIP_ROOTCAP_EACH", if rootcap('k') { 1.0 } else { 5.0 }, f64) * t_lp);
                     let rem = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
                     let f_rem = if self.incumbent.is_some() { tunable!("ENOMOTO_T_MIP_ROOTCAP_REM", 0.15, f64) } else { tunable!("ENOMOTO_T_MIP_ROOTCAP_REM_NOINC", 0.25, f64) };
-                    let tot = (tunable!("ENOMOTO_T_MIP_ROOTCAP_TOT_TL", 0.05, f64) * tl).max(tunable!("ENOMOTO_T_MIP_ROOTCAP_TOT", 20.0, f64) * t_lp).min(f_rem * rem);
+                    let tot = (tunable!("ENOMOTO_T_MIP_ROOTCAP_TOT_TL", 0.05, f64) * tl).max(tunable!("ENOMOTO_T_MIP_ROOTCAP_TOT", if rootcap('k') { 2.0 } else { 20.0 }, f64) * t_lp).min(f_rem * rem);
                     let each = each.min(tot);
                     self.rootcap_late = (tunable!("ENOMOTO_T_MIP_ROOTCAP_LATE", 1.0, f64) * t_lp).clamp(tunable!("ENOMOTO_T_MIP_ROOTCAP_EACH_MIN", 1.0, f64), each.max(1.0));
                     self.rootcap_each = each;
@@ -14146,7 +14191,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // ダイビング (SCIP の fracdiving / veclendiving: 深さ 10 ごと、ずらし 3 / 7)
                     if heur_ok && !noinc && (node.depth % 10 == 3 || node.depth % 10 == 7) {
                         let quota = (0.05 * (self.dive_succ + 1) as f64 / (self.dive_calls + 1) as f64 * self.node_iters as f64) as u64 + 1000;
-                        if self.dive_iters < quota && env_str!("ENOMOTO_MIP_NO_NODE_DIVE").is_none() {
+                        // 試作 `ENOMOTO_MIP_DIVEQUOTA` の `s`・`e` ([`divequota`]): 種類ごとの上限で選ぶ
+                        let dq = divequota('s') || divequota('e');
+                        if (dq || self.dive_iters < quota) && env_str!("ENOMOTO_MIP_NO_NODE_DIVE").is_none() {
                             // 種類を順に回す (SCIP の各ダイビングに相当。誘導は暫定解があるときだけ)
                             use super::heuristics::DiveKind as K;
                             let kinds: &[K] = if env_str!("ENOMOTO_MIP_DIVE_OLD_KINDS").is_some() {
@@ -14162,21 +14209,52 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             } else {
                                 &[K::Fractional, K::VectorLength, K::Coefficient, K::Pseudocost, K::Farkas, K::Conflict]
                             };
-                            let kind = kinds[self.dive_calls as usize % kinds.len()];
+                            let mut kinds_v: Vec<K> = kinds.to_vec();
+                            if objdive_on() {
+                                kinds_v.push(K::ObjPscost);
+                            }
+                            let kinds = &kinds_v[..];
+                            let frac_q = tunable!("ENOMOTO_T_MIP_DIVEQUOTA_FRAC", 0.05, f64);
+                            let ni = self.node_iters as f64;
+                            let kq = |k: (u64, u64, u64)| -> u64 {
+                                let r = if divequota('e') {
+                                    (k.1 + 1) as f64 / (k.2 as f64 / ni.max(1.0) + 1.0)
+                                } else {
+                                    1.0 + 10.0 * (k.1 + 1) as f64 / (k.0 + 1) as f64
+                                };
+                                (r * frac_q * ni) as u64 + 1000
+                            };
+                            // (種類, 反復の上限)。`dq` なら巡回の順で、自分の上限に余裕のある最初の種類
+                            let sel: Option<(K, u64)> = if dq {
+                                (0..kinds.len()).map(|i| kinds[(self.dive_calls as usize + i) % kinds.len()]).find_map(|k| {
+                                    let st = self.dive_k[k.idx()];
+                                    let q = kq(st);
+                                    (st.2 < q).then(|| (k, q - st.2))
+                                })
+                            } else {
+                                Some((kinds[self.dive_calls as usize % kinds.len()], quota - self.dive_iters))
+                            };
+                            if let Some((kind, budget)) = sel {
                             let lb = self.queue.best_lower_bound().min(node_obj);
                             let cutoff = self.prune_limit();
                             let quot = if self.has_cutoff_value() { 0.8 } else { 0.1 };
                             let bound = if cutoff.is_finite() { lb + quot * (cutoff - lb) } else { f64::INFINITY };
                             let it0 = self.lp.total_iterations();
                             self.dive_calls += 1;
-                            self.heur_label = "tree diving";
-                            if self.dive(kind, quota - self.dive_iters, bound) {
+                            self.heur_label = if kind == K::ObjPscost { "tree objective diving" } else { "tree diving" };
+                            let ok = self.dive(kind, budget, bound);
+                            if ok {
                                 self.dive_succ += 1;
                             }
                             self.heur_label = "";
                             let used = self.lp.total_iterations() - it0;
                             self.dive_iters += used;
                             self.heur_iters += used;
+                            let e = &mut self.dive_k[kind.idx()];
+                            e.0 += 1;
+                            e.1 += ok as u64;
+                            e.2 += used;
+                            }
                         }
                     }
                     if node_obj >= self.prune_limit() {
@@ -22041,6 +22119,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let all = lits.iter().all(|&(j, upper, v)| if upper { x[j] <= v + 1e-6 } else { x[j] >= v - 1e-6 });
             if all {
+                let gap = super::domain::dbg_lits_gap(&x, lits.iter().copied());
+                if gap > 1e-9 {
+                    eprintln!("MIP_DBGTOL: conflict ({tag}) misses the debug solution only by {gap:.3e} (within the tolerance) at node {} thread {}, len {}", self.nodes, self.pool_tid, lits.len());
+                    return;
+                }
                 let terms: Vec<String> = lits.iter().take(12).map(|&(j, upper, v)| format!("x{j}{}{v}[{}]", if upper { "<=" } else { ">=" }, x[j])).collect();
                 eprintln!(
                     "MIP_DEBUG_SOL: conflict ({tag}) cuts off the debug solution at node {} thread {} ({}): domain contains the debug solution: {}, len {}, stack {}: {}",
@@ -27020,6 +27103,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if env_str!("ENOMOTO_MIP_LOG").is_some() {
                 let st: Vec<u64> = super::separation::SMALL_FLOOR_STATS.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
                 eprintln!("MIP: cut small-coefficient floor (all threads): coefficients absorbed only by the floor {}, in cuts {}, cuts emptied {}, cuts dropped (infinite bound) {}", st[0], st[1], st[2], st[3]);
+                let ct: Vec<u64> = super::separation::CANCEL_STATS.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
+                eprintln!("MIP: cut cancellation check (all threads): residual coefficients {}, in cuts {}, of which not absorbed by the small-coefficient rule {}, cuts changed {}, cuts emptied {}", ct[0], ct[1], ct[2], ct[3], ct[4]);
             }
             if gap4('l') {
                 eprintln!("MIP: GAP4 l: cuts shortened to 100 + 0.15 n nonzeros (all threads): {}", super::separation::GAP4_CUT_SHORTENED.load(std::sync::atomic::Ordering::Relaxed));
