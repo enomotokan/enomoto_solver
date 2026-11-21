@@ -42,7 +42,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 時間の上限を 10〜11 秒超えた (AMD と METIS は `rayon::join` で並ぶので 1 スレッドで最も長い。
         // analysis/mittelmann_ready_20261103/threads.md)
         // 試作 `ENOMOTO_MIP_ROOTCAP` の `k` ([`super::solver::rootcap`]) も同じ判定 (係数は 1)
-        if (env_str!("ENOMOTO_MIP_IPM_HEUR_LPGATE").is_some() || (super::solver::rootcap('k') && self.snap.is_none())) && self.root_lp_secs > tunable!("ENOMOTO_T_MIP_IPM_HEUR_LPGATE_MULT", 1.0, f64) * budget {
+        if (env_str!("ENOMOTO_MIP_IPM_HEUR_LPGATE").is_some() || (super::solver::rootcap('k') && self.snap.is_none() && self.rootcap_until.is_some())) && self.root_lp_secs > tunable!("ENOMOTO_T_MIP_IPM_HEUR_LPGATE_MULT", 1.0, f64) * budget {
             if self.params.verbose {
                 eprintln!("MIP:   interior rounding: skipped (root LP {:.2}s > budget {budget:.2}s)", self.root_lp_secs);
             }
