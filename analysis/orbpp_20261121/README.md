@@ -205,4 +205,5 @@ MIPLIB 2017 のコレクション 1065 問 (`collection.json`) のうち、easy�
   - 回したビルド: P 3: 2d478930a (pip install -e .、0.1.10)。58 行・crash 0。
   - 回したビルド: P 1: 2d478930a (pip install -e .、0.1.10)。58 行・crash 0。
   - 回したビルド: P 2: 2d478930a (pip install -e .、0.1.10)。58 行・crash 0。
+  - 回したビルド: P 4: 2d478930a (pip install -e .、0.1.10)。58 行・crash 0。
 - `summ.py` → `summ.txt`・`summ_rows.json`: 4 スレッドの組ごとの表と構造。`cond.py` → `cond.txt`・`cond_rows.json`: 条件ごとの得失。
