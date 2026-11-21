@@ -327,8 +327,10 @@ pub(crate) fn rootsb_flags() -> Option<&'static str> {
     env_str!("ENOMOTO_MIP_ROOTSB").filter(|v| !v.is_empty() && *v != "0")
 }
 
+/// `ENOMOTO_MIP_TIMEDEP` の文字 (analysis/timedep_20261114.md)。既定 `b` (割合で決める量の基準を元の時間上限にする。2026-11-21 に
+/// `ENOMOTO_MIP_DET1T=onil` と組で既定化、analysis/det1t_20261120。`=0` で以前の形。ほかの文字を指定すると `b` は外れるので、続けて使うなら `bw` のように足す)
 pub(crate) fn timedep(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_TIMEDEP").is_some_and(|v| v.contains(c))
+    env_def!("ENOMOTO_MIP_TIMEDEP", "b").is_some_and(|v| v.contains(c))
 }
 
 pub(crate) fn cap_clock() -> f64 {

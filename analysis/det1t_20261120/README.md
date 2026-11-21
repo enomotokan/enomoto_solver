@@ -68,3 +68,9 @@
 - 直し: 内点法の手間は期限の判定 ([`ticks::ipm_over`]) にだけ使い、スレッドの手間の合計には足さない ([`ticks::ipm_add`])。1 スレッドでノード数が食い違った 11 組を
   直した版で解き直すと 10 組が def_t1 と同じノード数 (rout 種 1〜3・timtab1 種 2・3 (どちらも解ける)・roll3000・neos-911970・misc07・qiu)。
   残る h80x6320d 種 2 は bonil が速い (155 → 3 ノード、38.7 → 30.3 秒) (`dt_mis_rerun.jsonl`)。直した版の P の 58 問の再現性を回している (`p58_bonil2.jsonl`)。
+- 直した版の P の 58 問 (60 秒、種 1、2 回): **58 / 58 が一致** (`p58_bonil2.jsonl`)。
+
+## 7. 既定化 (利用者の判断、2026-11-21)
+- `ENOMOTO_MIP_TIMEDEP` の既定を `b`、`ENOMOTO_MIP_DET1T` の既定を `onil` にした (`env_def!`、`=0` で以前の形)。ほかの試作 (LPPROBE_TICKS・FACECUT・SYMAVG など) は触っていない。
+- 確かめ: cargo test 419 通過 (`cargo test --release --lib`、pyo3 の extension-module のため libpython をリンクに足して回した)。fuzz 7 本 bad 0。
+- 戻し方: `ENOMOTO_MIP_TIMEDEP=0 ENOMOTO_MIP_DET1T=0` (一部だけ戻すなら、例えば `ENOMOTO_MIP_DET1T=onl` で `i` を外す)。

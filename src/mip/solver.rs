@@ -82,7 +82,7 @@ pub struct MipParams {
 }
 
 impl MipParams {
-    /// 割合で決める量 (時間の上限の x 倍) の基準。試作 `ENOMOTO_MIP_TIMEDEP` の `b` (analysis/timedep_20261114.md) なら外側の求解では
+    /// 割合で決める量 (時間の上限の x 倍) の基準。`ENOMOTO_MIP_TIMEDEP` の `b` (既定、analysis/timedep_20261114.md・det1t_20261120) なら外側の求解では
     /// 元の時間上限 `tl_base` (前処理・再スタートに使った壁時計の秒で変わらない)、それ以外は `time_limit` (残り時間)。期限は `time_limit` のまま
     pub fn frac_tl(&self) -> f64 {
         if !self.submip && self.tl_base.is_finite() && super::timedep('b') {
@@ -13211,7 +13211,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 } else {
                     cap
                 };
-                // 試作 `ENOMOTO_MIP_DET1T` の `l` (analysis/det1t_20261120): 上限を手間で数える (平均の手間の 50 倍、最低 0.5e9 = 0.5 秒相当)。
+                // `ENOMOTO_MIP_DET1T` (既定 `onil`) の `l` (analysis/det1t_20261120): 上限を手間で数える (平均の手間の 50 倍、最低 0.5e9 = 0.5 秒相当)。
                 // 壁時計の上限は 10 倍の安全網にする。手間の期限は解くたびに [`crate::ticks::budget_guard`] で付ける
                 let det_l = det1t('l');
                 let cap_tk = (50.0 * self.node_lp_ticks / self.node_lps.max(1) as f64).max(0.5e9);
@@ -20563,7 +20563,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let x = self.lp.col_values();
             if !self.fractional(&x).is_empty() {
                 let t0 = Instant::now();
-                // 試作 `ENOMOTO_MIP_DET1T` の `o` (analysis/det1t_20261120): 使った分を壁時計の秒でなく手間 (ticks、1 手間 ≒ 1 ns) で数える
+                // `ENOMOTO_MIP_DET1T` (既定 `onil`) の `o` (analysis/det1t_20261120): 使った分を壁時計の秒でなく手間 (ticks、1 手間 ≒ 1 ns) で数える
                 let tk0 = crate::ticks::total();
                 let before = self.incumbent.as_ref().map(|(z, _)| *z);
                 // 丸めの伝播の手間の上限を `ENOMOTO_T_MIP_OBJPROBE_RR_WORK` (既定 200) x 非零数に上げる (既定の 20 倍では hypothyroid-k1 の
@@ -27358,24 +27358,25 @@ pub(super) fn inf_all() -> bool {
     *F.get_or_init(|| env_str!("ENOMOTO_MIP_INF_ALL").is_some_and(|v| v != "0"))
 }
 
-/// 試作 `ENOMOTO_MIP_LIT_EXPLAIN` (p2inf_20261119、既定では使わない): リテラルの衝突のプールの伝播で締めた変更を、衝突を行にしたものから
-/// 衝突解析で遡れるようにする ([`Solver::lit_prop`])。bnatt400 では解析の段の 1/3 がリテラルの衝突で締めた変更を遡れずに止まっていた
-/// (SCIP は衝突を制約 (logicor) として持つので遡れる)
-/// 試作 `ENOMOTO_MIP_DET1T` の文字 (analysis/det1t_20261120、既定では使わない): 1 スレッドで同じ種の結果を再現させるため、時間で決めている所を手間で決める。
+/// `ENOMOTO_MIP_DET1T` の文字 (analysis/det1t_20261120): 1 スレッドで同じ種の結果を再現させるため、時間で決めている所を手間で決める。
+/// 既定 `onil` (2026-11-21 に既定化、`=0` で以前の形。`ENOMOTO_MIP_TIMEDEP` の既定 `b` と組)。
 /// `o`: 根のカットのループの乱択丸め (OBJPROBE `r`) の枠を、使った壁時計の秒でなく手間で数える。
 /// `n`: 手間の期限の中で解くサブ MIP は、時間の上限を 10 倍の安全網にする ([`Solver::solve_submip_problem`])
 /// `l`: ノードの LP の 1 回の上限 (平均の 50 倍・最低 0.5 秒) を手間で数える。
 /// `i`: 根の interior rounding の予算を手間で数え、内点法の反復も手間の期限で止める (src/mip/heur_ipm.rs、[`crate::ticks::ipm_work`])
 pub(super) fn det1t(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_DET1T").is_some_and(|v| v.contains(c))
+    env_def!("ENOMOTO_MIP_DET1T", "onil").is_some_and(|v| v.contains(c))
 }
 
-/// 試作 `ENOMOTO_MIP_LIT_EXPLAIN=g` (analysis/slowm_20261119 §17、既定では使わない): 一般整数の境界の文字を含む衝突で締めた変更も遡れるようにする
+/// 試作 `ENOMOTO_MIP_LIT_EXPLAIN` (p2inf_20261119、既定では使わない): リテラルの衝突のプールの伝播で締めた変更を、衝突を行にしたものから
+/// 衝突解析で遡れるようにする ([`Solver::lit_prop`])。bnatt400 では解析の段の 1/3 がリテラルの衝突で締めた変更を遡れずに止まっていた
+/// (SCIP は衝突を制約 (logicor) として持つので遡れる)
 /// `ENOMOTO_MIP_LIT_EXPLAIN` の値。指定しなければ `sig` (p2inf_20261119 8.4 節で既定化、`=0` で切る)
 fn lit_explain_val() -> Option<String> {
     Some(env_str!("ENOMOTO_MIP_LIT_EXPLAIN").map(|v| v.to_string()).unwrap_or_else(|| "sig".to_string()))
 }
 
+/// 試作 `ENOMOTO_MIP_LIT_EXPLAIN=g` (analysis/slowm_20261119 §17、既定では使わない): 一般整数の境界の文字を含む衝突で締めた変更も遡れるようにする
 pub(super) fn lit_explain_gen() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     // `sig` (p2inf_20261119 の予算つきの形) も 'g' を含むので除く
