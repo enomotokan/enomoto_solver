@@ -1,8 +1,8 @@
 diff --git a/src/mip/separation.rs b/src/mip/separation.rs
-index b2b4619f4..4d0f9221b 100644
+index 2b41026a8..94b207603 100644
 --- a/src/mip/separation.rs
 +++ b/src/mip/separation.rs
-@@ -7207,107 +7207,77 @@ impl<'a, L: MipLp> Solver<'a, L> {
+@@ -7210,107 +7210,77 @@ impl<'a, L: MipLp> Solver<'a, L> {
          super::hnfcut::set_kind('c');
          let hnfcut_st = super::hnfcut::snapshot();
          if par {
@@ -168,7 +168,7 @@ index b2b4619f4..4d0f9221b 100644
                                      let n0 = cs.len();
                                      for raw in generate_cuts(vars_ref, b, 0.0, tab_fc, false) {
                                          if let Some(c) = finish_cut(raw, n, lp_rows_ref, cut_int, glo, gup, x, inc, &mut scratch) {
-@@ -7316,32 +7286,111 @@ impl<'a, L: MipLp> Solver<'a, L> {
+@@ -7319,32 +7289,111 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                      }
                                      keep_best(&mut cs, n0, pp);
                                  }
@@ -298,7 +298,7 @@ index b2b4619f4..4d0f9221b 100644
              if dbg_sep {
                  t_gen += t0.elapsed().as_secs_f64();
              }
-@@ -8243,6 +8292,9 @@ fn finish_cut(
+@@ -8246,6 +8295,9 @@ fn finish_cut(
      if cmirdelta_new {
          super::cmirdelta::note_new_cand(&coefs, rhs);
      }
