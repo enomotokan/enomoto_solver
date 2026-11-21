@@ -3795,6 +3795,11 @@ pub(super) struct CutPropState {
 /// 根のヒューリスティクスの終わりに、暫定解を出発点に Local-MIP + 連鎖の手 ([`super::localmip`]) を回すか
 /// (`ENOMOTO_MIP_ROOT_LMIP`、試作、既定では使わない)。FJ のスレッドの Local-MIP (`fj_lmip_mix`) は FJ 自身の解しか受け取らず、
 /// 根のカットのループの終わりで止まるので、RENS・RINS などのサブ MIP の解からは磨かない
+/// 試作 `ENOMOTO_MIP_T1MIX` (既定では使わない、analysis/t1gap_20261121): [`Solver::t1_fj_lmip_mix`]
+fn t1mix_on() -> bool {
+    env_str!("ENOMOTO_MIP_T1MIX").is_some()
+}
+
 fn root_lmip_on() -> bool {
     env_str!("ENOMOTO_MIP_ROOT_LMIP").is_some()
 }
@@ -3957,9 +3962,15 @@ pub(crate) fn in_submip_thread() -> bool {
 /// - `q`: `p` の前に、止まった LP をそのまま (尺度・DSE 重み・摂動を保ったまま) 続けて解き、解ければその最適基底を渡す
 /// - `w`: 根のヒューリスティクスの後に裏のカットを待つのも `h` の期限の残り (最低 1 秒) まで
 /// - `d`: 根の LP が重い問題の根のカットのループで、1 ラウンドに足すカットの非零の和に上限 (`separation.rs` の `ROOTCAP d`)
+/// - `k` (analysis/biglp_20261121 10 節): `h` の上限を根の LP の重さ T に比例する側で締める (`h` を含む)。1 本は `ENOMOTO_T_MIP_ROOTCAP_EACH` の
+///   既定を 5 → 1 (1 本の上限 = max(1 秒, 0.02 x 時間の上限, T))、全体は `ENOMOTO_T_MIP_ROOTCAP_TOT` の既定を 20 → 2 (= max(0.05 x 時間の上限, 2T)、
+///   残り時間の割合の上限はそのまま)。あわせて interior rounding は、根の LP の秒がその予算を超えるなら内点法を始めない
+///   (`ENOMOTO_MIP_IPM_HEUR_LPGATE` と同じ判定。内点法の準備 (順序付け・記号分解) は止めの合図を見ないので予算を大きく超える:
+///   sorrell3 (根の LP 46 秒) で予算 30 秒に対して 72 秒使い、失敗していた)
 pub(crate) fn rootcap(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_str!("ENOMOTO_MIP_ROOTCAP").map_or(String::new(), |v| v.to_string())).contains(c)
+    let v = V.get_or_init(|| env_str!("ENOMOTO_MIP_ROOTCAP").map_or(String::new(), |v| v.to_string()));
+    v.contains(c) || (c == 'h' && v.contains('k'))
 }
 
 /// [`rootcap`] の `h` 用: 外側の前処理の LP による固定の最初の LP の秒 (期限で止まったものも。f64 のビット、なければ 0)
@@ -10192,6 +10203,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if restart_basis_used && self.params.verbose {
             eprintln!("MIP: root LP after the restart: {root_st:?}, {} iters ({:.2}s)", self.lp.total_iterations() - root_iters0, self.start.elapsed().as_secs_f64());
+            // 診断 (`ENOMOTO_MIP_NODELP_DIAG` のとき、振る舞いは変えない。analysis/biglp_20261121 9 節): 再スタートの後の warm start の出発の状態
+            if crate::simplex::slope_intercept_dual::nodelp_diag() {
+                let r = crate::simplex::slope_intercept_dual::NODELP_REC.with(|c| c.get());
+                let i3 = crate::simplex::slope_intercept_dual::NODELP_INF3.with(|c| c.get());
+                eprintln!(
+                    "MIP: root LP after the restart (diag): warm {} primal infeasible rows {} (columns {}, rows {}, cut rows {}), cost-shifted columns {}, refactorizations {}, DSE {}, phase A {} ({} iters), perturbed {}",
+                    r[0], r[1], i3[0], i3[1], i3[2], r[2], r[3], r[4], r[5], r[6], r[7]
+                );
+            }
         }
         // 診断用 (`ENOMOTO_MIP_DEBUG_RESTART_CUT_USE`): 再スタートの後の根の LP 解で、カットプールのカットと LP のカットの行が
         // 破られている・等号で効いている・緩んでいる数
@@ -10531,6 +10551,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // スレッド以外から暫定解を得たときにも自分で終わる
         if lmboost_on() && !self.params.submip && self.snap.is_none() && self.params.restarts == 0 && !self.root_gap_closed() {
             self.lmip_boost();
+        }
+        // 試作 `ENOMOTO_MIP_T1MIX` (analysis/t1gap_20261121): 1 スレッドでは FJ のスレッドがなく FJ + Local-MIP の組が回らないので、ここ
+        // (並列なら FJ のスレッドを止める所) で本体が同じ組を回す ([`Self::t1_fj_lmip_mix`])
+        if t1mix_on() && mip_threads() == 1 && !self.params.submip && self.snap.is_none() && self.params.restarts == 0 && !proof_only() && self.fj_thread.is_none() && !self.root_gap_closed() {
+            self.t1_fj_lmip_mix();
         }
         if fjkeep_on() && !self.params.submip && self.snap.is_none() && self.fj_thread.is_some() && (self.incumbent.is_none() || self.inc_only_fj) && !self.root_gap_closed() {
             self.poll_lmip_thread();
@@ -10878,10 +10903,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let tl = if self.params.frac_tl().is_finite() { self.params.frac_tl() } else { 0.0 };
                     let each = tunable!("ENOMOTO_T_MIP_ROOTCAP_EACH_MIN", 1.0, f64)
                         .max(tunable!("ENOMOTO_T_MIP_ROOTCAP_EACH_TL", 0.02, f64) * tl)
-                        .max(tunable!("ENOMOTO_T_MIP_ROOTCAP_EACH", 5.0, f64) * t_lp);
+                        .max(tunable!("ENOMOTO_T_MIP_ROOTCAP_EACH", if rootcap('k') { 1.0 } else { 5.0 }, f64) * t_lp);
                     let rem = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
                     let f_rem = if self.incumbent.is_some() { tunable!("ENOMOTO_T_MIP_ROOTCAP_REM", 0.15, f64) } else { tunable!("ENOMOTO_T_MIP_ROOTCAP_REM_NOINC", 0.25, f64) };
-                    let tot = (tunable!("ENOMOTO_T_MIP_ROOTCAP_TOT_TL", 0.05, f64) * tl).max(tunable!("ENOMOTO_T_MIP_ROOTCAP_TOT", 20.0, f64) * t_lp).min(f_rem * rem);
+                    let tot = (tunable!("ENOMOTO_T_MIP_ROOTCAP_TOT_TL", 0.05, f64) * tl).max(tunable!("ENOMOTO_T_MIP_ROOTCAP_TOT", if rootcap('k') { 2.0 } else { 20.0 }, f64) * t_lp).min(f_rem * rem);
                     let each = each.min(tot);
                     self.rootcap_late = (tunable!("ENOMOTO_T_MIP_ROOTCAP_LATE", 1.0, f64) * t_lp).clamp(tunable!("ENOMOTO_T_MIP_ROOTCAP_EACH_MIN", 1.0, f64), each.max(1.0));
                     self.rootcap_each = each;
@@ -24307,6 +24332,58 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 下界に届く・`ENOMOTO_T_MIP_LMBOOST_STALL` (0.5) × (発動した時刻の秒) (2 秒以上) 改善がない・時間上限の
     /// `ENOMOTO_T_MIP_LMBOOST_FRAC` (0.25) を過ぎる、のどれかで止める。前処理の間の連鎖 (`ENOMOTO_MIP_PRECHAIN` の `e`) は使わない。
     /// comp07-2idx (Mittelmann) は根の下界が 6 で、6 を見つけるのは Local-MIP だけ (根のサブ MIP・木は見つけない)
+    /// 試作 `ENOMOTO_MIP_T1MIX` (既定では使わない、analysis/t1gap_20261121): 1 スレッドの根のカットのループの終わりに、並列の FJ のスレッドと
+    /// 同じ FJ + Local-MIP の組 ([`super::heuristics::fj_lmip_mix`]) を本体で回す。問題は FJ のスレッドと同じ (対称性の行を足す前の問題と
+    /// その境界)。上限は FJ のスレッドの Local-MIP と同じ (`ENOMOTO_T_MIP_LOCALMIP_TIME_FRAC` (0.1) × 時間上限、10 秒まで)、打ち切りは
+    /// LMBOOST と同じ形 (`ENOMOTO_T_MIP_LMBOOST_STALL` (0.5) × 始めた時刻の秒 (2 秒以上) 改善がない)。新しい解は良い順に暫定解に試す。
+    /// CMS750_4 は 4 スレッドでは FJ のスレッドの Local-MIP が 6.4 秒で最適解 252 を出すが、1 スレッドでは 2400 秒で 423 だった
+    fn t1_fj_lmip_mix(&mut self) {
+        let t_now = self.start.elapsed().as_secs_f64();
+        let ftl = self.params.frac_tl();
+        let mut cap = if ftl.is_finite() { (tunable!("ENOMOTO_T_MIP_LOCALMIP_TIME_FRAC", 0.1, f64) * ftl).min(10.0) } else { 10.0 };
+        if let Some(d) = self.deadline {
+            cap = cap.min(d.saturating_duration_since(Instant::now()).as_secs_f64());
+        }
+        if cap <= 0.0 {
+            return;
+        }
+        let stall = (tunable!("ENOMOTO_T_MIP_LMBOOST_STALL", 0.5, f64) * t_now).max(2.0);
+        let (q, lo, up) = match &self.orig {
+            Some(o) => ((**o).clone(), o.col_lo.clone(), o.col_up.clone()),
+            None => (self.p.clone(), self.dom.lo.clone(), self.dom.up.clone()),
+        };
+        let seed = self.rng ^ 0x9E37_79B9_7F4A_7C15;
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let found: std::sync::Mutex<Vec<Vec<f64>>> = Default::default();
+        let on_sol = |x: &[f64]| found.lock().unwrap().push(x.to_vec());
+        let inc0 = self.incumbent.as_ref().map(|(z, _)| *z);
+        let t0 = Instant::now();
+        let prev = super::heuristics::MIX_STALL.with(|c| c.replace(stall));
+        let _ = super::heuristics::fj_lmip_mix(&q, &lo, &up, cap, seed, &stop, &on_sol);
+        super::heuristics::MIX_STALL.with(|c| c.set(prev));
+        let got = found.into_inner().unwrap();
+        let n = got.len();
+        let mut acc = false;
+        for x in got.into_iter().rev() {
+            self.heur_label = "T1MIX";
+            let ok = self.try_incumbent(x);
+            self.heur_label = "";
+            if ok {
+                acc = true;
+                break;
+            }
+        }
+        if self.params.verbose {
+            eprintln!(
+                "MIP: T1MIX: FJ + Local-MIP {:.2}s (cap {cap:.2}s, stall {stall:.2}s), {n} improving solutions, accepted {acc}, incumbent {:?} -> {:?} ({:.2}s)",
+                t0.elapsed().as_secs_f64(),
+                inc0,
+                self.incumbent.as_ref().map(|(z, _)| *z),
+                self.start.elapsed().as_secs_f64()
+            );
+        }
+    }
+
     fn lmip_boost(&mut self) {
         use std::sync::atomic::{AtomicBool, Ordering};
         let t_now = self.start.elapsed().as_secs_f64();
@@ -26707,6 +26784,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if nodelp2('x') && !self.params.submip && crate::simplex::slope_intercept_dual::nodelp_diag() {
                 eprintln!("MIP: nodelp2 tid {} exact-dse n {} ema {:.4}s saved-dse n {} ema {:.4}s", self.pool_tid, self.nl2_stat[1].0, self.nl2_stat[1].1, self.nl2_stat[0].0, self.nl2_stat[0].1);
             }
+        }
+        // 試作 `ENOMOTO_MIP_DSE_COST` (analysis/divedse_20261121/): 厳密な DSE 重みを作り直さなかった・作った回数 (全スレッドの合計)
+        if crate::simplex::slope_intercept_dual::dse_cost_on() && !self.params.submip && self.pool_tid == 0 && self.params.verbose {
+            let st: Vec<u64> = crate::simplex::slope_intercept_dual::DSE_COST_STATS.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
+            eprintln!("MIP: DSE_COST skipped {} built {} built-without-estimate {}", st[0], st[1], st[2]);
         }
         // 診断 `ENOMOTO_MIP_NODECUT_STAT`: 冗長でなくても出す
         if crate::simplex::mip_lp::nodecut_stat() && self.snap.is_none() && !self.params.submip && self.pool_tid == 0 {

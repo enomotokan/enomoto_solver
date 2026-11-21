@@ -153,6 +153,11 @@ pub struct TwoStageLp {
     tw_sync: bool,
     /// 試作 `ENOMOTO_MIP_LPSCALE=h`: 尺度なしの求解が重かったら双子を作る ([`Self::solve_once`])
     tw_lazy: bool,
+    /// 試作 `ENOMOTO_MIP_DSE_COST` ([`sid::dse_cost_skip`]): 直前の求解の反復の数と、この LP の求解の手間・反復の数の合計
+    /// (次の求解の見込みの手間 = 直前の反復の数 × 1 反復の手間)
+    dc_last_it: Option<u64>,
+    dc_ticks: f64,
+    dc_iters: u64,
 }
 
 /// 試作 `ENOMOTO_MIP_LPSCALE` の双子の状態 ([`TwoStageState`]・[`LuSnapshot`] に付ける)。
@@ -728,6 +733,9 @@ impl TwoStageLp {
             lu_cache: None,
             dse_cache: None,
             dse_age: 0,
+            dc_last_it: None,
+            dc_ticks: 0.0,
+            dc_iters: 0,
             iters: 0,
             price_key: new_price_key(),
             ray: None,
@@ -2954,7 +2962,22 @@ impl TwoStageLp {
                         eprintln!("TSLP solve: dse_cache basis differs (len {} vs {})", cb.len(), b.len());
                     }
                 }
-                sid::solve_slope_intercept_dual_from_basis(&self.std, &opts, b)
+                // 試作 `ENOMOTO_MIP_DSE_COST`: この求解の見込みの手間を置く (厳密な DSE 重みを作り直すかの判断)
+                let dc = sid::dse_cost_on();
+                if dc {
+                    sid::set_dse_cost_hint(self.dc_last_it.filter(|_| self.dc_iters > 0).map(|e| e as f64 * self.dc_ticks / self.dc_iters as f64));
+                }
+                let dc_t0 = if dc { crate::ticks::total() } else { 0.0 };
+                let dc_it0 = sid::ext_iterations();
+                let r = sid::solve_slope_intercept_dual_from_basis(&self.std, &opts, b);
+                if dc {
+                    sid::set_dse_cost_hint(None);
+                    let it = (sid::ext_iterations() - dc_it0) as u64;
+                    self.dc_last_it = Some(it);
+                    self.dc_ticks += crate::ticks::total() - dc_t0;
+                    self.dc_iters += it;
+                }
+                r
             }
             _ => sid::solve_slope_intercept_dual(&self.std, &opts),
         };
