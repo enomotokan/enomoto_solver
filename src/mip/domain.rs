@@ -34,7 +34,7 @@ const PROOF_REASON_BASE: i32 = -1001;
 /// カットのプールの伝播の、写しの表の番号を入れた理由の値の始まり ([`Domain::set_cut_tag`])。
 const CUT_REASON_BASE: i32 = -1_000_000_001;
 
-/// 診断用: 衝突解析で、カットの写しの番号を持つ理由 (試作 `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN` のカットプールの伝播、試作 `ENOMOTO_MIP_ORBITOPE_STATIC=r` の
+/// 診断用: 衝突解析で、カットの写しの番号を持つ理由 (`ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN` (既定) のカットプールの伝播、試作 `ENOMOTO_MIP_ORBITOPE_STATIC=r` の
 /// オービトープの固定) を行から説明した回数 (全スレッドの合計)。
 pub static CUT_REASON_EXPLAINED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -48,7 +48,7 @@ pub fn cut_reason_id(r: i32) -> Option<usize> {
     (r <= CUT_REASON_BASE).then(|| (CUT_REASON_BASE - r) as usize)
 }
 
-/// 試作 `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN`: 衝突解析で、理由の値 (双対証明の通し番号・カットの写しの番号を入れたもの) から
+/// `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN` (既定): 衝突解析で、理由の値 (双対証明の通し番号・カットの写しの番号を入れたもの) から
 /// 行を引く関数 (係数と右辺 `sum a_j x_j <= rhs`。もうなければ `None`)。
 pub type ProofLookup<'a> = &'a dyn Fn(i32) -> Option<(Vec<(usize, f64)>, f64)>;
 
@@ -843,7 +843,7 @@ impl Domain {
         self.cur_reason = -2 - tag;
     }
 
-    /// 試作 `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN` (既定では使わない): 以後の変更を「通し番号 `id` の双対証明で締めた」として記録する
+    /// 試作 `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN` (既定、`=0` で切る): 以後の変更を「通し番号 `id` の双対証明で締めた」として記録する
     /// (理由 `PROOF_REASON_BASE - id`。番号が大きすぎれば従来の `-6`)。衝突解析で証明の行から説明できるようにする。
     pub fn set_proof_tag(&mut self, id: u64) {
         self.cur_reason = if id < 999_000_000 { PROOF_REASON_BASE - id as i32 } else { -6 };
