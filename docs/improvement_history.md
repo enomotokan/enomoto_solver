@@ -11123,8 +11123,9 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
     再スタートの後の根だけにした。直し後は最初の根が def と同じ。sing44 の再スタートの後の根の LP は 50.3 → 35.9 秒のまま。
   - 個別: rail01 は比べを飛ばして根の LP の後からカットのループの終わりまで 254 → 233 秒。sorrell3 は根のヒューリスティクス約 190 → 58 秒、木に入るのが約 140 秒早く、
     ノード 2〜3 倍 (README 7.7 節)。
-- 確かめ: cargo test 419 通過 (既定)。fuzz 7 本 (analysis/biglp_20261121/adopt/fuzz.sh) と、変更前のビルド + 3 つの環境変数と新しい既定のビルドの 1 スレッドの
-  7 問の比べ (analysis/biglp_20261121/adopt/eq.py) は計測中。
+- 確かめ: cargo test 419 通過 (既定)。fuzz 7 本 (analysis/biglp_20261121/adopt/fuzz.sh) bad 0。変更前のビルド + 3 つの環境変数と新しい既定のビルドで、1 スレッドの
+  7 問 (mas76・noswot・timtab1・rail01 の根・sorrell3・10teams・neos-933966) の状態・目的値・下界・試作の行が一致し、ノードも一致
+  (時間切れの 10teams・neos-933966 はノードが止めた時刻で決まるので、ノードの上限で止めた回で一致。analysis/biglp_20261121/README.md 7.11 節)。
 - 戻し方: `ENOMOTO_MIP_CUTSEL_PROBE_FIT=0`・`ENOMOTO_MIP_ROOTLP3=0`・`ENOMOTO_MIP_ROOTCAP=0` (どれも `off` も可)。明示した値はこれまでどおりその値で動く
   (例 `ENOMOTO_MIP_ROOTCAP=h` は従来の `h` だけ、`ENOMOTO_MIP_ROOTLP3=s` は `s` だけ)。
 - 記録: analysis/biglp_20261121/README.md 7 節。
