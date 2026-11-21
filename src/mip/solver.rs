@@ -1515,6 +1515,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     dive_iters: u64,
     dive_calls: u64,
     dive_succ: u64,
+    /// 試作 `ENOMOTO_MIP_DIVEQUOTA` ([`divequota`]): 種類ごと ([`super::heuristics::DiveKind::idx`]) の (呼び出し回数, 解を見つけた回数, LP 反復数)。
+    dive_k: [(u64, u64, u64); 8],
     /// 証明の段階の検出 (`ENOMOTO_MIP_PROOF_SWITCH`、[`Self::proof_phase_check`]): 木を分け合わないときの印、最初の
     /// 暫定解の目的値、最後に最良値が良くなった (と気づいた) 時刻とその値、前回調べた時刻。
     proof_phase: bool,
@@ -3911,6 +3913,25 @@ pub(crate) fn incumb_on(c: char) -> bool {
     V.get_or_init(|| env_str!("ENOMOTO_MIP_INCUMB").map_or(String::new(), |v| v.to_string())).contains(c)
 }
 
+/// 試作 `ENOMOTO_MIP_OBJDIVE` (analysis/objdive_20261121、既定では使わない): 木のダイビングの種類の巡回に目的を外したダイビング
+/// ([`super::heuristics::DiveKind::ObjPscost`]) を足す。
+pub(crate) fn objdive_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_MIP_OBJDIVE").is_some_and(|v| v != "0" && v != "off"))
+}
+
+/// 試作 `ENOMOTO_MIP_DIVEQUOTA` (analysis/objdive_20261121、既定では使わない) の文字。木のダイビングの LP 反復の配り方:
+/// - `s`: SCIP の配り方 (`heur_dive` の maxlpiterquot): 種類ごとに上限 (1 + 10 × (解を見つけた回数 + 1) / (呼び出し回数 + 1))
+///   × `ENOMOTO_T_MIP_DIVEQUOTA_FRAC` (0.05) × ノードの LP 反復 + 1000 を別々に持ち、巡回の順で上限に余裕のある種類を回す。
+///   既定 (全種類で 1 つの上限 0.05 × (解を見つけた回数 + 1) / (呼び出し回数 + 1) × ノードの LP 反復 + 1000) は、見つからないと
+///   上限が 0 に向かって縮む (SCIP の式の「1 +」と「10 ×」がない)
+/// - `e`: 手間あたりの実績で配る: 種類ごとの割合を `ENOMOTO_T_MIP_DIVEQUOTA_FRAC` × (種類の解の数 + 1) / (種類の LP 反復 / ノードの LP 反復 + 1)
+///   で決める (`s` の呼び出し回数の代わりに使った手間で割る。見つけるほど増え、使って見つけないほど減るが 0 にはならない)
+pub(crate) fn divequota(c: char) -> bool {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| env_str!("ENOMOTO_MIP_DIVEQUOTA").map_or(String::new(), |v| v.to_string())).contains(c)
+}
+
 pub(crate) fn subcap(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     V.get_or_init(|| env_str!("ENOMOTO_MIP_SUBCAP").map_or(String::new(), |v| v.to_string())).contains(c)
@@ -5895,6 +5916,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         dive_iters: 0,
         dive_calls: 0,
         dive_succ: 0,
+        dive_k: [(0, 0, 0); 8],
         proof_phase: false,
         proof_first_z: f64::INFINITY,
         proof_last_best: (f64::INFINITY, Instant::now()),
@@ -14161,7 +14183,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // ダイビング (SCIP の fracdiving / veclendiving: 深さ 10 ごと、ずらし 3 / 7)
                     if heur_ok && !noinc && (node.depth % 10 == 3 || node.depth % 10 == 7) {
                         let quota = (0.05 * (self.dive_succ + 1) as f64 / (self.dive_calls + 1) as f64 * self.node_iters as f64) as u64 + 1000;
-                        if self.dive_iters < quota && env_str!("ENOMOTO_MIP_NO_NODE_DIVE").is_none() {
+                        // 試作 `ENOMOTO_MIP_DIVEQUOTA` の `s`・`e` ([`divequota`]): 種類ごとの上限で選ぶ
+                        let dq = divequota('s') || divequota('e');
+                        if (dq || self.dive_iters < quota) && env_str!("ENOMOTO_MIP_NO_NODE_DIVE").is_none() {
                             // 種類を順に回す (SCIP の各ダイビングに相当。誘導は暫定解があるときだけ)
                             use super::heuristics::DiveKind as K;
                             let kinds: &[K] = if env_str!("ENOMOTO_MIP_DIVE_OLD_KINDS").is_some() {
@@ -14177,21 +14201,52 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             } else {
                                 &[K::Fractional, K::VectorLength, K::Coefficient, K::Pseudocost, K::Farkas, K::Conflict]
                             };
-                            let kind = kinds[self.dive_calls as usize % kinds.len()];
+                            let mut kinds_v: Vec<K> = kinds.to_vec();
+                            if objdive_on() {
+                                kinds_v.push(K::ObjPscost);
+                            }
+                            let kinds = &kinds_v[..];
+                            let frac_q = tunable!("ENOMOTO_T_MIP_DIVEQUOTA_FRAC", 0.05, f64);
+                            let ni = self.node_iters as f64;
+                            let kq = |k: (u64, u64, u64)| -> u64 {
+                                let r = if divequota('e') {
+                                    (k.1 + 1) as f64 / (k.2 as f64 / ni.max(1.0) + 1.0)
+                                } else {
+                                    1.0 + 10.0 * (k.1 + 1) as f64 / (k.0 + 1) as f64
+                                };
+                                (r * frac_q * ni) as u64 + 1000
+                            };
+                            // (種類, 反復の上限)。`dq` なら巡回の順で、自分の上限に余裕のある最初の種類
+                            let sel: Option<(K, u64)> = if dq {
+                                (0..kinds.len()).map(|i| kinds[(self.dive_calls as usize + i) % kinds.len()]).find_map(|k| {
+                                    let st = self.dive_k[k.idx()];
+                                    let q = kq(st);
+                                    (st.2 < q).then(|| (k, q - st.2))
+                                })
+                            } else {
+                                Some((kinds[self.dive_calls as usize % kinds.len()], quota - self.dive_iters))
+                            };
+                            if let Some((kind, budget)) = sel {
                             let lb = self.queue.best_lower_bound().min(node_obj);
                             let cutoff = self.prune_limit();
                             let quot = if self.has_cutoff_value() { 0.8 } else { 0.1 };
                             let bound = if cutoff.is_finite() { lb + quot * (cutoff - lb) } else { f64::INFINITY };
                             let it0 = self.lp.total_iterations();
                             self.dive_calls += 1;
-                            self.heur_label = "tree diving";
-                            if self.dive(kind, quota - self.dive_iters, bound) {
+                            self.heur_label = if kind == K::ObjPscost { "tree objective diving" } else { "tree diving" };
+                            let ok = self.dive(kind, budget, bound);
+                            if ok {
                                 self.dive_succ += 1;
                             }
                             self.heur_label = "";
                             let used = self.lp.total_iterations() - it0;
                             self.dive_iters += used;
                             self.heur_iters += used;
+                            let e = &mut self.dive_k[kind.idx()];
+                            e.0 += 1;
+                            e.1 += ok as u64;
+                            e.2 += used;
+                            }
                         }
                     }
                     if node_obj >= self.prune_limit() {
@@ -22056,6 +22111,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let all = lits.iter().all(|&(j, upper, v)| if upper { x[j] <= v + 1e-6 } else { x[j] >= v - 1e-6 });
             if all {
+                let gap = super::domain::dbg_lits_gap(&x, lits.iter().copied());
+                if gap > 1e-9 {
+                    eprintln!("MIP_DBGTOL: conflict ({tag}) misses the debug solution only by {gap:.3e} (within the tolerance) at node {} thread {}, len {}", self.nodes, self.pool_tid, lits.len());
+                    return;
+                }
                 let terms: Vec<String> = lits.iter().take(12).map(|&(j, upper, v)| format!("x{j}{}{v}[{}]", if upper { "<=" } else { ">=" }, x[j])).collect();
                 eprintln!(
                     "MIP_DEBUG_SOL: conflict ({tag}) cuts off the debug solution at node {} thread {} ({}): domain contains the debug solution: {}, len {}, stack {}: {}",
@@ -27035,6 +27095,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if env_str!("ENOMOTO_MIP_LOG").is_some() {
                 let st: Vec<u64> = super::separation::SMALL_FLOOR_STATS.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
                 eprintln!("MIP: cut small-coefficient floor (all threads): coefficients absorbed only by the floor {}, in cuts {}, cuts emptied {}, cuts dropped (infinite bound) {}", st[0], st[1], st[2], st[3]);
+                let ct: Vec<u64> = super::separation::CANCEL_STATS.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
+                eprintln!("MIP: cut cancellation check (all threads): residual coefficients {}, in cuts {}, of which not absorbed by the small-coefficient rule {}, cuts changed {}, cuts emptied {}", ct[0], ct[1], ct[2], ct[3], ct[4]);
             }
             if gap4('l') {
                 eprintln!("MIP: GAP4 l: cuts shortened to 100 + 0.15 n nonzeros (all threads): {}", super::separation::GAP4_CUT_SHORTENED.load(std::sync::atomic::Ordering::Relaxed));
