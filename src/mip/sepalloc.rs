@@ -1,4 +1,4 @@
-//! 試作 `ENOMOTO_MIP_SEPALLOC` (既定では使わない、analysis/sepalloc_20261121/): 根のカットのループで、分離器ごとの伸びと手間を
+//! 試作 `ENOMOTO_MIP_SEPALLOC` (既定にせず閉じた (2026-11-21)。スイッチは既定オフで残す。analysis/sepalloc_20261121/): 根のカットのループで、分離器ごとの伸びと手間を
 //! その求解の中で測り、伸びの取り分に比例して手間を配る (`a`)。ループを止める判断も同じ物差し (手間あたりの伸び) で行う (`s`)。
 //! 値は文字の並び (例 `as`)。
 //!
@@ -19,6 +19,9 @@
 //! - 窓 = ループの手間で根の LP の手間 1 回分以上さかのぼった直近のラウンドからの伸び / その間の手間 (窓に満たない間は今までの判定)。
 //! - 下界が一度も動いていない間は今までの判定のまま。ラウンドの上限・時間の上限・目的値が整数刻みの判定はそのまま効く。
 //! - 新しい閾値は置かない (窓の長さは根の LP 1 回の手間で、比べる相手は全体の速さ)。
+//!
+//! 203 問の根だけの比べ (analysis/sepalloc_20261121/README.md): `s` は伸びが次第に鈍る問題で早く止まりすぎ (悪い 98 問・良い 7 問)、閉じた。
+//! `a` は同じ手間では伸びる (良い 64 問・悪い 18 問) が、最後の下界は少し低い (悪い 64 問・良い 30 問)。
 //!
 //! 外側の主の根だけ (サブ MIP・裏のカットの写し・ノードでは使わない)。状態はスレッドごと。
 
@@ -125,8 +128,9 @@ pub(super) fn begin_round(st: &[seplearn::Stat; seplearn::NSRC], obj: f64, verbo
             a.scale = [1.0; 4];
         } else {
             let floor = g.iter().filter(|&&v| v > 0.0).map(|&v| v / gsum).fold(f64::INFINITY, f64::min);
-            let mut sh: [f64; 4] = std::array::from_fn(|i| (g[i] / gsum).max(floor));
-            let ssum: f64 = sh.iter().sum();
+            // 手間が付いていない種類 (既定で切ってある zero-half など) は取り分を持たない (枠 B にも入っていない)
+            let mut sh: [f64; 4] = std::array::from_fn(|i| if a.unit[i] > 0.0 { (g[i] / gsum).max(floor) } else { 0.0 });
+            let ssum: f64 = sh.iter().sum::<f64>().max(f64::MIN_POSITIVE);
             for v in sh.iter_mut() {
                 *v /= ssum;
             }
