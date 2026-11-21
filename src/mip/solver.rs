@@ -23348,7 +23348,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 試作 `ENOMOTO_MIP_RCLOOP` の `r` (既定では使わない。analysis/rootcutoff_20261121): 2 回目以降の再スタートの判定で、新たな固定が
     /// 1 本以上あり、この根の下界 ([`Self::root_lb_now`]) が前の根の下界 (前の再スタートを決めたときの値) より上がっていれば、
-    /// 固定の数の閾値 (`ENOMOTO_T_MIP_RESTART_FAC`) を見ずに再スタートする。新しい閾値は置かず、「前の再スタートが根の下界を
+    /// 固定の数の閾値 (`ENOMOTO_T_MIP_RESTART_FAC`) と縮みの条件 (`ENOMOTO_MIP_RSTCRIT`) を見ずに再スタートする。新しい閾値は置かず、「前の再スタートが根の下界を
     /// 上げた限り続ける」形で止める (回数の上限 `ENOMOTO_T_MIP_MAX_RESTARTS` は既存のまま)。SCIP は neos-1582420 で 3 回、neos-911970 で 4 回
     /// 再スタートし、こちらは 2 回目以降の閾値 (全部の整数列の 2.5%) に届かず止まる (neos-1582420 打ち切り値つき: 49 本 < 93)
     fn rcloop_restart_ok(&self, newly: usize) -> bool {
@@ -23425,7 +23425,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 return None;
             }
             // 試作 `ENOMOTO_MIP_RSTCRIT` ([`Self::rstcrit_gate`]): 縮みの小さい再スタートを見送る
-            if !self.force_restart && !self.rstcrit_gate(true) {
+            // `ENOMOTO_MIP_RCLOOP` の `r` で決まったときは縮みの条件 (RSTCRIT) も見ない (下界の上がりで決める)
+            if !self.force_restart && !rc_r && !self.rstcrit_gate(true) {
                 return None;
             }
         }
