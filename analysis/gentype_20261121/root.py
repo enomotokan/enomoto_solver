@@ -10,8 +10,6 @@ R = D.parents[1]
 sys.path.insert(0, str(D))
 from cfg import CFGS  # noqa: E402
 PROBS = "p200x1188c mc11 beasleyC3 10teams exp-1-500-5-5 nw04 qiu timtab1".split()
-TL = sys.argv[1] if len(sys.argv) > 1 else "60"
-NJ = int(sys.argv[2]) if len(sys.argv) > 2 else 3
 def one(job):
     p, c = job
     log = D / "logs" / f"{c}_{p}.log"
@@ -22,5 +20,8 @@ def one(job):
     subprocess.run([sys.executable, str(R / "analysis/smallprob_overhead_20261028/prof_run.py"), "ours", str(R / ".miplib_cache" / f"{p}.mps"), str(log),
                     "--threads", "1", "--time-limit", TL], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     print(c, p, log.read_text().splitlines()[-1], flush=True)
-with ThreadPoolExecutor(NJ) as ex:
-    list(ex.map(one, [(p, c) for p in PROBS for c in CFGS]))
+if __name__ == "__main__":
+    TL = sys.argv[1] if len(sys.argv) > 1 else "60"
+    NJ = int(sys.argv[2]) if len(sys.argv) > 2 else 3
+    with ThreadPoolExecutor(NJ) as ex:
+        list(ex.map(one, [(p, c) for p in PROBS for c in CFGS]))
