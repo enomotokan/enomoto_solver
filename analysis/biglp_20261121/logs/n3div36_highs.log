@@ -1,0 +1,77 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP n3div36 has 4484 rows; 22120 cols; 340740 nonzeros; 22120 integer variables (22120 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 2e+01]
+  Cost    [1e+04, 1e+05]
+  Bound   [1e+00, 1e+00]
+  RHS     [1e+00, 2e+01]
+Presolving model
+4484 rows, 22120 cols, 340740 nonzeros 0s
+4453 rows, 20602 cols, 168178 nonzeros 0s
+Presolve reductions: rows 4453(-31); columns 20602(-1518); nonzeros 168178(-172562) 
+Objective function is integral with scale 0.005
+
+Solving MIP model with:
+   4453 rows
+   20602 cols (20602 binary, 0 integer, 0 implied int., 0 continuous, 0 domain fixed)
+   168178 nonzeros
+   Thread count 2 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+ J       0       0         0   0.00%   -inf            330000             Large        0      0      0         0     0.9s
+         0       0         0   0.00%   114333.374741   330000            65.35%        0      0      2       139     1.0s
+ L       0       0         0   0.00%   120146.582112   133800            10.20%      418     37      6       726     8.7s
+         0       0         0   0.00%   120336.912778   133800            10.06%      420     20      6      3900    14.7s
+
+21.6% inactive integer columns, restarting
+Model after restart has 4453 rows, 16152 cols (16152 bin., 0 int., 0 impl., 0 cont., 0 dom.fix.), and 128451 nonzeros
+
+         0       0         0   0.00%   120336.912778   133800            10.06%       20      0      0      3900    15.1s
+         0       0         0   0.00%   120336.912778   133800            10.06%       20     16      0      4074    15.2s
+ L       0       0         0   0.00%   121546.519685   132000             7.92%      300     33      0      4425    23.6s
+
+6.5% inactive integer columns, restarting
+Model after restart has 4453 rows, 15108 cols (15108 bin., 0 int., 0 impl., 0 cont., 0 dom.fix.), and 119845 nonzeros
+
+         0       0         0   0.00%   121585.43817    132000             7.89%       23      0      0      8765    28.3s
+         0       0         0   0.00%   121585.43817    132000             7.89%       23     22      0      8970    28.4s
+         0       0         0   0.00%   122227.402505   132000             7.40%      361     29      0     14275    41.0s
+         1       1         1   0.00%   122227.402505   132000             7.40%      361     29      0     14275    41.0s
+
+Solving report
+  Model             n3div36
+  Status            Solution limit reached
+  Primal bound      132000
+  Dual bound        122400
+  Gap               7.27% (tolerance: 0.01%)
+  P-D integral      7.72964208327
+  Solution status   feasible
+                    132000 (objective)
+                    0 (bound viol.)
+                    4.40714131855e-12 (int. viol.)
+                    0 (row viol.)
+  Timing            41.02
+                    3.24 (Presolve)
+                        MIP    time [calls] = 0.64 [1]
+                        subMIP time [calls] = 2.60 [231]
+                    37.74 (Solve)
+                        MIP    time [calls] = 10.51 [1]
+                        subMIP time [calls] = 27.23 [231]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [231]
+  Max sub-MIP depth 20
+  Nodes             1
+  Repair LPs        0
+  LP iterations     14275
+                    0 (strong br.)
+                    1388 (separation)
+                    12369 (heuristics)
