@@ -4436,6 +4436,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.cut_pool_keys.insert(key, self.cut_pool.len());
         self.pool_hash.push(key);
         self.pool_age.push(0);
+        self.pool_arena.push(u32::MAX);
         let norm = coefs.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
         self.cut_pool_nnz += coefs.len();
         self.cut_pool.push((coefs.to_vec(), rhs, norm));
@@ -4491,6 +4492,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.cpp.valid = false;
         let old = std::mem::take(&mut self.cut_pool);
         let (hash, age) = (std::mem::take(&mut self.pool_hash), std::mem::take(&mut self.pool_age));
+        let arena = std::mem::take(&mut self.pool_arena);
         self.cut_pool_keys.clear();
         self.pool_idx.clear();
         self.pool_val.clear();
@@ -4504,6 +4506,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.cut_pool_keys.insert(hash[k], self.cut_pool.len());
             self.pool_hash.push(hash[k]);
             self.pool_age.push(age[k]);
+            self.pool_arena.push(arena[k]);
             self.cut_pool_nnz += c.0.len();
             for &(j, v) in &c.0 {
                 self.pool_idx.push(j as u32);
@@ -7957,6 +7960,26 @@ fn sep_deadline(deadline: Option<std::time::Instant>) -> Option<std::time::Insta
 /// 集約した行 `bases` ごとに (その行と符号を反転した行から) カットを作って仕上げ、行ごとに keep_best で絞った候補を
 /// 行の順に返す (`nth` 本のスレッドに交互に割り当てる。結果は逐次と同じ)。2 つ目の戻り値はスレッドの CPU 時間の合計。
 #[allow(clippy::too_many_arguments)]
+/// 診断 ([`gen_cuts_parallel`]、デバッグ解): 仕上げたカット `c` がデバッグ解 `xd` を切るなら、元の集約行 `base` と生のカット `raw` を表示する。
+/// 列 k >= n は行 k - n の活動量 (論理変数) として値を計る
+#[allow(clippy::too_many_arguments)]
+fn debug_check_path_cut(xd: &[f64], c: &Candidate, raw: &RawCut, base: &[(usize, f64)], vars: &CutVars, n: usize, lp_rows: &[Vec<(usize, f64)>], glo: &[f64], gup: &[f64]) {
+    let act: f64 = c.coefs.iter().map(|&(j, a)| a * xd[j]).sum();
+    if act - c.rhs <= 1e-6 * (1.0 + c.rhs.abs()) {
+        return;
+    }
+    let inb = (0..n).all(|j| xd[j] >= glo[j] - 1e-6 && xd[j] <= gup[j] + 1e-6);
+    let val = |k: usize| if k < n { xd[k] } else { lp_rows[k - n].iter().map(|&(j, a)| a * xd[j]).sum() };
+    let mut s = format!("MIP_DEBUG_SOL: PATHPAR cut (kind {}) violated by the debug solution: {act:.10e} > {:.10e} (debug in global bounds {inb}), len {}\n", raw.kind, c.rhs, c.coefs.len());
+    s += &format!("  cut: {:?}\n", c.coefs.iter().map(|&(j, a)| format!("{a:+.6}*x{j}[{:.4}]", xd[j])).collect::<Vec<_>>());
+    s += &format!("  raw rhs {:.12e}: {:?}\n", raw.rhs, raw.coefs.iter().map(|&(k, a)| format!("{a:+.9}*v{k}")).collect::<Vec<_>>());
+    s += "  base <= 0 (k a lo up int x xdbg):\n";
+    for &(k, a) in base {
+        s += &format!("    {k} {a:.12e} {:.9e} {:.9e} {} {:.9e} {:.9e}\n", vars.lo[k], vars.up[k], vars.is_int[k], vars.x[k], val(k));
+    }
+    eprint!("{s}");
+}
+
 fn gen_cuts_parallel(
     bases: &[Vec<(usize, f64)>],
     nth: usize,
@@ -7978,6 +8001,11 @@ fn gen_cuts_parallel(
     let hnfcut_ref = &hnfcut_st;
     let halt_flag = crate::cancel::inherit().flag();
     let halt_ref = &halt_flag;
+    // 診断 (デバッグ解 `ENOMOTO_MIP_DEBUG_SOL` と `ENOMOTO_MIP_INTVUB_CHECK`、analysis/rootgap_20261121/wrong_widden): 並列に作った経路集約の
+    // カットもデバッグ解で確かめ、切るものは元の集約行 (列・係数・境界・LP 値・デバッグ解の値) と生のカットを表示する
+    // (逐次の分離の `push` の確かめを通らない道)
+    let dbg_x: Option<Vec<f64>> = if env_str!("ENOMOTO_MIP_INTVUB_CHECK").is_some() { super::solver::DEBUG_SOL.with(|d| d.borrow().clone()) } else { None };
+    let dbg_ref = &dbg_x;
     let parts: Vec<(Vec<(usize, Vec<Candidate>)>, f64)> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nth)
             .map(|t| {
@@ -7995,7 +8023,11 @@ fn gen_cuts_parallel(
                         for b in [base, &neg] {
                             let n0 = cs.len();
                             for raw in generate_cuts(vars, b, 0.0, flow_cover, false) {
+                                let raw_dbg = dbg_ref.as_ref().map(|_| raw.clone());
                                 if let Some(c) = finish_cut(raw, n, lp_rows, cut_int, glo, gup, x, inc, &mut scratch) {
+                                    if let (Some(xd), Some(raw)) = (dbg_ref.as_ref(), raw_dbg) {
+                                        debug_check_path_cut(xd, &c, &raw, b, vars, n, lp_rows, glo, gup);
+                                    }
                                     cs.push(c);
                                 }
                             }
@@ -8023,6 +8055,11 @@ fn gen_cuts_parallel(
 
 /// 生のカット (構造変数と行の活動量の変数) を構造変数だけの式にし、整え、検査する。
 /// 試作 `ENOMOTO_MIP_GAP4` の `l`: [`finish_cut`] で長さの上限まで短くしたカットの数 (全スレッド)
+/// 数え上げ (`ENOMOTO_MIP_LOG` のとき求解の終わりに表示、analysis/rootgap_20261121/wrong_widden): [`finish_cut`] の小さい係数の吸収の
+/// 閾値の下限 (`ENOMOTO_MIP_CUT_SMALL_FLOOR`) が働いた回数。[0] 下限のために吸収した係数、[1] それがあったカット、
+/// [2] そのために係数が全部消えて捨てたカット、[3] 下限のために閾値以下になった係数の境界が無限で捨てたカット (全スレッド)
+pub(super) static SMALL_FLOOR_STATS: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+
 pub(super) static GAP4_CUT_SHORTENED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn finish_cut(
@@ -8105,13 +8142,29 @@ fn finish_cut(
     // 閾値は `ENOMOTO_T_MIP_CUT_SMALL_REL` (既定 1e-4、1e-9 で以前と同じ)。その境界が無限のときは、以前の閾値 1e-9 以下なら
     // カットを捨て、それより大きければ係数を残す (以前より多くは捨てない)
     let small_rel = tunable!("ENOMOTO_T_MIP_CUT_SMALL_REL", 1e-4, f64);
+    // 直し (analysis/rootgap_20261121/wrong_widden、2026-11-21): HiGHS の `postprocessCut` と同じく、閾値の基準の最大係数に下限
+    // `ENOMOTO_T_MIP_CUT_SMALL_FLOOR` (既定 1e-3) を置く (閾値は 1e-4 × max(最大係数, 1e-3)、つまり絶対値 1e-7 以下の係数は必ず吸収する)。
+    // 論理変数を元の行に展開すると係数がほぼ打ち消し合い、許容誤差の大きさ (1e-9 程度) の残りだけのカットがある。下限がないと
+    // それを最大係数 1 に拡大して妥当でないカットにする (neos-4722843-widden の持ち上げつきの被覆: 展開すると係数 8e-10、右辺 8e-10 の
+    // 行が x35 + x37 <= 1 になり、最適解 (x35 = x37 = 1) を切って 27308.196 を最適と返していた)。`ENOMOTO_MIP_CUT_SMALL_FLOOR=0` で以前の動き
+    let small_floor = if env_def!("ENOMOTO_MIP_CUT_SMALL_FLOOR", "1").is_some() { tunable!("ENOMOTO_T_MIP_CUT_SMALL_FLOOR", 1e-3, f64) } else { 0.0 };
+    let small_base = cmax.max(small_floor);
     let mut coefs: Vec<(usize, f64)> = Vec::with_capacity(dense.len());
+    // 下限があるために吸収した係数の数 (以前の閾値では残ったもの。数え上げ [`SMALL_FLOOR_STATS`] 用)
+    let mut floor_only = 0u64;
     for (j, c) in dense {
-        if c.abs() <= small_rel * cmax {
+        if c.abs() <= small_rel * small_base {
+            let by_floor = c.abs() > small_rel * cmax;
             let m = if c > 0.0 { c * lo[j] } else { c * up[j] };
             if m.is_finite() {
                 rhs -= m;
+                floor_only += by_floor as u64;
                 continue;
+            }
+            // 下限で閾値が上がった分 (以前の閾値を超え、新しい閾値以下) で境界が無限なら、吸収できないので捨てる (HiGHS も捨てる)
+            if by_floor {
+                SMALL_FLOOR_STATS[3].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return None;
             }
             if c.abs() <= 1e-9 * cmax {
                 return None;
@@ -8119,7 +8172,14 @@ fn finish_cut(
         }
         coefs.push((j, c));
     }
+    if floor_only > 0 {
+        SMALL_FLOOR_STATS[0].fetch_add(floor_only, std::sync::atomic::Ordering::Relaxed);
+        SMALL_FLOOR_STATS[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     if coefs.is_empty() {
+        if floor_only > 0 {
+            SMALL_FLOOR_STATS[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         return None;
     }
     // 係数の締め付け (HiGHS の `HighsDomain::tightenCoefficients`): 最大活動量が右辺を delta 超えるなら、
