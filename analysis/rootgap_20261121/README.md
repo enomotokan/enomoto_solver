@@ -285,7 +285,7 @@ app1-1 は SCIP 2382 列、当方は前処理の LP による固定の後で自�
 **最適解を切ったカット**: どの誤答でも、根で LP に足した**長さ 1 のカット `x_j <= 0`** (x444・x403・x347・x404、最適解では 1) が最初にデバッグ解を切る
 (`MIP_DEBUG_SOL: node 0 thread 0: cut row … is violated by the debug solution: … len 1: +1.0000*x444`)。生まれは持ち上げつきの被覆
 (`lifted_cover_terms`、kind 1) で、診断 `ENOMOTO_MIP_LC_DEBUG` (cuts.rs・separation.rs、デバッグ解を LP の行の活動量まで伸ばして生のカットと
-finish_cut の後のカットを並べる) で捕まえた例 (`logs/lcdbg.log`):
+finish_cut の後のカットを並べる) で捕まえた例 (`logs/lcdbg.log.gz`):
 
 - 生のカット (論理変数の空間): `x2350 − 0.85·x347 + s(行 3311) + 0.85·x347 − 0.80·x305 <= 0`、行 3311 = `0.80·x305 − x2350`。
   代入すると**全部打ち消して 0 <= 0** (生のカットとしては妥当、デバッグ解で 1.1e-16 <= 0)。
