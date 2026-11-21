@@ -1445,6 +1445,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     pub(super) fn root_cut_loop(&mut self, root_iters: u64) -> bool {
+        // 診断 `ENOMOTO_MIP_TREEDEPTH_DIAG`: 呼び出しごとに前後の LP の値と手間を残す ([`super::treedepth`])
+        if self.tdd.is_none() {
+            return self.root_cut_loop_inner(root_iters);
+        }
+        let (o0, tk0) = (self.lp.objective() + self.p.offset, crate::ticks::total());
+        let ok = self.root_cut_loop_inner(root_iters);
+        let o1 = self.lp.objective() + self.p.offset;
+        if let Some(t) = self.tdd.as_mut() {
+            t.root_cuts(o0, o1, crate::ticks::total() - tk0, ok);
+        }
+        ok
+    }
+
+    fn root_cut_loop_inner(&mut self, root_iters: u64) -> bool {
         let p = self.p;
         // 固定費用のネットワーク型か (`root_cut_highs` がループの初めから使うので先に決める。下でも同じ値を入れ直す)
         self.fc_network = !self.params.submip && fixed_charge_network(p);

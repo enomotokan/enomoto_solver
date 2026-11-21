@@ -569,3 +569,5 @@ CM で pe が速かった 6 問・遅かった 7 問に noswot・10teams を足�
   M の CM (17 分担 = 159 問) は 0.1.10 の既定 (vbce・ncnr・rhb・cb など) が入る前のビルド (a7653492c) だったので、同じ組を今の既定で回し直してから既定化を決める。
 - 分担表: `python plan.py CM2 20` → `shards_CM2.json` (Mittelmann 186 問 × 種 1 × {def, pe}、600 秒・4 スレッド、20 分担で各約 2.05 時間)。
   回し方: `python run.py CM2 K`。集計: `python ci.py 600 def pe res_CM2_s*.jsonl`。
+- 分担ごとにビルドが bonil (`ENOMOTO_MIP_TIMEDEP=b` + `ENOMOTO_MIP_DET1T=onil`、2026-11-21 に既定化) の前後で違いうるが、def と pe は同じ分担の同じビルドで
+  対にしているので、比べには影響しない (各分担のビルドは結果のコミットの説明に書く)。分担 6 のビルドは b059f8496 (bonil 既定の後)。
