@@ -233,5 +233,10 @@ MIPLIB 2017 のコレクション 1065 問 (`collection.json`) のうち、easy�
   - 回したビルド: P 4: 2d478930a (pip install -e .、0.1.10)。58 行・crash 0。
   - 回したビルド: P 0: 2d478930a (pip install -e .、0.1.10)。58 行・crash 0。
   - 回したビルド: P 5: 2d478930a (pip install -e .、0.1.10)。58 行・crash 0。
+  - 回したビルド: M 8: 71cdfafba (pip install -e .、0.1.10、site-packages の wheel を消してから)。20 行 (10 問 × 種 1、600 秒)・crash 0。分担 8 だけの集計: cond/def 0.956 [0.894, 1.022]、解けた def 6 / cond 6、食い違い 0。1.25 倍超はどちらも cond が速い: pk1 14.5→9.2 秒、30n20b8 103.3→78.1 秒。時間切れ (暫定解 def/cond、下界 def/cond): leo1 4.06393e8/4.07571e8、3.98066e8/3.97031e8。neos-4387871-tavua 34.556/35.142、24.875/25.963。bppc4-08・satellites2-60-fs は同じ。
+  - 回したビルド: M 3: 71cdfafba (pip install -e .、0.1.10、import 先は python/ の新しい .so)。16 行 (8 問 × 種 1、600 秒)・crash 0。解けた def 3 / cond 4 (glass4 は cond だけ 345.9 秒で解けた)、食い違い 0、1.25 倍超なし (irp 18.9→23.1 秒が最大の遅れ)。SGM cond/def 0.957。時間切れ (暫定解 def/cond): neos-3656078-kumeu -12387.4/-12770.5、uccase9 11069.9/11106.9。reblock115・atlanta-ip は同じ。
+  - 回したビルド: M 1: 71cdfafba (pip install -e .、0.1.10、import 先は python/ の新しい .so)。16 行 (8 問 × 種 1、600 秒)・crash 0。解けた def 3 / cond 3、食い違い 0。SGM cond/def 0.990。1.25 倍超は timtab1 22.2→17.1 秒 (cond が速い) だけ (fiball 28.3→34.5 秒が最大の遅れ)。時間切れ (暫定解 def/cond): trento1 3.56864e7/1.85752e8、germanrr 4.89113e7/4.92608e7、academictimetablesmall 3499/3500、neos-3046615-murg 1610/1600、radiationm40-10-02 155394/155371。下界はほぼ同じ。
+  - 回したビルド: M 0: 71cdfafba (pip install -e .、0.1.10)。16 行・crash 0。
+  - 回したビルド: M 4: 71cdfafba (pip install -e .、0.1.10、import 先は python/ の新しい .so)。16 行 (8 問 × 種 1、600 秒)・crash 0。解けた def 3 / cond 3、食い違い 0。SGM cond/def 0.982 [0.939, 1.026]。1.25 倍超は neos-911970 16.7→12.5 秒 (cond が速い) だけ。時間切れ (暫定解 def/cond): b1c1s1 25093.3/24991.3、gmu-35-50 -2607167.7/-2606419.0、uct-subprob 315/317。neos-3754480-nidda・rmatr200-p5 は同じ (下界は def が上)。
   - 回したビルド: M 7: 71cdfafba (pip install -e .、0.1.10)。18 行・crash 0。
 - `summ.py` → `summ.txt`・`summ_rows.json`: 4 スレッドの組ごとの表と構造。`cond.py` → `cond.txt`・`cond_rows.json`: 条件ごとの得失。
