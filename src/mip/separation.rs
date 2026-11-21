@@ -1320,9 +1320,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut nadd = 0usize;
         let mut all_rows: Vec<(Vec<(usize, f64)>, f64, f64)> = Vec::new();
         let alt_has = |c: char| env_def!("ENOMOTO_MIP_CUTSEL_PROBE_ALT", "NS").is_none_or(|v| v.contains(c));
+        // 試作 `ENOMOTO_MIP_CUTSEL_PROBE_FIT` の `d`: 時間で数えるとき (手間で数える `TIMEDEP` の `c`・`TICKS` の `c` では使わない) だけ
+        let fit_d = cutsel_probe_fit('d') && !td_c && !tk_c;
         for r in 0..k {
             let over = if td_c { PROBE_WORK.with(|c| { let (_, u, b) = c.get(); u >= b }) } else if tk_c { tk_el() >= tk_budget } else { std::time::Instant::now() >= deadline };
-            if self.time_up() || (r > 0 && over) {
+            // 試作 `ENOMOTO_MIP_CUTSEL_PROBE_FIT` の `d` ([`cutsel_probe_fit`]): 1 ラウンド目の前にも期限を見る
+            if self.time_up() || ((r > 0 || fit_d) && over) {
                 break;
             }
             let (cands, forced_r): (Vec<Candidate>, Vec<Candidate>) = {
@@ -1357,6 +1360,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let _tk_guard = tk_c.then(|| crate::ticks::budget_guard(cap.min(1e6) * 1e9));
             let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap.min(1e6) * if tk_c { 10.0 } else { 1.0 });
+            let d = if fit_d { d.min(deadline) } else { d };
             let d = Some(self.deadline.map_or(d, |g| g.min(d)));
             let it_r0 = self.lp.total_iterations();
             let st = self.lp.solve(&SolveLimits { iteration_limit: 10 * self.avg_node_iters().max(1000) + 10_000, cutoff: f64::INFINITY, deadline: d });
@@ -1804,6 +1808,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 && {
                     if self.params.verbose {
                         eprintln!("MIP: GAP4 p: cut selection probe skipped (root LP {:.2}s)", self.root_lp_secs);
+                    }
+                    true
+                });
+        // 試作 `ENOMOTO_MIP_CUTSEL_PROBE_FIT` の `p` ([`cutsel_probe_fit`]): 根の LP の秒が比べの予算の半分を超えるなら比べない
+        let probe_pending = probe_pending
+            && !(cutsel_probe_fit('p')
+                && self.params.frac_tl().is_finite()
+                && self.root_lp_secs > 0.5 * tunable!("ENOMOTO_T_MIP_CUTSEL_PROBE_TIME_FRAC", 0.05, f64) * self.params.frac_tl()
+                && {
+                    if self.params.verbose {
+                        eprintln!("MIP: CUTSEL_PROBE_FIT p: cut selection probe skipped (root LP {:.2}s > half the budget)", self.root_lp_secs);
                     }
                     true
                 });
@@ -8561,6 +8576,16 @@ fn sep_threads(threads: usize) -> usize {
 /// (POOL は 2 ラウンドで伸び 117、既定は 4.29。analysis/phys6_20261101.md の 2 節の 4)。
 pub(crate) fn lose6_2_tie() -> bool {
     env_str!("ENOMOTO_MIP_LOSE6_2_TIE").is_some_and(|v| v != "0")
+}
+
+/// 試作 `ENOMOTO_MIP_CUTSEL_PROBE_FIT` (既定では使わない。analysis/biglp_20261121 7 節): カットの選び方の比べ
+/// (`ENOMOTO_MIP_CUTSEL_PROBE`) を時間の予算 (全体の `ENOMOTO_T_MIP_CUTSEL_PROBE_TIME_FRAC` 倍) に収める。値は部品の文字 (`1` なら全部):
+/// - `p`: 根の LP の秒が予算の半分 (片側の取り分) を超えるなら比べない。比べの 1 ラウンドは分離と、カットを足した LP の解き直しで、
+///   解き直しは根の LP と同じ程度までかかりうる (rail01: 根の LP 26.7 秒、0 ラウンド目のカットの LP 約 18 秒)
+/// - `d`: 比べの中の LP の期限を比べの期限で切り、2 つ目の側も 1 ラウンド目の前に期限を見る (今は 1 ラウンド目は期限を見ずに回り、
+///   LP の期限は 1 回の LP の上限なので、rail01 では予算 16〜30 秒に対して 27〜53 秒使い、両側とも LP が終わらず 0 ラウンドで比べていた)
+pub(crate) fn cutsel_probe_fit(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_CUTSEL_PROBE_FIT").is_some_and(|v| v != "0" && (v == "1" || v.contains(c)))
 }
 
 thread_local! {

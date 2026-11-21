@@ -1,11 +1,9 @@
 #!/bin/bash
-# pe (ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN=1) と pool_arena の誤答の確かめ (analysis/rootgap_20261121/fuzz.sh の組を pe つきで)。analysis/release0110_20261120/fuzz.sh と同じ 7 本を pe をつけて回し、
-# cargo test を既定と pe をつけた形で回す。リポジトリの根から: bash analysis/sc26pe_20261121/fuzz_pe.sh
-# ログは analysis/sc26pe_20261121/fuzz_logs/ (コミットしない)。
+# ENOMOTO_MIP_SUBMIP_FEASTOL (既定) の誤答の確かめ。analysis/rootgap_20261121/fuzz.sh と同じ 7 本を既定で回し、cargo test を既定で回す。
+# リポジトリの根から: bash analysis/primalgap_20261121/fuzz.sh   ログは analysis/primalgap_20261121/fuzz_logs/ (コミットしない)。
 set -u
 cd "$(dirname "$0")/../.."
-L=analysis/sc26pe_20261121/fuzz_logs; mkdir -p $L
-export ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN=1
+L=analysis/primalgap_20261121/fuzz_logs; mkdir -p $L
 run() { name=$1; shift; echo "== $name: $*"; "$@" > $L/$name.log 2>&1; echo "rc=$?"; tail -5 $L/$name.log; }
 run fuzz_tiny env ENOMOTO_MIP_REL_GAP=1e-9 python3 benchmarks/equiv2_bug_20261022/fuzz_tiny.py 400 0
 run fuzz_highs env ENOMOTO_MIP_REL_GAP=1e-9 python3 scripts/mip_fuzz_vs_highs.py 300
@@ -16,6 +14,4 @@ run fuzz_objint2 python3 analysis/objint_20261112/fuzz_objint.py 1000 5000
 run fuzz_slack2 python3 analysis/wrongans_20261112/seed14/fuzz_slack.py 1000 5000
 CT="cargo test --release --lib"
 export CARGO_TARGET_DIR=target/test-py RUSTFLAGS="-L /usr/local/lib -C link-arg=-lpython3.13" LD_LIBRARY_PATH=/usr/local/lib
-echo "== cargo test (pe)"; $CT > $L/cargo_pe.log 2>&1; echo "rc=$?"; grep "test result" $L/cargo_pe.log
-unset ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN
 echo "== cargo test (既定)"; $CT > $L/cargo_def.log 2>&1; echo "rc=$?"; grep "test result" $L/cargo_def.log
