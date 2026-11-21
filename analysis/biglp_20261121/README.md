@@ -261,3 +261,5 @@ RSS の推移 (MB、`rss.py`):
   (`python plan.py P 6` → shards_P.json、58 問 × 種 1〜3 × {def, fix}・60 秒・6 分担・各 0.47 時間。`python plan.py M 20` → shards_M.json、186 問 × {def, fix}・600 秒・
   20 分担・各 1.83〜1.85 時間)、`run.py` (`cd analysis/biglp_20261121/wide && python run.py P K`・`python run.py M K`)、集計は `python ci.py 60 def fix res_P_s*.jsonl`・
   `python ci.py 600 def fix res_M_s*.jsonl`。
+- 回したビルド (広い計測):
+  - P 0: acb17bae1 (build.sh の wheel、0.1.10)。58 行・crash 0。分担 0 だけの集計: 26 問、fix/def 1.027 [0.996, 1.059]、解けた def 22 / fix 22、食い違い 0。
