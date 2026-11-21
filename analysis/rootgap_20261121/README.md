@@ -125,3 +125,69 @@ app1-1 は SCIP 2382 列、当方は前処理の LP による固定の後で自�
    1 で下界が上がると固定が起きるか (mc11 の genoldlc では再スタートが起きた) をまず見る。単独の手当て (RENS を強くするなど) は 1 の後に。
 4. **衝突の制約の分離** (mc11 の logicor): SCIP は衝突から作った制約を根でカットとして分離している。当方にあるかを確かめてから (未確かめ)。
 5. app1-1・neos-1171448・exp-1-500-5-5 は、今回の材料では案を出さない (主側の運・差が小さい)。
+
+## 7. glc の広い計測 (2026-11-21、利用者の判断「やって」)
+
+- 設定 (`cfg.py`): `def` (既定) と `glc` (`ENOMOTO_MIP_GEN_OLD=1` + `ENOMOTO_MIP_LIFTED_COVER=1`)、どちらも 4 スレッド。
+- 分担表 (`plan.py`、slowm_20261119 の CP・CM の写し):
+  - P: `python plan.py P 6` → shards_P.json (MIPLIB の 58 問 × 種 1〜3 × {def, glc}、60 秒、6 分担、見積り各 0.47 時間 (final_20261118 の def の時間 + 8 秒))。
+  - M: `python plan.py M 20` → shards_M.json (Mittelmann 186 問 × 種 1 × {def, glc}、600 秒、20 分担、見積り各 1.83〜1.85 時間 (vsscip_20261120 の def の時間 + 30 秒))。
+- 回し方: リポジトリの根で `rm -f target/wheels/*.whl; sh analysis/revisit_20261112/build.sh` (先端でビルド) の後、
+  `cd analysis/rootgap_20261121 && python run.py P K` (K = 0〜5)・`python run.py M K` (K = 0〜19)。res_P_sK.jsonl・res_M_sK.jsonl に足す (途中から再開できる)。
+  回したビルドのコミットを下に書き足すこと。
+- 集計: `python ci.py 60 def glc res_P_s*.jsonl`・`python ci.py 600 def glc res_M_s*.jsonl` (ずらし 10 秒の幾何平均の比の 95% 区間、解けた数、全種で 1.25 倍超の遅れ)。
+- 誤答の確かめ (`bash analysis/rootgap_20261121/fuzz.sh`、4b09f68cf を build.sh で入れて、glc の 2 つの環境変数をつけて。ログは fuzz_logs/、コミットしない):
+
+| 命令 (glc) | 件数 | bad |
+|---|---|---|
+| `fuzz_tiny.py 400 0` (REL_GAP=1e-9) | 400 | 0 (strict 12) |
+| `mip_fuzz_vs_highs.py 300` (REL_GAP=1e-9) | 300 | 0 |
+| `fuzz_objint.py 1000 0` | 1000 | 0 (optimal 967・infeasible 33) |
+| `fuzz_slack.py 1000 0` | 1000 | 0 (mismatches 0) |
+| `fuzz_tiny.py 400 1000` (REL_GAP=1e-9) | 400 | 0 (strict 13) |
+| `fuzz_objint.py 1000 5000` | 1000 | 0 (optimal 971・infeasible 29) |
+| `fuzz_slack.py 1000 5000` | 1000 | 0 (mismatches 0) |
+| `cargo test --release --lib` (glc の環境変数つき / 既定) | 419 通過・0 失敗・19 無視 (両方) | — |
+
+  誤答 0・状態の食い違い 0。strict の数は 0.1.10 の既定 (release0110_20261120/fuzz.md の 12・13) と同じ。
+
+### 7.1 nw04 の遅れ (P、親の依頼、2026-11-21)
+
+- P の 4 スレッド (res_P_s*.jsonl、ビルド 4b09f68cf・7f801a8e0): def は 3 種とも 0 ノード・11.8〜14.9 秒、glc は 3 種とも 1 ノード・27.7〜34.1 秒 (2.3〜2.6 倍)。RSS はほぼ同じ (1.4〜1.5 GB)。
+- 1 スレッド (`nw04.sh`、種 1〜3・60 秒・`ENOMOTO_MIP_SEPSTAT=1`、ログは logs/nw04_<設定>_s<種>.log、M 14 の計測と並べて回したので時間は目安):
+  - 両方とも 3 種とも **0 ノード**。def 18.5・17.1・16.7 秒、glc 19.4・19.4・17.2 秒 (+3〜13%)。
+  - 根の LP は 35 行・82949 列・非零 60 万 (どちらも同じ)。根のカットのループはどちらも 4 巡・5 本 (LP の行 40)、カットの行は非常に密 (1 本の平均の非零 def 77982・glc 77902)、
+    プールの非零 def 389912・glc 389510。候補は def 114・glc 130 本 (どちらも全部 `rows`/path の側)、分離の時間 def 1.32〜1.45 秒・glc 1.53〜1.56 秒、
+    ループの時間 def 7.1〜8.2 秒・glc 8.7〜10.5 秒 (4 巡目の LP の反復は def 64・glc 47)。下界は同じ (16861.99998 → 解の確かめで 16862)。
+  - 1 ノードあたりの LP の反復と時間は、どちらも 0 ノードなので比べられない。
+- 読み (事実と推測): 1 スレッドでは、glc で増えるのは候補の数 (+16 本) と分離の手間 (+0.1〜0.2 秒/回) だけで、入るカットの本数・密さ・LP の行は同じ。
+  **4 スレッドの 2.3〜2.6 倍の遅れはカットの密さ・本数からは来ていない** (事実: 1 スレッドで同じカット・0 ノード)。4 スレッドでは glc だけ 1 ノードに進んでいるので、
+  根の終わり方 (4 スレッドの裏のカットや根の LP の競走の勝ち負けで、根で閉じきれずに木へ入る) が違うと見る (推測、4 スレッドのログは M の計測と重なるので取っていない)。
+
+### 回したビルド
+
+- P 3: 7f801a8e0 (2d210db89 以降) で build.sh の wheel (0.1.10) を .venv に入れて回した。58 行・crash 0。
+- P 分担 4: 7f801a8e0 (build.sh、0.1.10)
+- P 0: 4b09f68cf (build.sh の wheel)。58 行・crash 0。
+- P 1: 1e12472d0 (build.sh の wheel、2d210db89 以降)。58 行・crash 0。
+- P 2: 7f801a8e0 (2d210db89 以降、build.sh の wheel、0.1.10)。58 行・crash 0。
+- P 5: 7f801a8e0 (2d210db89 以降、build.sh の wheel、0.1.10)。58 行・crash 0。
+- M 8: 7f801a8e0 (2d210db89 以降、build.sh の wheel、0.1.10)。20 行・crash 0。
+- M 10: 1e12472d0 (2d210db89 以降、build.sh の wheel、0.1.10)。20 行・crash 0。
+- M 12: 1e12472d0 (2d210db89 以降、build.sh の wheel、0.1.10)。20 行・crash 0。
+- M 2: 1e12472d0 (2d210db89 以降、build.sh の wheel、0.1.10)。16 行・crash 0。
+- M 3: 1e12472d0 (2d210db89 以降、build.sh の wheel、0.1.10)。16 行・crash 0。
+- M 4: 7f801a8e0 (2d210db89 以降、build.sh の wheel、0.1.10)。16 行・crash 0。
+- M 1: 1e12472d0 (2d210db89 以降、build.sh の wheel、0.1.10)。16 行・crash 0。
+- M 0: 1e12472d0 (2d210db89 以降、build.sh の wheel、0.1.10)。16 行・crash 0。
+- M 5: 7f801a8e0 (2d210db89 以降、build.sh の wheel、0.1.10)。18 行・crash 0。**neos-4722843-widden で glc が誤った最適値 27308.196 (正しくは 25009.663、def は正しい) を返した**。
+- M 6: 1e12472d0 (2d210db89 以降、build.sh の wheel、0.1.10)。18 行・crash 0。
+- M 11: 1e12472d0 (2d210db89 以降、build.sh の wheel、0.1.10、SCIP-GATE のセッション)。20 行・crash 0。**rocI-4-11 で glc が誤答** (glc optimal −4030303、def と solu の最適値は −6020203)。
+- M 9: 7f801a8e0 (2d210db89 以降、build.sh の wheel、0.1.10)。20 行・crash 0。
+
+### 7.1 P の結果 (6 分担そろい、親の集計 2026-11-21、`ci_P.txt`)
+
+`python ci.py 60 def glc res_P_s*.jsonl` (ずらし 10 秒): 58 問 × 種 1〜3、**glc/def 1.045 [1.010, 1.082]、解けた def 138 / glc 137** (mc11 種 1 が def のみ)。食い違い 0。
+- 全種で 1.25 倍超遅い: nw04 (素の比 2.29・2.61・2.34、ずらした比 1.73〜1.87)、qiu (1.82・2.18・1.75)。fiber・neos-3083819-nubu は素の比だけ (1〜4 秒の問題、ずらすと 1.03〜1.2)。
+- 速い: p200x1188c (0.41・3.3 倍速)、10teams 種 2 (34.4 → 4.0 秒、ただし種 1 は 2.40 倍遅い)、noswot 種 2 (0.30)、neos-827175。
+- P では採用基準 (区間の上端 ≲ +5%・解けた数が減らない・全種遅い問題なし) をどれも満たさない。M (20 分担) は計測中。

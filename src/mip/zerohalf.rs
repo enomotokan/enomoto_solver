@@ -277,7 +277,7 @@ pub fn zerohalf_cuts(rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64],
         }
         let act: f64 = coefs.iter().map(|&(j, a)| a * x[j]).sum();
         if act > rhs + 1e-6 {
-            out.push(RawCut { coefs, rhs });
+            out.push(RawCut { coefs, rhs, kind: 0 });
         }
     }
     out
