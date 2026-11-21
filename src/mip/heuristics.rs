@@ -119,6 +119,9 @@ thread_local! {
     pub(super) static FJ_NOSOL_CAP: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
     /// 主のスレッドが暫定解を持ったら立つ印 (立てば `FJ_NOSOL_CAP` の延長をやめる)
     pub(super) static FJ_HAS_INC: std::cell::RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>> = const { std::cell::RefCell::new(None) };
+    /// 試作 `ENOMOTO_MIP_T1MIX` ([`Solver::t1_fj_lmip_mix`]): [`fj_lmip_mix`] を、最後の改善 (始めからは始め) からこの秒数 (時計は
+    /// [`fj_lmip_mix`] と同じ) 良い解が出なければ打ち切る (0 = 使わない。並列の FJ のスレッドでは使わない)
+    pub(super) static MIX_STALL: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
 }
 
 /// 主のスレッドが暫定解を持っているか (`FJ_HAS_INC`)。
@@ -3948,7 +3951,15 @@ pub(super) fn fj_lmip_mix(p: &MipProblem, lo: &[f64], up: &[f64], cap: f64, seed
     // (Local-MIP の改善を根のカットのループの終わりまで)
     let ext_all = env_def!("ENOMOTO_MIP_FJ_NOSOL_EXTEND", "2") == Some("2");
     let end_now = |b: &Option<(f64, Vec<f64>)>| if (b.is_none() || ext_all) && !main_has_incumbent() { t_ext } else { t_end };
+    let stall = MIX_STALL.with(|c| c.get());
+    let mut t_imp = 0.0f64;
+    let mut stalled = false;
     while now() < end_now(&best) && !stop.load(Ordering::Relaxed) {
+        // `MIX_STALL` (`ENOMOTO_MIP_T1MIX`): 最後の改善からその秒数、良い解が出なければ打ち切る
+        if stall > 0.0 && now() - t_imp >= stall {
+            stalled = true;
+            break;
+        }
         let t_end = end_now(&best);
         let lm_share = match leader {
             0 => 0.5,
@@ -3980,6 +3991,7 @@ pub(super) fn fj_lmip_mix(p: &MipProblem, lo: &[f64], up: &[f64], cap: f64, seed
                 wins[(who - 1) as usize] += 1;
                 first.get_or_insert((now(), who));
                 on_sol(&x);
+                t_imp = now();
                 if !use_lm {
                     if let Some(l) = lm.as_mut() {
                         l.inject(&x);
@@ -3995,7 +4007,7 @@ pub(super) fn fj_lmip_mix(p: &MipProblem, lo: &[f64], up: &[f64], cap: f64, seed
     }
     if env_str!("ENOMOTO_MIP_FJ_DEBUG").is_some() {
         eprintln!(
-            "MIP:   FJ/Local-MIP mix: FJ {n_fj} runs {t_fj:.2}s ({} improvements), Local-MIP {n_lm} slices {t_lm:.2}s ({} improvements, least violated rows {}), leader {}, first {:?}, best {} (wall {:.2}s, ticks {:.2}s)",
+            "MIP:   FJ/Local-MIP mix: FJ {n_fj} runs {t_fj:.2}s ({} improvements), Local-MIP {n_lm} slices {t_lm:.2}s ({} improvements, least violated rows {}), leader {}, first {:?}, best {}, last improvement {t_imp:.2}s, stalled {stalled} (wall {:.2}s, ticks {:.2}s)",
             wins[0],
             wins[1],
             lm.as_ref().map_or(usize::MAX, |l| l.res.least_viol),

@@ -1320,9 +1320,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut nadd = 0usize;
         let mut all_rows: Vec<(Vec<(usize, f64)>, f64, f64)> = Vec::new();
         let alt_has = |c: char| env_def!("ENOMOTO_MIP_CUTSEL_PROBE_ALT", "NS").is_none_or(|v| v.contains(c));
+        // 試作 `ENOMOTO_MIP_CUTSEL_PROBE_FIT` の `d`: 時間で数えるとき (手間で数える `TIMEDEP` の `c`・`TICKS` の `c` では使わない) だけ
+        let fit_d = cutsel_probe_fit('d') && !td_c && !tk_c;
         for r in 0..k {
             let over = if td_c { PROBE_WORK.with(|c| { let (_, u, b) = c.get(); u >= b }) } else if tk_c { tk_el() >= tk_budget } else { std::time::Instant::now() >= deadline };
-            if self.time_up() || (r > 0 && over) {
+            // 試作 `ENOMOTO_MIP_CUTSEL_PROBE_FIT` の `d` ([`cutsel_probe_fit`]): 1 ラウンド目の前にも期限を見る
+            if self.time_up() || ((r > 0 || fit_d) && over) {
                 break;
             }
             let (cands, forced_r): (Vec<Candidate>, Vec<Candidate>) = {
@@ -1357,6 +1360,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let _tk_guard = tk_c.then(|| crate::ticks::budget_guard(cap.min(1e6) * 1e9));
             let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap.min(1e6) * if tk_c { 10.0 } else { 1.0 });
+            let d = if fit_d { d.min(deadline) } else { d };
             let d = Some(self.deadline.map_or(d, |g| g.min(d)));
             let it_r0 = self.lp.total_iterations();
             let st = self.lp.solve(&SolveLimits { iteration_limit: 10 * self.avg_node_iters().max(1000) + 10_000, cutoff: f64::INFINITY, deadline: d });
@@ -1804,6 +1808,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 && {
                     if self.params.verbose {
                         eprintln!("MIP: GAP4 p: cut selection probe skipped (root LP {:.2}s)", self.root_lp_secs);
+                    }
+                    true
+                });
+        // 試作 `ENOMOTO_MIP_CUTSEL_PROBE_FIT` の `p` ([`cutsel_probe_fit`]): 根の LP の秒が比べの予算の半分を超えるなら比べない
+        let probe_pending = probe_pending
+            && !(cutsel_probe_fit('p')
+                && self.params.frac_tl().is_finite()
+                && self.root_lp_secs > 0.5 * tunable!("ENOMOTO_T_MIP_CUTSEL_PROBE_TIME_FRAC", 0.05, f64) * self.params.frac_tl()
+                && {
+                    if self.params.verbose {
+                        eprintln!("MIP: CUTSEL_PROBE_FIT p: cut selection probe skipped (root LP {:.2}s > half the budget)", self.root_lp_secs);
                     }
                     true
                 });
@@ -4436,6 +4451,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.cut_pool_keys.insert(key, self.cut_pool.len());
         self.pool_hash.push(key);
         self.pool_age.push(0);
+        self.pool_arena.push(u32::MAX);
         let norm = coefs.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
         self.cut_pool_nnz += coefs.len();
         self.cut_pool.push((coefs.to_vec(), rhs, norm));
@@ -4491,6 +4507,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.cpp.valid = false;
         let old = std::mem::take(&mut self.cut_pool);
         let (hash, age) = (std::mem::take(&mut self.pool_hash), std::mem::take(&mut self.pool_age));
+        let arena = std::mem::take(&mut self.pool_arena);
         self.cut_pool_keys.clear();
         self.pool_idx.clear();
         self.pool_val.clear();
@@ -4504,6 +4521,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.cut_pool_keys.insert(hash[k], self.cut_pool.len());
             self.pool_hash.push(hash[k]);
             self.pool_age.push(age[k]);
+            self.pool_arena.push(arena[k]);
             self.cut_pool_nnz += c.0.len();
             for &(j, v) in &c.0 {
                 self.pool_idx.push(j as u32);
@@ -6353,6 +6371,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_SEP_NO_ROWCLONE`: 行の写しと整数の行の印を使い回す ([`SepRowsCache`])
         let (lp_rows_rc, row_integral) = self.sep_lp_rows();
         let lp_rows: &[Vec<(usize, f64)>] = &lp_rows_rc;
+        // 診断 `ENOMOTO_MIP_LC_DEBUG` (analysis/rootgap_20261121/wrong_roci): デバッグ解に LP の行の活動量を足して大域の置き場に置く
+        if self.dbg_on && env_str!("ENOMOTO_MIP_LC_DEBUG").is_some() {
+            if let Some(xd) = super::solver::DEBUG_SOL.with(|d| d.borrow().clone()) {
+                let mut ext = xd.clone();
+                ext.extend(lp_rows.iter().map(|r| r.iter().map(|&(j, a)| a * xd[j]).sum::<f64>()));
+                if let Ok(mut g) = super::cuts::LC_DEBUG_X.lock() {
+                    *g = Some(ext);
+                }
+            }
+        }
         // 手間の単位 ([`crate::ticks`]): 分離の 1 回 = LP の行の非零 + 行 + 列
         crate::ticks::add(crate::ticks::SEP, (lp_rows.iter().map(|r| r.len()).sum::<usize>() + mr + n) as u64);
         // 試作 `ENOMOTO_MIP_MPSEP` の in-out の点 (LP の頂点でない点) では、その点での行の活動量を使う
@@ -6517,14 +6545,34 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if let Some(raw) = raw {
                 let t0 = std::time::Instant::now();
                 n_raw.set(n_raw.get() + 1);
-                if let Some(c) = finish_cut(raw, n, lp_rows, &s.cut_int, &sglo, &sgup, x, s.incumbent.as_ref().map(|(_, v)| v.as_slice()), &mut finish_scratch) {
+                // 診断 `ENOMOTO_MIP_LC_DEBUG`: 生のカット (行の活動量の変数を含む) のデバッグ解での値を、仕上げの前に取っておく
+                let raw_dbg = if env_str!("ENOMOTO_MIP_LC_DEBUG").is_some() {
+                    super::cuts::LC_DEBUG_X.lock().ok().and_then(|g| g.clone()).map(|xe| (raw.coefs.iter().map(|&(j, a)| a * xe[j]).sum::<f64>(), raw.rhs, raw.coefs.clone(), raw.kind))
+                } else {
+                    None
+                };
+                let fin = finish_cut(raw, n, lp_rows, &s.cut_int, &sglo, &sgup, x, s.incumbent.as_ref().map(|(_, v)| v.as_slice()), &mut finish_scratch);
+                if let (Some((ra, rr, rc, rk)), Some(c), Some(xd)) = (raw_dbg.as_ref(), fin.as_ref(), dbg_x.as_ref()) {
+                    let act: f64 = c.coefs.iter().map(|&(j, a)| a * xd[j]).sum();
+                    if act > c.rhs + 1e-6 * (1.0 + c.rhs.abs()) {
+                        eprintln!("LC_DEBUG: finished cut (kind {rk}) violated: {act:.6e} > {:.6e} (len {}); raw {ra:.6e} <= {rr:.6e}? {} (len {})", c.rhs, c.coefs.len(), *ra <= rr + 1e-6 * (1.0 + rr.abs()), rc.len());
+                        eprintln!("LC_DEBUG:   raw {:?}", rc.iter().map(|&(j, a)| (j, a, if j < n { sglo[j] } else { f64::NAN }, if j < n { sgup[j] } else { f64::NAN })).collect::<Vec<_>>());
+                        eprintln!("LC_DEBUG:   finished {:?}", c.coefs);
+                        for &(j, _) in rc.iter().filter(|&&(j, _)| j >= n) {
+                            let row = &lp_rows[j - n];
+                            let ract: f64 = row.iter().map(|&(k, a)| a * xd[k]).sum();
+                            eprintln!("LC_DEBUG:   slack {j} = LP row {} (bounds [{}, {}], debug activity {ract:.6e}): {:?}", j - n, sglo.get(j).copied().unwrap_or(f64::NAN), sgup.get(j).copied().unwrap_or(f64::NAN), row.iter().map(|&(k, a)| (k, a, xd[k])).collect::<Vec<_>>());
+                        }
+                    }
+                }
+                if let Some(c) = fin {
                     if let Some(xd) = dbg_x.as_ref() {
                         let act: f64 = c.coefs.iter().map(|&(j, a)| a * xd[j]).sum();
                         let viol = act - c.rhs > 1e-6 * (1.0 + c.rhs.abs());
                         let k = if !viol { 0 } else if dbg_in_bounds { 1 } else { 2 };
                         INTVUB_CHECK.with(|v| v.borrow_mut()[k] += 1);
                         if viol && dbg_in_bounds {
-                            eprintln!("MIP_DEBUG_SOL: INTVUB_CHECK: candidate cut (src {}) violated by the debug solution: {act:.10e} > {:.10e}, len {}", c.src, c.rhs, c.coefs.len());
+                            eprintln!("MIP_DEBUG_SOL: INTVUB_CHECK: candidate cut (src {}, kind {}) violated by the debug solution: {act:.10e} > {:.10e}, len {}", c.src, c.kind, c.rhs, c.coefs.len());
                         }
                     }
                     cands.push(c);
@@ -8027,6 +8075,11 @@ fn gen_cuts_parallel(
 /// [2] そのために係数が全部消えて捨てたカット、[3] 下限のために閾値以下になった係数の境界が無限で捨てたカット (全スレッド)
 pub(super) static SMALL_FLOOR_STATS: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
 
+/// 数え上げ (`ENOMOTO_MIP_LOG` のとき求解の終わりに表示、analysis/rootgap_20261121/wrong_roci): [`finish_cut`] の打ち消しの確かめ
+/// (`ENOMOTO_MIP_FINISH_CANCEL`) の回数。[0] 打ち消しの残りとみなした係数、[1] それがあったカット、[2] そのうち小さい係数の吸収 (下限つき) では
+/// 消えない係数、[3] それがあって残りを 0 にしたカット (確かめが動きを変えたカット)、[4] そのため係数が全部消えて捨てたカット (全スレッド)
+pub(super) static CANCEL_STATS: [std::sync::atomic::AtomicU64; 5] = [const { std::sync::atomic::AtomicU64::new(0) }; 5];
+
 pub(super) static GAP4_CUT_SHORTENED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn finish_cut(
@@ -8046,24 +8099,31 @@ fn finish_cut(
     // 構造変数ごとの係数を密な作業領域 (呼び出し側が長さ n の 0 で用意し、ここで 0 に戻す) に集める。
     // 以前は BTreeMap で、集約行の非零が数千のときは finish_cut が tableau 行のカット生成と同程度の時間を使っていた
     let mut touched: Vec<usize> = Vec::with_capacity(raw.coefs.len());
+    // 試作 `ENOMOTO_MIP_FINISH_CANCEL` (analysis/rootgap_20261121/wrong_roci): 列ごとに、足し合わせる前の項の絶対値の和 (打ち消す前の大きさ) を持つ。
+    // 同じ列が ± で入る (変数上下限の置き換えと行の活動量の代入) と打ち消して浮動小数の残り (1e-16 程度) だけが残り、それが最大係数として
+    // 1 に引き伸ばされ、誤ったカットになっていた (rocI-4-11 の LIFTED_COVER: 実質 0 <= 0 のカットが x347 <= 0 になり最適解を切った)
+    // 既定で使う前提の試作 (`ENOMOTO_MIP_FINISH_CANCEL=0` で以前の動き)。小さい係数の吸収の下限 (`ENOMOTO_MIP_CUT_SMALL_FLOOR`) は絶対値 1e-7 以下しか
+    // 拾わないので、係数が大きい行 (1e3 以上) の打ち消しの残りはすり抜けうる。こちらは列ごとの打ち消す前の大きさに対する相対で見る
+    let cancel = env_def!("ENOMOTO_MIP_FINISH_CANCEL", "1").is_some();
+    let mut mag: Vec<(usize, f64)> = Vec::new();
+    let mut add = |j: usize, v: f64, scratch: &mut [f64], touched: &mut Vec<usize>, mag: &mut Vec<(usize, f64)>| {
+        if scratch[j] == 0.0 {
+            touched.push(j);
+        }
+        scratch[j] += v;
+        if scratch[j] == 0.0 {
+            scratch[j] = 1e-300;
+        }
+        if cancel {
+            mag.push((j, v.abs()));
+        }
+    };
     for &(k, c) in &raw.coefs {
         if k < n {
-            if scratch[k] == 0.0 {
-                touched.push(k);
-            }
-            scratch[k] += c;
-            if scratch[k] == 0.0 {
-                scratch[k] = 1e-300;
-            }
+            add(k, c, scratch, &mut touched, &mut mag);
         } else {
             for &(j, a) in &lp_rows[k - n] {
-                if scratch[j] == 0.0 {
-                    touched.push(j);
-                }
-                scratch[j] += c * a;
-                if scratch[j] == 0.0 {
-                    scratch[j] = 1e-300;
-                }
+                add(j, c * a, scratch, &mut touched, &mut mag);
             }
         }
     }
@@ -8073,6 +8133,48 @@ fn finish_cut(
         let v = scratch[j];
         scratch[j] = 0.0;
         dense.push((j, if v == 1e-300 { 0.0 } else { v }));
+    }
+    let small_rel = tunable!("ENOMOTO_T_MIP_CUT_SMALL_REL", 1e-4, f64);
+    let small_floor = if env_def!("ENOMOTO_MIP_CUT_SMALL_FLOOR", "1").is_some() { tunable!("ENOMOTO_T_MIP_CUT_SMALL_FLOOR", 1e-3, f64) } else { 0.0 };
+    if cancel && !mag.is_empty() {
+        // 打ち消した後の係数が、その列の打ち消す前の大きさの 1e-9 倍以下なら打ち消しの残りとみなす (既存の「cmax の 1e-9 倍以下は捨てる」と同じ尺度)。
+        // 残りがすべて下の小さい係数の吸収 (下限つき) で消えるなら何もしない (既定の動きを変えない)。消えない残りが 1 つでもあれば、残りを全部 0 にする
+        mag.sort_unstable_by_key(|&(j, _)| j);
+        let cmax0 = dense.iter().fold(0.0f64, |m, &(_, v)| m.max(v.abs()));
+        let thr0 = small_rel * cmax0.max(small_floor);
+        let mut resid: Vec<usize> = Vec::new();
+        let mut not_floor = 0u64;
+        let mut m = 0usize;
+        for (t, &(j, v)) in dense.iter().enumerate() {
+            let mut s = 0.0;
+            while m < mag.len() && mag[m].0 < j {
+                m += 1;
+            }
+            while m < mag.len() && mag[m].0 == j {
+                s += mag[m].1;
+                m += 1;
+            }
+            if v != 0.0 && v.abs() <= 1e-9 * s {
+                resid.push(t);
+                not_floor += (v.abs() > thr0) as u64;
+            }
+        }
+        if !resid.is_empty() {
+            use std::sync::atomic::Ordering::Relaxed;
+            CANCEL_STATS[0].fetch_add(resid.len() as u64, Relaxed);
+            CANCEL_STATS[1].fetch_add(1, Relaxed);
+            if not_floor > 0 {
+                CANCEL_STATS[2].fetch_add(not_floor, Relaxed);
+                CANCEL_STATS[3].fetch_add(1, Relaxed);
+                for &t in &resid {
+                    dense[t].1 = 0.0;
+                }
+                dense.retain(|&(_, v)| v != 0.0);
+                if dense.is_empty() {
+                    CANCEL_STATS[4].fetch_add(1, Relaxed);
+                }
+            }
+        }
     }
     let mut rhs = raw.rhs;
     let cmax = dense.iter().fold(0.0f64, |m, &(_, v)| m.max(v.abs()));
@@ -8084,13 +8186,11 @@ fn finish_cut(
     // Σ_{k≠j} c_k x_k <= rhs - c_j x_j <= rhs - min(...) となり、右辺を緩める向きにだけ動く。
     // 閾値は `ENOMOTO_T_MIP_CUT_SMALL_REL` (既定 1e-4、1e-9 で以前と同じ)。その境界が無限のときは、以前の閾値 1e-9 以下なら
     // カットを捨て、それより大きければ係数を残す (以前より多くは捨てない)
-    let small_rel = tunable!("ENOMOTO_T_MIP_CUT_SMALL_REL", 1e-4, f64);
     // 直し (analysis/rootgap_20261121/wrong_widden、2026-11-21): HiGHS の `postprocessCut` と同じく、閾値の基準の最大係数に下限
     // `ENOMOTO_T_MIP_CUT_SMALL_FLOOR` (既定 1e-3) を置く (閾値は 1e-4 × max(最大係数, 1e-3)、つまり絶対値 1e-7 以下の係数は必ず吸収する)。
     // 論理変数を元の行に展開すると係数がほぼ打ち消し合い、許容誤差の大きさ (1e-9 程度) の残りだけのカットがある。下限がないと
     // それを最大係数 1 に拡大して妥当でないカットにする (neos-4722843-widden の持ち上げつきの被覆: 展開すると係数 8e-10、右辺 8e-10 の
     // 行が x35 + x37 <= 1 になり、最適解 (x35 = x37 = 1) を切って 27308.196 を最適と返していた)。`ENOMOTO_MIP_CUT_SMALL_FLOOR=0` で以前の動き
-    let small_floor = if env_def!("ENOMOTO_MIP_CUT_SMALL_FLOOR", "1").is_some() { tunable!("ENOMOTO_T_MIP_CUT_SMALL_FLOOR", 1e-3, f64) } else { 0.0 };
     let small_base = cmax.max(small_floor);
     let mut coefs: Vec<(usize, f64)> = Vec::with_capacity(dense.len());
     // 下限があるために吸収した係数の数 (以前の閾値では残ったもの。数え上げ [`SMALL_FLOOR_STATS`] 用)
@@ -8558,6 +8658,16 @@ fn sep_threads(threads: usize) -> usize {
 /// (POOL は 2 ラウンドで伸び 117、既定は 4.29。analysis/phys6_20261101.md の 2 節の 4)。
 pub(crate) fn lose6_2_tie() -> bool {
     env_str!("ENOMOTO_MIP_LOSE6_2_TIE").is_some_and(|v| v != "0")
+}
+
+/// 試作 `ENOMOTO_MIP_CUTSEL_PROBE_FIT` (既定では使わない。analysis/biglp_20261121 7 節): カットの選び方の比べ
+/// (`ENOMOTO_MIP_CUTSEL_PROBE`) を時間の予算 (全体の `ENOMOTO_T_MIP_CUTSEL_PROBE_TIME_FRAC` 倍) に収める。値は部品の文字 (`1` なら全部):
+/// - `p`: 根の LP の秒が予算の半分 (片側の取り分) を超えるなら比べない。比べの 1 ラウンドは分離と、カットを足した LP の解き直しで、
+///   解き直しは根の LP と同じ程度までかかりうる (rail01: 根の LP 26.7 秒、0 ラウンド目のカットの LP 約 18 秒)
+/// - `d`: 比べの中の LP の期限を比べの期限で切り、2 つ目の側も 1 ラウンド目の前に期限を見る (今は 1 ラウンド目は期限を見ずに回り、
+///   LP の期限は 1 回の LP の上限なので、rail01 では予算 16〜30 秒に対して 27〜53 秒使い、両側とも LP が終わらず 0 ラウンドで比べていた)
+pub(crate) fn cutsel_probe_fit(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_CUTSEL_PROBE_FIT").is_some_and(|v| v != "0" && (v == "1" || v.contains(c)))
 }
 
 thread_local! {
