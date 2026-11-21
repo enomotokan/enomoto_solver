@@ -320,6 +320,7 @@ sorrell3 (600 秒、どれも時間切れ・下界 −19):
   - P 1: 620bebcc6 (bb401e311 以降、build.sh の wheel、0.1.10)。58 行・crash 0。解けた def 23 / fix 23、食い違い 0。
   - P 3: 620bebcc6 (bb401e311 以降、build.sh の wheel、0.1.10)。58 行・crash 0。分担 3 だけの集計: 26 問、fix/def 0.991 [0.946, 1.037]、解けた def 23 / fix 24 (neos5 種 2 が fix のみ)、食い違い 0。
   - P 5: 620bebcc6 (bb401e311 以降、build.sh の wheel、0.1.10)。58 行・crash 0。分担 5 だけの集計: 26 問、fix/def 0.962 [0.911, 1.015]、解けた def 22 / fix 23 (10teams 種 3 が fix のみ、def は 60 秒で暫定解 934)、食い違い 0。
+  - M 9: b0497e53f (54a900938 以降、build.sh の wheel、0.1.10)。20 行・crash 0。解けた def 6 / fix 6、食い違い 0、片方だけ解けたものなし。1.25 倍超の遅れなし、速いのは swath3 (def 90.5 秒 → fix 57.5 秒)。時間切れ 4 問の暫定解 (def / fix、最小化): brazil3 302 / 294、leo2 406300380 / 415445306、toguru 2044.2 / 2072.1、sct2 は同じ (-230.98916)。下界 (def / fix) は leo2 395482842 / 394772694 と sct2 -231.0303 / -231.0474 で def が上、toguru 1147.0 / 1151.7 で fix が上、brazil3 は同じ 20。
 
   - P 0: bb401e311 (build.sh の wheel、0.1.10。src は 620bebcc6 と同じ)。58 行・crash 0。 読み込み先は site-packages の _core (target/wheels の wheel と sha1 一致、11:52 作成、計測開始 11:53)。python/enomoto_solver の古い .so (02:59) は読んでいない。
 
