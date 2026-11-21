@@ -1,10 +1,11 @@
 """P の 1 スレッド比較の集計: 設定ごとに解けた数・時間の SGM (ずれ 1 秒、解けない回は上限)・目的値の食い違い・
-両方解けなかった回の暫定解の良し悪し。python summ_P.py [基準 def_t1]"""
+両方解けなかった回の暫定解の良し悪し。python summ_P.py [基準 def_t1] [組 P (res_P_s*.jsonl)、P2 なら res_P2_s*.jsonl]"""
 import json, sys, math, collections
 from pathlib import Path
 D = Path(__file__).resolve().parent
 R = {}
-for f in sorted(D.glob("res_P_s*.jsonl")):
+SETN = sys.argv[2] if len(sys.argv) > 2 else "P"
+for f in sorted(D.glob(f"res_{SETN}_s*.jsonl")):
     for l in open(f):
         if l.strip():
             r = json.loads(l); R[(r["problem"], r["seed"], r["cfg"])] = r
