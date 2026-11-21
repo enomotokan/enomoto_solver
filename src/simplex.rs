@@ -119,6 +119,12 @@ impl Drop for DseTickGuard<'_> {
 /// 超疎の版の BTRAN の結果の非零の数の合計, 超疎の経路で終わった BTRAN の数, `fill_missing` の回数, 埋めた行の数]
 pub(crate) static DSE_EXACT_STATS: [std::sync::atomic::AtomicU64; 8] = [const { std::sync::atomic::AtomicU64::new(0) }; 8];
 
+thread_local! {
+    /// 試作 `ENOMOTO_MIP_DSE_COST` ([`slope_intercept_dual::dse_cost_skip`]): このスレッドで直近に厳密な DSE 重みを作ったときの
+    /// 1 行あたりの手間 ([`crate::ticks`] の単位。超疎の版 [`DseState::from_basis_sparse`] で測る)
+    pub(crate) static DSE_INIT_TICKS_PER_ROW: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+}
+
 /// `ENOMOTO_DSE_EXACT_SPARSE` (既定で使う、`=0` で従来の密な掃引): [`DseState::from_basis`] を超疎の単位 BTRAN で行う
 /// (analysis/nodelp2_20261107.md。値は密な版と同じで、1 回の計算は 1.2〜2.8 倍速い)。
 fn dse_exact_sparse() -> bool {
@@ -2209,6 +2215,7 @@ impl DseState {
     /// [`Self::from_basis`] の超疎の版 (`ENOMOTO_DSE_EXACT_SPARSE`)。FT 更新のある分解でも使える。
     fn from_basis_sparse(m: usize, lu: &sparse_lu::FtLu) -> Self {
         let _tick = DseTickGuard::new(lu);
+        let tk0 = lu.synth_tick();
         let floor = tunable!("ENOMOTO_T_STEEPEST_EDGE_FLOOR", STEEPEST_EDGE_FLOOR, f64);
         let mut w = vec![1.0; m];
         let mut out = vec![0.0; m];
@@ -2228,6 +2235,11 @@ impl DseState {
         }
         DSE_EXACT_STATS[4].fetch_add(nnz, std::sync::atomic::Ordering::Relaxed);
         DSE_EXACT_STATS[5].fetch_add(hyper, std::sync::atomic::Ordering::Relaxed);
+        // 試作 `ENOMOTO_MIP_DSE_COST`: 1 行あたりの手間 (LU の決定的な数え × その重み) を残す (次の作り直しの見積り)
+        if m > 0 {
+            let d = lu.synth_tick().saturating_sub(tk0) as f64 * crate::ticks::weight(crate::ticks::LU);
+            DSE_INIT_TICKS_PER_ROW.with(|c| c.set(Some(d / m as f64)));
+        }
         DseState { w, use_parallel: m > RAYON_SIZE_THRESHOLD }
     }
 
