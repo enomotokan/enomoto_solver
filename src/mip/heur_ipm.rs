@@ -47,7 +47,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             return false;
         }
-        // 試作 `ENOMOTO_MIP_DET1T` の `i` (analysis/det1t_20261120): 予算を手間 (ticks × 1e-9 秒) で数え、内点法の反復も KKT の分解の
+        // `ENOMOTO_MIP_DET1T` (既定 `onil`) の `i` (analysis/det1t_20261120): 予算を手間 (ticks × 1e-9 秒) で数え、内点法の反復も KKT の分解の
         // 演算数を数えて手間の期限で止める (スレッドの手間の合計には足さない: [`crate::ticks::ipm_add`])。壁時計の期限は 10 倍の安全網にする
         let det_i = super::solver::det1t('i');
         let deadline = Instant::now() + Duration::from_secs_f64(if det_i { 10.0 * budget } else { budget });
