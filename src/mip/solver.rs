@@ -27593,7 +27593,7 @@ pub(super) fn orbitope_reason() -> bool {
     *F.get_or_init(|| env_str!("ENOMOTO_MIP_ORBITOPE_STATIC").is_some_and(|v| v.contains('r')) || env_str!("ENOMOTO_MIP_ORBITOPE_REASON").is_some_and(|v| v != "0"))
 }
 
-/// 試作 `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN` (既定では使わない、analysis/treeclose2_20261117/): 双対証明で締めた境界の変更に証明の
+/// `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN` (既定、`=0` で切る、analysis/treeclose2_20261117/): 双対証明で締めた境界の変更に証明の
 /// 通し番号を残し、HiGHS 式の衝突解析でその証明の行から説明して遡る。
 /// 試作 `ENOMOTO_MIP_CONFLICT_WEIGHT_DYN` = w (p2inf_20261119、既定では使わない): 解いている途中で衝突の重みを w に上げる ([`Solver`] の木のループ)。
 fn cw_dyn() -> Option<f64> {
@@ -27702,7 +27702,8 @@ pub(super) fn lit_explain_auto() -> bool {
     *F.get_or_init(|| lit_explain_val().is_some_and(|v| v == "auto"))
 }
 
+/// `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN` (pe、2026-11-21 に既定化、`=0` で切る。analysis/slowm_20261119 §19、analysis/sc26pe_20261121)
 pub(super) fn conflict_proof_explain() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *F.get_or_init(|| env_str!("ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN").is_some())
+    *F.get_or_init(|| env_str!("ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN").is_none_or(|v| v != "0"))
 }

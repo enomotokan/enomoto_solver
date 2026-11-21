@@ -1395,13 +1395,31 @@ pub(crate) fn dse_cost_skip(m: usize) -> bool {
         DSE_COST_STATS[2].fetch_add(1, Relaxed);
         return false;
     };
-    if per_row * m as f64 > budget {
+    let skip = per_row * m as f64 > budget;
+    DSE_COST_LAST.with(|c| c.set((if skip { 1 } else { 2 }, per_row * m as f64, budget)));
+    if skip {
         DSE_COST_STATS[0].fetch_add(1, Relaxed);
         true
     } else {
         DSE_COST_STATS[1].fetch_add(1, Relaxed);
         false
     }
+}
+
+thread_local! {
+    /// 診断 `ENOMOTO_MIP_DSE_COST_LOG`: 直前の [`dse_cost_skip`] の判断 (1 省いた・2 作った、0 は判断なし)・作り直しの見積り・見込みの手間
+    static DSE_COST_LAST: std::cell::Cell<(u8, f64, f64)> = const { std::cell::Cell::new((0, 0.0, 0.0)) };
+}
+
+/// 診断 `ENOMOTO_MIP_DSE_COST_LOG=1` (解き方は変えない): 求解ごとに判断と反復の数を出すか。
+pub(crate) fn dse_cost_log_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_MIP_DSE_COST_LOG").is_some_and(|v| v != "0"))
+}
+
+/// 直前の [`dse_cost_skip`] の判断を取り出して消す。
+pub(crate) fn take_dse_cost_last() -> (u8, f64, f64) {
+    DSE_COST_LAST.with(|c| c.replace((0, 0.0, 0.0)))
 }
 
 /// 診断 `ENOMOTO_MIP_NODELP_DIAG` (analysis/node_lp_20261106.md、解き方は変えない) が有効か。
