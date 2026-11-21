@@ -322,6 +322,7 @@ sorrell3 (600 秒、どれも時間切れ・下界 −19):
   - P 5: 620bebcc6 (bb401e311 以降、build.sh の wheel、0.1.10)。58 行・crash 0。分担 5 だけの集計: 26 問、fix/def 0.962 [0.911, 1.015]、解けた def 22 / fix 23 (10teams 種 3 が fix のみ、def は 60 秒で暫定解 934)、食い違い 0。
 
   - P 0: bb401e311 (build.sh の wheel、0.1.10。src は 620bebcc6 と同じ)。58 行・crash 0。 読み込み先は site-packages の _core (target/wheels の wheel と sha1 一致、11:52 作成、計測開始 11:53)。python/enomoto_solver の古い .so (02:59) は読んでいない。
+  - M 7: b0497e53f (54a900938 以降、build.sh の wheel、0.1.10、site-packages を確認)。18 行 (9 問 × 種 1)・crash 0。分担 7 だけの集計 (600 秒): fix/def 1.225 [0.922, 1.628]、解けた def 4 / fix 5 (gen-ip002 が fix のみ 543 秒、def は時間切れで下界 -4798.66)、目的値の食い違い 0。1.25 倍超の遅れ: neos-933966 (def 89 秒 364 ノード → fix 274 秒 3101 ノード、3.07 倍)、neos-1171448 (def 82 秒 1787 ノード → fix 210 秒 5350 ノード、2.57 倍)。1.25 倍超の速さはなし。時間切れの暫定解: lectsched-5-obj def 34 / fix 26 (下界 15)、neos-4338804-snowy def 1481 / fix 1479 (下界 1447)、satellites2-40 はどちらも 5、bnatt500 はどちらも暫定解なし。
 
 ### 7.8 wide2 の P の集計 (fix = fit + r3e + rck 直し後、2026-11-21)
 
