@@ -6,6 +6,8 @@ from pathlib import Path
 D = Path(__file__).resolve().parent
 WT = D.parents[2]
 PROBS = [("10teams", 60), ("mas76", 60), ("noswot", 60), ("timtab1", 60), ("rail01", 120), ("neos-933966", 300), ("sorrell3", 300)]
+# 時間切れでノードが時刻で決まる 2 問は、ノードの上限 (ENOMOTO_MIP_NODE_LIMIT) で止めた回も比べる (名前は <問題>@<上限>)
+PROBS += [("10teams@5000", 60), ("neos-933966@500", 300)]
 ENV3 = {"ENOMOTO_MIP_CUTSEL_PROBE_FIT": "1", "ENOMOTO_MIP_ROOTLP3": "e", "ENOMOTO_MIP_ROOTCAP": "k"}
 OUT = D / "res.jsonl"
 done = {(r["problem"], r["build"]) for r in map(json.loads, OUT.open())} if OUT.exists() else set()
@@ -21,9 +23,11 @@ for build, whl in (("old", sys.argv[1]), ("new", sys.argv[2])):
         if build == "old":
             env.update(ENV3)
         env.update(ENOMOTO_MIP_THREADS="1", ENOMOTO_MIP_LOG="1")
-        log = D / "logs" / f"{prob}_{build}.log"
+        if "@" in prob:
+            env["ENOMOTO_MIP_NODE_LIMIT"] = prob.split("@")[1]
+        log = D / "logs" / f"{prob.replace('@', '_nl')}_{build}.log"
         with open(log, "w") as fe:
-            pr = subprocess.run([sys.executable, str(WT / "scripts/run_miplib_benchmark.py"), "--worker-ours", str(WT / ".miplib_cache" / f"{prob}.mps"),
+            pr = subprocess.run([sys.executable, str(WT / "scripts/run_miplib_benchmark.py"), "--worker-ours", str(WT / ".miplib_cache" / f"{prob.split('@')[0]}.mps"),
                                  "--time-limit", str(tl), "--threads", "1"], cwd=WT, env=env, stdout=subprocess.PIPE, stderr=fe, text=True)
         try: res = json.loads([l for l in pr.stdout.splitlines() if l.startswith("{")][-1])
         except Exception: res = {"status": "crash"}  # noqa: BLE001
