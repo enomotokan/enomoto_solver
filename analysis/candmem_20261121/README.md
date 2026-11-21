@@ -96,6 +96,7 @@
 - P 5: 29b63ac01 (84adc12dd 以降、pip install -e .、0.1.10)。58 行・crash 0。
 - P 2: 29b63ac01 (84adc12dd 以降、pip install -e .、0.1.10)。58 行・crash 0。
 - P 0: 29b63ac01 (84adc12dd 以降、pip install -e .、0.1.10)。58 行・crash 0。
+- M 7: 12bf2ca03 (5c4f5260d 以降、pip install -e .、0.1.10)。18 行・crash 0。
 
 ### P の結果 (6 分担そろい、wide/ci_P.txt・wide/rss_P.txt)
 
