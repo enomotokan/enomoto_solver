@@ -2711,6 +2711,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             let (mut cands, mut fcands) = self.separate_face_split(&x, false);
+            // `ENOMOTO_MIP_SEPALLOC` の `a`: 飛ばした分離器があって候補が 1 本もなければ、全部を倍率 1 で動かしてやり直す (飛ばしたせいで
+            // 「候補なし」でループが止まらないように。試しの 203 問で no_cands の止まりが 9 -> 35 問に増えた)
+            if cands.is_empty() && fcands.is_empty() && super::sepalloc::run_all_if_skipped() {
+                (cands, fcands) = self.separate_face_split(&x, false);
+            }
             if sl_on {
                 self.sl_after_separate(&[&cands, &fcands]);
             }
