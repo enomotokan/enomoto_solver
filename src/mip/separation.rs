@@ -1445,6 +1445,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     pub(super) fn root_cut_loop(&mut self, root_iters: u64) -> bool {
+        // 診断 `ENOMOTO_MIP_TREEDEPTH_DIAG`: 呼び出しごとに前後の LP の値と手間を残す ([`super::treedepth`])
+        if self.tdd.is_none() {
+            return self.root_cut_loop_inner(root_iters);
+        }
+        let (o0, tk0) = (self.lp.objective() + self.p.offset, crate::ticks::total());
+        let ok = self.root_cut_loop_inner(root_iters);
+        let o1 = self.lp.objective() + self.p.offset;
+        if let Some(t) = self.tdd.as_mut() {
+            t.root_cuts(o0, o1, crate::ticks::total() - tk0, ok);
+        }
+        ok
+    }
+
+    fn root_cut_loop_inner(&mut self, root_iters: u64) -> bool {
         let p = self.p;
         // 固定費用のネットワーク型か (`root_cut_highs` がループの初めから使うので先に決める。下でも同じ値を入れ直す)
         self.fc_network = !self.params.submip && fixed_charge_network(p);
@@ -5675,6 +5689,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     ///   (固定した上下限のまま分離すると tableau 系のカットが元の問題で正しくなくなるため)
     /// - 予算: 1 回の主単体法の反復は根の LP の反復 (最低 1000) まで。選ぶ本数は根の 1 ラウンドと同じ 50 本まで
     /// 下界の伸びと手間を `SEPEFF facecut` の 1 行で出す。カットは実行可能領域で正しいものだけを足すので、答えは変わらない
+    /// 閉じた (2026-11-21): 対象 50 問で伸びの中央 0、今の頂点でもう 1 回分離するだけ (`=x`) より下で、MPSEP oqmgs より良くなる見込みが薄い。
+    /// 既定にはせず、スイッチは既定オフで残す (analysis/sepeff_20261120/README.md 4・6 節)
     pub(super) fn facecut_probe(&mut self) {
         if env_str!("ENOMOTO_MIP_FACECUT").is_none_or(|v| v == "0") || self.params.submip || self.time_up() {
             return;
