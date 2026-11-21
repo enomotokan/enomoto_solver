@@ -233,4 +233,5 @@ MIPLIB 2017 のコレクション 1065 問 (`collection.json`) のうち、easy�
   - 回したビルド: P 4: 2d478930a (pip install -e .、0.1.10)。58 行・crash 0。
   - 回したビルド: P 0: 2d478930a (pip install -e .、0.1.10)。58 行・crash 0。
   - 回したビルド: P 5: 2d478930a (pip install -e .、0.1.10)。58 行・crash 0。
+  - 回したビルド: M 8: 71cdfafba (pip install -e .、0.1.10、site-packages の wheel を消してから)。20 行 (10 問 × 種 1、600 秒)・crash 0。分担 8 だけの集計: cond/def 0.956 [0.894, 1.022]、解けた def 6 / cond 6、食い違い 0。1.25 倍超はどちらも cond が速い: pk1 14.5→9.2 秒、30n20b8 103.3→78.1 秒。時間切れ (暫定解 def/cond、下界 def/cond): leo1 4.06393e8/4.07571e8、3.98066e8/3.97031e8。neos-4387871-tavua 34.556/35.142、24.875/25.963。bppc4-08・satellites2-60-fs は同じ。
 - `summ.py` → `summ.txt`・`summ_rows.json`: 4 スレッドの組ごとの表と構造。`cond.py` → `cond.txt`・`cond_rows.json`: 条件ごとの得失。
