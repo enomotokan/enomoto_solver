@@ -5,7 +5,7 @@
 //! やめて全スラック基底から 1 本で解き直す (analysis/basis_nb_diag_20261102.md §2、再スタートの後の根の 89%)。基底がないときの
 //! 同時実行 ([`crate::simplex::mip_lp::TwoStageLp::solve`] の `cold`) に入らない。
 //!
-//! 値の文字: `s` 特異なら基底を捨てる (段階 1)。`e` (analysis/biglp_20261121 9 節) 手間の見積りで決める: 特異なら捨てる (`s` と同じ。
+//! 値の文字: `s` 特異なら基底を捨てる (段階 1)。`e` (analysis/biglp_20261121 9 節) 手間の見積りで決める: 再スタートの後の根で特異なら捨てる (`s` と同じ。最初の根では捨てない、analysis/biglp_20261121 7.10 節。
 //! 特異な基底は単体法の中で全スラック基底からの 1 本に落ち、warm start にならない)。特異でなければ、再スタートの後の根 (種類 3) で、
 //! 基底の出発の主実行不能な基底変数の数 (双対単体法の反復の下の見積り) が、この求解の最初の根の LP を基底なしで解いた反復
 //! (全スラックからの手間の見積り) 以上なら捨てる。閾値は置かない (2 つの見積りの比べ)。`3` 基底からの単体法・全スラック基底からの二段解法・内点法 + クロスオーバーの
@@ -57,7 +57,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let threads = crate::simplex::mip_lp::cold_race_threads();
         let warm = self.lp.has_warm_basis();
         let singular = warm && self.lp.warm_basis_singular();
-        let mut dropped = singular && (rootlp3_has('s') || rootlp3_has('e')) && threads >= 2;
+        // `e` は再スタートの後の根 (`root_kind` 3) だけで捨てる。最初の根 (LP プロービングの基底) で捨てると、根の頂点が変わって
+        // 木が大きく揺れる (neos-933966 の種 1・3 で 1.5〜5 倍遅い、analysis/biglp_20261121 7.10 節)。`s` は従来どおり両方。
+        let mut dropped = singular && (rootlp3_has('s') || (rootlp3_has('e') && root_kind == Some(3))) && threads >= 2;
         if dropped {
             self.lp.drop_basis();
             if self.params.verbose {
@@ -100,7 +102,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     pub(super) fn rootlp3_after(&self, root_kind: Option<usize>, info: Option<RootLp3>, st: LpStatus, iters: u64, t0: Instant) {
         let Some(RootLp3 { warm, singular, dropped, race3 }) = info else { return };
         // `e`: 最初の根の LP を基底なしで解いた反復を控える
-        if root_kind == Some(4) && (!warm || dropped) && st == LpStatus::Optimal {
+        // 特異な基底は捨てなくても、単体法の中で基底なしから解き直すので、その反復も控える
+        if root_kind == Some(4) && (!warm || dropped || singular) && st == LpStatus::Optimal {
             COLD_ITERS.store(iters.max(1), std::sync::atomic::Ordering::Relaxed);
         }
         let winner = if race3 { crate::simplex::mip_lp::take_race3_winner() } else { "" };
