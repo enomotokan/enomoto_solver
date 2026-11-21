@@ -30,6 +30,7 @@ analysis/vsscip_20261117 (0.1.9 の既定と SCIP 10.0.2 の比べ) と同じ問
 - M 3: de9524a54 (d882b0772 以降) で pip install -e .。16 行・crash 0。
 - M 7: a9fd1e6ee (0.1.10) で build.sh の wheel を入れて回した。14 行・crash 0。
 - M 12: 2556cccac (d882b0772 以降) で pip install -e .。14 行・crash 0。
+- M 24: de9524a54 (d882b0772 以降) で pip install -e .。16 行・crash 0。
 
 ## 集計 (summ.py)
 
