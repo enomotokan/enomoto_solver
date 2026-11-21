@@ -98,8 +98,10 @@
 - P 0: 29b63ac01 (84adc12dd 以降、pip install -e .、0.1.10)。58 行・crash 0。
 - M 3: 12bf2ca03 (5c4f5260d 以降、pip install -e .、0.1.10)。16 行・crash 0。
 - M 11: 12bf2ca03 (5c4f5260d 以降、pip install -e .、0.1.10)。20 行・crash 0。
+- M 19: 12bf2ca03 (5c4f5260d 以降、pip install -e .、0.1.10)。20 行・crash 0。
 - M 2: 12bf2ca03 (5c4f5260d 以降、pip install -e .、0.1.10)。16 行・crash 0。
 - M 10: 12bf2ca03 (5c4f5260d 以降、pip install -e .、0.1.10)。20 行・crash 0。
+- M 18: 12bf2ca03 (5c4f5260d 以降、pip install -e .、0.1.10)。18 行・crash 0。
 - M 0: 12bf2ca03 (5c4f5260d 以降、pip install -e .、0.1.10)。16 行・crash 0。
 - M 1: 12bf2ca03 (5c4f5260d 以降、pip install -e .、0.1.10)。16 行・crash 0。
 - M 4: 12bf2ca03 (5c4f5260d 以降、pip install -e .、0.1.10)。16 行・crash 0。
@@ -111,6 +113,9 @@
 - M 14: 12bf2ca03 (5c4f5260d 以降、pip install -e .、0.1.10)。20 行・crash 0。
 - M 9: 12bf2ca03 (5c4f5260d 以降、pip install -e .、0.1.10)。20 行・crash 0。
 - M 15: 12bf2ca03 (5c4f5260d 以降、pip install -e .、0.1.10)。20 行・crash 0。
+- M 16: 12bf2ca03 (5c4f5260d 以降、pip install -e .、0.1.10)。20 行・crash 0。
+- M 13: 12bf2ca03 (5c4f5260d 以降、pip install -e .、0.1.10)。20 行・crash 0。
+- M 17: 12bf2ca03 (5c4f5260d 以降、pip install -e .、0.1.10)。20 行・crash 0。
 
 ### P の結果 (6 分担そろい、wide/ci_P.txt・wide/rss_P.txt)
 
@@ -119,3 +124,13 @@
 - 1 回だけの遅れ: noswot 種 2 (11.9→48.8 秒)、10teams 種 3 (11.4→23.4 秒)。どちらも種による揺れの大きい問題で、他の種では new が速いか同じ。
 - 最大 RSS: 159 対で new/old の幾何平均 0.997 (合計 43942→43980 MB)。P は大きな問題を含まないので、メモリの減りは M で見る。
 - 時間の採用基準はすべて満たす。
+
+### M の結果 (20 分担そろい、種 1・600 秒、wide/ci_M.txt・wide/rss_M.txt)
+
+- `python ci.py 600 old new res_M_s*.jsonl`: new/old のずらし幾何平均の比 0.990 (95% [0.969, 1.011])、解けた old 97 / new 98
+  (new だけ: neos-662469・supportcase40、old だけ: glass4)。optimal 同士の目的値の食い違い: なし。crash 0。
+- 両方解けた 96 問の時間の比: 速い側 atrato 0.46・rococoC10 0.52・swath3 0.54 …、遅い側 mc11 2.08・gen-ip054 1.72・chromaticindex512-7 1.58・fiball 1.48 …。
+  1 種だけなので「全種で 1.25 倍超」には当たらず、1.25 倍超の 12 問 (glass4 を含む) を種 2・3 で確かめる (shards_MS.json、4 分担)。
+- 時間切れ同士の暫定解 (最小化として数えた目安): new が良い 25・悪い 30・同じ 21。
+- 最大 RSS: 182 対で new/old の幾何平均 0.995、合計 156852 → 154415 MB。大きく減ったのは rail01 5738 → 3990、nexp-150-20-8-5 1770 → 1299、
+  rail507 4369 → 3687、leo2 1247 → 840 MB など。増えたのは時間切れで探索の進みが違う問題 (momentum1 621 → 947 など)。
