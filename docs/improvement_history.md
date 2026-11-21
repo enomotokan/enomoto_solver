@@ -11049,3 +11049,21 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
     1 スレッド **+0.3% [−0.4%, +1.0%]**、解けた 123 → 121 (timtab1 の種 2・3。`i` の直しの前の版で、直した版では解ける)。全種で 1.25 倍超の遅れなし。
 - 確かめ: cargo test 419 通過。fuzz (analysis/slowm_20261119/fuzz.sh の 7 本) bad 0。
 - 記録: analysis/det1t_20261120/README.md、analysis/slowm_20261119/README.md 18 節 (DT の計測)。
+
+## 2026-11-21: 誤ったカットを防ぐ finish_cut の 2 つの直し (CUT_SMALL_FLOOR・FINISH_CANCEL)、引き継ぎの鎖の共有 (INHPOOL)、集約行を流して作る分離 (SEP_TAB_STREAM) を既定にする (採用)
+
+- 既定にした (どれも `=0` で以前の動きに戻る):
+  - `ENOMOTO_MIP_CUT_SMALL_FLOOR` (6a6cc51ba): finish_cut の小さい係数の吸収の閾値を 1e-4 × max(最大係数, 1e-3) にする (HiGHS の postprocessCut と同じ)。
+  - `ENOMOTO_MIP_FINISH_CANCEL` (63e236dba・3253b6aab): 行の活動の変数を展開して打ち消し合った残り (打ち消す前の大きさの 1e-9 倍以下) を 0 にする。
+    この 2 つがないと、GEN_OLD + LIFTED_COVER で 1e-9〜2.2e-16 の残りが係数 1 に拡大され、誤ったカット (x35 + x37 ≤ 1 など) で 4 問 (widden・rocI-4-11・milo・istanbul) が誤答した
+    (analysis/rootgap_20261121/README.md 8 節)。
+  - `ENOMOTO_MIP_INHPOOL` (a781007d4): 被約費用の固定の引き継ぎの鎖を共有の待ち行列でも Arc で共有する (n3div36 の 4 スレッドの RSS 5553 → 1347 MB)。
+  - `ENOMOTO_MIP_SEP_TAB_STREAM` (5c4f5260d): tableau 行の分離で、集約行を全部作ってから配るのでなく、1 行ずつ作って作業のスレッドに流し、予算に届いたら後ろの行は作らない
+    (rail01 の最大 RSS 6011 → 4052 MB、根の分離 573 回中 572 回で候補がビット単位で同じ)。
+- 結果 (4 スレッド、P = MIPLIB の 58 問 × 種 1〜3、60 秒、比は 直しあり / なし):
+  - CUT_SMALL_FLOOR + FINISH_CANCEL: **−0.2% [−1.2%, +0.7%]**、解けた 138 → 138、全種で 1.25 倍超の遅れなし (analysis/cutfloor_20261121/README.md 3 節)。
+  - INHPOOL: **+2.3% [−0.2%, +4.9%]**、解けた 138 → 139。noswot が全種で遅く見えたが、種 1〜10 × 2 回で 0.836 [0.62, 1.12]、10teams は種 1〜16 × 2 回で 0.987 [0.71, 1.37] で、4 スレッドの揺れ
+    (1 スレッドではノード数も同じ。analysis/inhpool_20261121/README.md)。
+  - SEP_TAB_STREAM: **−1.2% [−3.1%, +0.6%]**、解けた 137 → 138、全種で 1.25 倍超の遅れなし。最大 RSS は P では 0.997 倍 (大きな問題を含まない)。M は計測中
+    (analysis/candmem_20261121/README.md 4 節)。
+- 確かめ: cargo test 419 通過。fuzz (analysis/slowm_20261119/fuzz.sh の 7 本) bad 0。
