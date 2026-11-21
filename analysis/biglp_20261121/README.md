@@ -404,6 +404,28 @@ build.sh の wheel): 186 問 × 種 1、**fix/def 0.982 [0.957, 1.007]、解け�
   揺れの源を 1 つ減らすもので、効きの元の sing44 (再スタートの後) は残る。fastxgemm-n2r6s0t2・rail01 に直すべき原因は見つからなかった
   (rail01 の下界の差は fit の比べを飛ばした分で 0.04%)。
 
+### 7.11 fit・r3e・rck を既定にする (親の依頼・利用者の判断、2026-11-21)
+
+- 変更 (fb026c351): 環境変数が未設定のとき `ENOMOTO_MIP_CUTSEL_PROBE_FIT=1`・`ENOMOTO_MIP_ROOTLP3=e`・`ENOMOTO_MIP_ROOTCAP=k` と同じに動く (`env_def!`、
+  `=0`・`off` で切る、明示した値はその値。`rc_k_only` の判定も未設定を `k` として読む)。r3e は f2865d276 の直し込み (最初の根では捨てない)。
+- cargo test (既定) 419 通過・0 失敗・19 無視。fuzz 7 本 (`adopt/fuzz.sh`、環境変数なし): bad 0 (fuzz_tiny 400・fuzz_highs 300・fuzz_objint 1000 (optimal 967・infeasible 33)・
+  fuzz_slack 1000 (mismatches 0)・fuzz_tiny 400 (seed 1000)・fuzz_objint 1000 (seed 5000)・fuzz_slack 1000 (seed 5000))。
+- 新旧の比べ (`adopt/eq.py`、1 スレッド。old = 変更前のビルド (acb9e51b7 の作業木) + 3 つの環境変数、new = 新しい既定のビルド + 環境変数なし。結果 `adopt/res.jsonl`):
+
+| 問題 (時間の上限) | 状態 | 目的値 | 下界 | ノード (old / new) | 試作の行 |
+|---|---|---|---|---|---|
+| mas76 (60) | optimal | 40005.054 | 同じ | 87849 / 87849 | なし |
+| noswot (60) | optimal | −41 | 同じ | 21193 / 21193 | なし |
+| timtab1 (60) | optimal | 764772 | 同じ | 23945 / 23945 | なし |
+| rail01 (120、根だけ) | time_limit | なし | −90.683 | 0 / 0 | 1 行 (一致) |
+| sorrell3 (300) | time_limit | −13 | −20 | 102 / 102 | 3 行 (一致) |
+| 10teams (60) | time_limit | 1040 | 924 | 9202 / 9701 | なし |
+| neos-933966 (300) | time_limit | 1325 | 318 | 701 / 718 | なし |
+| 10teams (ノード上限 5000) | node_limit | 1040 | 924 | 5000 / 5000 | なし |
+| neos-933966 (ノード上限 500) | node_limit | 1325 | 318 | 500 / 500 | なし |
+
+  時間切れの 2 問はノードが止めた時刻で決まる (状態・目的値・下界は一致)。ノードの上限で止めると一致する。
+
 ## 8. 直す案 4: 引き継ぎの鎖を共有の待ち行列でも共有する (`ENOMOTO_MIP_INHPOOL`、**既定で使う**、`=0` で従来)
 
 - 原因 (事実): 被約費用の固定は、ノードの中では親子で共有する鎖 (`InhChain`、既定の `ENOMOTO_MIP_TC=bs`) で持っている。ところが共有の待ち行列に出す

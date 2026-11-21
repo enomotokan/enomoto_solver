@@ -3903,6 +3903,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // `ENOMOTO_MIP_TREE4_RCUNION` (試作): このラウンドの LP の被約費用を根の被約費用による固定に足す
                 self.tree4_rc_add(obj + p.offset);
             }
+            // 試作 `ENOMOTO_MIP_RCLOOP` ([`Solver::rcloop_round`]): このラウンドの LP の被約費用と打ち切り値で大域的に固定し、伝播して
+            // LP を解き直す。矛盾したら打ち切り値より良い解はないので、下界を打ち切り値にして閉じる
+            if job.is_none() && !self.params.submip && self.snap.is_none() && super::solver::rcloop_on() && !self.rcloop_round(obj + p.offset, round) {
+                self.root_cut_lb = self.root_cut_lb.max(self.prune_limit());
+                cutstop = "rcloop_infeasible";
+                if self.root_gap_closed() {
+                    closed_by_cutoff = true;
+                }
+                break;
+            }
             // `ENOMOTO_MIP_CUT_WIDEN_DOUBLE` (既定): 一気に行の数 (1000 本まで) に広げるのでなく、採り切っても動かないラウンドのたびに
             // 2 倍にする (50 -> 100 -> 200 -> ... -> 1000)。physiciansched6-2 では 50 本から一気に広げたラウンドで 247〜308 本が入り、
             // LP が 1 回の時間の上限に当たって全部外されていた (`ENOMOTO_MIP_CUT_LP_HALVE` の半分化と対になる)

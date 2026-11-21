@@ -6016,6 +6016,21 @@ fn proof_side_reduce_mode() -> u8 {
 }
 
 /// `ENOMOTO_MIP_LP_INT_BOUNDS` ([`Solver::sync_lp`])。
+/// 試作 `ENOMOTO_MIP_RCLOOP` ([`Solver::rcloop_round`]、既定では使わない): 根のカットのループの各ラウンドで被約費用による固定をする
+/// `=1` は `f` と同じ。文字 `f`: 各ラウンドで固定する、`r`: 2 回目以降の再スタートを根の下界の上がりで決める ([`Solver::rcloop_restart_ok`])
+pub(super) fn rcloop_on() -> bool {
+    rcloop_has('f')
+}
+
+pub(super) fn rcloop_has(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_RCLOOP").is_some_and(|v| v != "0" && (v.contains(c) || (c == 'f' && v == "1")))
+}
+
+thread_local! {
+    /// [`Solver::rcloop_restart_ok`]: 前の再スタートを決めたときの根の下界 (外側の主の求解のスレッド、最初の根で NaN に戻す)
+    static RCLOOP_PREV_ROOT_LB: std::cell::Cell<f64> = const { std::cell::Cell::new(f64::NAN) };
+}
+
 pub(super) fn lp_int_bounds() -> bool {
     env_str!("ENOMOTO_MIP_LP_INT_BOUNDS").is_some()
 }
@@ -15227,6 +15242,47 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.root_redcost = Some((root_obj, v));
     }
 
+    /// 試作 `ENOMOTO_MIP_RCLOOP` (既定では使わない。analysis/rootcutoff_20261121): 外側の主の根のカットのループで、各ラウンドの LP
+    /// (最適、`z` はその値) の被約費用と打ち切り値で大域的に固定し ([`Self::store_root_redcost`]・[`Self::root_redcost_fixing`])、
+    /// 定義域で伝播して大域的な境界にし、LP の列の境界に入れて解き直す。SCIP は根の分離のラウンドの間に redcost の伝播をかけ、
+    /// 締まった境界の上で次のカットを作る (neos-911970 の根だけ・打ち切り値つきで、redcost を切ると 54.67 -> 47.26)。
+    /// 既定ではカットのループの後 (早めの記録) にしか固定しない。固定は再スタートの判定 ([`Self::maybe_restart`]) にもそのまま入る。
+    /// 伝播で矛盾したら偽 (打ち切り値より良い解はない)
+    pub(super) fn rcloop_round(&mut self, z: f64, round: usize) -> bool {
+        if !self.prune_limit().is_finite() || self.dom.infeasible || self.dom.stack_len() != 0 {
+            return true;
+        }
+        let before = self.newly_fixed_ints();
+        self.store_root_redcost(z);
+        self.root_redcost_fixing();
+        if !self.dom.propagate(self.p) {
+            if self.params.verbose {
+                eprintln!("MIP: cut round {round}: RCLOOP: propagation after the reduced-cost fixing is infeasible (cutoff {:.10e})", self.prune_limit());
+            }
+            return false;
+        }
+        // 伝播の締め付けは根でも積まれる (`set_bound` の記録) ので、大域的な境界にする (根の外の変更はないことを上で確かめた)
+        if self.dom.stack_len() != 0 {
+            self.dom.commit_root();
+        }
+        let newly = self.newly_fixed_ints();
+        let changed = self.dom.has_changed();
+        self.sync_lp();
+        let mut st = None;
+        if changed {
+            st = Some(self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() }));
+        }
+        if self.params.verbose {
+            eprintln!(
+                "MIP: cut round {round}: RCLOOP: newly fixed integer columns {before} -> {newly}, LP {:.10e} -> {:.10e} ({st:?}, {:.2}s)",
+                z,
+                self.lp.objective() + self.p.offset,
+                self.start.elapsed().as_secs_f64()
+            );
+        }
+        !matches!(st, Some(LpStatus::Infeasible))
+    }
+
     /// 根の被約費用と現在の打ち切り値から、大域的に境界を締める。
     pub(super) fn root_redcost_fixing(&mut self) {
         let Some((z, list)) = self.root_redcost.take() else { return };
@@ -23290,8 +23346,29 @@ impl<'a, L: MipLp> Solver<'a, L> {
             .collect()
     }
 
+    /// 試作 `ENOMOTO_MIP_RCLOOP` の `r` (既定では使わない。analysis/rootcutoff_20261121): 2 回目以降の再スタートの判定で、新たな固定が
+    /// 1 本以上あり、この根の下界 ([`Self::root_lb_now`]) が前の根の下界 (前の再スタートを決めたときの値) より上がっていれば、
+    /// 固定の数の閾値 (`ENOMOTO_T_MIP_RESTART_FAC`) と縮みの条件 (`ENOMOTO_MIP_RSTCRIT`) を見ずに再スタートする。新しい閾値は置かず、「前の再スタートが根の下界を
+    /// 上げた限り続ける」形で止める (回数の上限 `ENOMOTO_T_MIP_MAX_RESTARTS` は既存のまま)。SCIP は neos-1582420 で 3 回、neos-911970 で 4 回
+    /// 再スタートし、こちらは 2 回目以降の閾値 (全部の整数列の 2.5%) に届かず止まる (neos-1582420 打ち切り値つき: 49 本 < 93)
+    fn rcloop_restart_ok(&self, newly: usize) -> bool {
+        if newly == 0 || self.params.restarts == 0 || !rcloop_has('r') {
+            return false;
+        }
+        let prev = RCLOOP_PREV_ROOT_LB.with(|c| c.get());
+        let now = self.root_lb_now();
+        let ok = prev.is_finite() && now > prev + 1e-9 * prev.abs().max(1.0);
+        if self.params.verbose {
+            eprintln!("MIP: RCLOOP r: root bound {now:.10e}, previous root {prev:.10e}, newly fixed {newly}: restart {ok}");
+        }
+        ok
+    }
+
     fn maybe_restart(&mut self) -> Option<MipResult> {
         let p = self.p;
+        if self.params.restarts == 0 && !self.params.submip {
+            RCLOOP_PREV_ROOT_LB.with(|c| c.set(f64::NAN));
+        }
         if self.params.submip || self.params.restarts >= max_restarts(self.p) || env_str!("ENOMOTO_MIP_NO_RESTART").is_some() || self.time_up() {
             return None;
         }
@@ -23342,11 +23419,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 return None;
             }
         } else {
-            if nint == 0 || (!self.force_restart && (newly == 0 || (newly as f64) < fac * denom as f64) && !self.rstcrit_all_nnz_ok()) {
+            // 試作 `ENOMOTO_MIP_RCLOOP` の `r` ([`rcloop_restart_ok`]): 2 回目以降は、前の再スタートで根の下界が上がっていれば数の条件を見ない
+            let rc_r = self.rcloop_restart_ok(newly);
+            if nint == 0 || (!self.force_restart && !rc_r && (newly == 0 || (newly as f64) < fac * denom as f64) && !self.rstcrit_all_nnz_ok()) {
                 return None;
             }
             // 試作 `ENOMOTO_MIP_RSTCRIT` ([`Self::rstcrit_gate`]): 縮みの小さい再スタートを見送る
-            if !self.force_restart && !self.rstcrit_gate(true) {
+            // `ENOMOTO_MIP_RCLOOP` の `r` で決まったときは縮みの条件 (RSTCRIT) も見ない (下界の上がりで決める)
+            if !self.force_restart && !rc_r && !self.rstcrit_gate(true) {
                 return None;
             }
         }
@@ -23383,6 +23463,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         // 試作 `ENOMOTO_MIP_RCSTRONG` の `g`: 保留した暗黙の整数の連続列の切り捨てを、再スタートを決めたここで大域的な境界に当てる
+        // 試作 `ENOMOTO_MIP_RCLOOP` の `r`: 再スタートを決めたときの根の下界を次の根の判定のために残す
+        if rcloop_has('r') {
+            RCLOOP_PREV_ROOT_LB.with(|c| c.set(self.root_lb_now()));
+        }
         let ng = self.rcs_apply_pending();
         if ng > 0 && self.params.verbose {
             eprintln!("MIP: RCSTRONG g: applied {ng} pending implied-integer roundings before the restart");
