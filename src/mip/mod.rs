@@ -54,6 +54,7 @@ pub(crate) mod hnfsubst;
 pub(crate) mod implint_tu;
 pub(crate) mod cmirdelta;
 pub(crate) mod seplearn;
+pub(crate) mod sepalloc;
 pub(crate) mod treedepth;
 pub(crate) mod cutmix;
 pub(crate) mod mcf;
