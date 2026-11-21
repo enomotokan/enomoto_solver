@@ -87,3 +87,7 @@
 - `cd analysis/candmem_20261121/wide && python run.py P k` (k = 0..5、各約 0.47 時間)、`python run.py M k` (k = 0..19、各約 1.84 時間)。
 - 集計: `python ci.py 60 old new res_P_s*.jsonl`・`python ci.py 600 old new res_M_s*.jsonl`・`python rss.py res_*.jsonl`。
 - ビルドは、この直しの入ったコミット以降を `sh analysis/revisit_20261112/build.sh` で入れる。
+
+### 回したビルド
+
+- P 4: 29b63ac01 (84adc12dd 以降、pip install -e .、0.1.10)。58 行・crash 0。
