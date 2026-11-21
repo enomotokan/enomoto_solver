@@ -63,21 +63,22 @@ pub struct OpenNode {
     pub sb: Option<Rc<SbInherit>>,
     /// 試作 `ENOMOTO_MIP_TC` の `s`: 祖先から引き継いだ固定 (`TC` の `a`・`b`・`r`) を、親の鎖を共有する連結で持つ ([`InhChain`])。
     /// 待ち行列から取り出して根から積み直すときだけ当てる (ほかの使い道では見えないが、見落としても定義域が広いだけで正しさは変わらない)
-    pub inh: Option<Rc<InhChain>>,
+    pub inh: Option<std::sync::Arc<InhChain>>,
     /// 試作 `ENOMOTO_MIP_CWM` ([`super::cwm`]): 衝突の重みの倍率と、対で比べている部分木の札。子は親のものを引き継ぐ
     pub cwm: Option<std::sync::Arc<super::cwm::CwmTag>>,
 }
 
 /// [`OpenNode::inh`] の鎖の 1 つの環: このノードで足した引き継ぎの固定と、親の環。
+/// 共有の待ち行列 ([`super::solver`] の `SnapNode`) にも平らに展開せずに渡せるよう `Arc` で持つ (analysis/biglp_20261121/ の 8 節)。
 #[derive(Debug)]
 pub struct InhChain {
-    pub parent: Option<Rc<InhChain>>,
+    pub parent: Option<std::sync::Arc<InhChain>>,
     pub fixes: Vec<BoundChange>,
 }
 
 impl InhChain {
     /// 鎖の全部の固定を、根に近い環から順に `f` に渡す。
-    pub fn for_each(this: &Option<Rc<InhChain>>, mut f: impl FnMut(&BoundChange)) {
+    pub fn for_each(this: &Option<std::sync::Arc<InhChain>>, mut f: impl FnMut(&BoundChange)) {
         let mut rings: Vec<&InhChain> = Vec::new();
         let mut cur = this.as_deref();
         while let Some(r) = cur {
