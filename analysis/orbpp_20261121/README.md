@@ -57,7 +57,7 @@ neos-911970 (35x3 が 6 つと 35x6) は遅くなる。閾値に頼らず、静�
   - fuzz_tiny 400 は bad 0。値の一致だけの以前の判定 (strict) では 10 件で、以前からある許容誤差の内の差 (analysis/fuzz_tiny_judge_20261109.md)。
   - mip_fuzz_vs_highs は 300 問。
   - 記録は `checks/`。
-- P の広い計測 (下): 比 0.997 [0.987, 1.008]、解けた数同じ、全回 1.25 倍超の遅れなし。M は親が P を見て決める。
+- P の広い計測 (下): 比 0.997 [0.987, 1.008]、解けた数同じ、全回 1.25 倍超の遅れなし。M (下): 比 0.998 [0.973, 1.023]、解けた数同じ。M で cond が判断を下すのは 3 問だけ。
 - 広い計測の台本は `wide/`。def と cond の対、4 スレッド。
   - `python run.py P k` (k = 0..5、各約 0.47 時間)
   - `python run.py M k` (k = 0..19、各約 1.84 時間)
@@ -74,6 +74,25 @@ neos-911970 (35x3 が 6 つと 35x6) は遅くなる。閾値に頼らず、静�
 - 分担の報告にあった 1.25 倍超の組は、どれも cond が働かない問題 (既定と同じ問題) か neos-911970 (同じ) で、揺れ。
   - noswot 種 1 は 4.3→40.3 秒、種 2 は 36.6→6.5 秒。noswot のオービトープ (19x4) は静的の条件を満たさず、判断の行がない。
   - timtab1・roll3000・h80x6320d・10teams・mc11 なども同じ。
+
+### M の広い計測 (Mittelmann 186 問 × 種 1・600 秒・4 スレッド、def と cond。20 分担を別の子が回した。ビルド 71cdfafba = 直しの後)
+
+- **`python wide/ci.py 600 def cond wide/res_M_s*.jsonl`: ずらし幾何平均の比 0.998 (95% [0.973, 1.023])、解けた def 100 / cond 100**
+  (`wide/ci_M.txt`)。crash 0・最適値の食い違い 0 (各分担の報告)。
+- **cond が判断を下す (「ORBPP cond:」の行が出る) のは 186 問中 3 問だけ** (`decide2.py` → `decide_M2.txt`、1 スレッドで対称性の段まで回して止める)。
+  - brazil3: 静的 (新しい固定 159)。時間切れで、暫定解は def 283 → cond 230 (cond が良い)、下界は 20 で同じ。
+  - supportcase18: 静的 (324)。時間切れで、暫定解 50・下界 48 は同じ。
+  - neos-911970: 動的に戻す。既定と同じ問題で、16.7 → 12.5 秒は揺れ。
+  - 残り 183 問は判断なし (既定と同じ問題)。内訳は、対称性なし 118、対称性はあるが対象のオービトープなし 61、対称性の段の前に解き終える 4
+    (decomp2・fhnw-binpack4-48・neos-3004026-krka・ns1116954、いずれも 3.4 秒以内で最適。decide_M2.txt では「時間切れ」と出るが、実際は行が出ないまま終わったもの)。
+- **ci.py の「全回で 1.25 倍超の遅れ」11 問は、どれも判断なし** (既定と同じ問題を解いているので 4 スレッドの揺れ)。
+  - 11 問: CMS750_4・neos-1456979・wachplan・supportcase26・neos-1171737・enlight_hard・neos-662469・rococoC10-001000・markshare_4_0・fast0507・beasleyC3。
+  - neos-1171737 (39x30) と neos-1456979 (884x5) はオービトープを持つが、静的の条件 (パッキング/分割の行が過半) を満たさない。
+  - fast0507・wachplan は、対称性はあるがオービトープがない。残りは対称性なし。
+  - 判断を下した問題に遅れはないので、種 2・3 での確かめは要らない。
+  - 同じ問題でこの幅 (neos-1171737 でずらした比 3.51、fast0507 で 1.69) の揺れが出ることは、M の種 1 だけの比べの限界として記録しておく。
+- P (60 秒・種 1〜3) で判断を下すのも misc07 (静的) と neos-911970 (動的に戻す) の 2 問だけ。cond が効く問題はテストセットには少なく、
+  効くのは集めた 13 問 (ab*・orauea・nasivi など) の側。
 
 ### 直し: 比べの REPROBE (親の依頼、433820a5d)
 
@@ -233,4 +252,24 @@ MIPLIB 2017 のコレクション 1065 問 (`collection.json`) のうち、easy�
   - 回したビルド: P 4: 2d478930a (pip install -e .、0.1.10)。58 行・crash 0。
   - 回したビルド: P 0: 2d478930a (pip install -e .、0.1.10)。58 行・crash 0。
   - 回したビルド: P 5: 2d478930a (pip install -e .、0.1.10)。58 行・crash 0。
+  - 回したビルド: M 8: 71cdfafba (pip install -e .、0.1.10、site-packages の wheel を消してから)。20 行 (10 問 × 種 1、600 秒)・crash 0。分担 8 だけの集計: cond/def 0.956 [0.894, 1.022]、解けた def 6 / cond 6、食い違い 0。1.25 倍超はどちらも cond が速い: pk1 14.5→9.2 秒、30n20b8 103.3→78.1 秒。時間切れ (暫定解 def/cond、下界 def/cond): leo1 4.06393e8/4.07571e8、3.98066e8/3.97031e8。neos-4387871-tavua 34.556/35.142、24.875/25.963。bppc4-08・satellites2-60-fs は同じ。
+  - 回したビルド: M 18: 71cdfafba (M 8 と同じビルド)。18 行 (9 問 × 種 1、600 秒)・crash 0。分担 18 だけの集計: cond/def 1.028 [0.929, 1.136]、解けた def 5 / cond 5、食い違い 0。1.25 倍超: rococoC10-001000 で cond が 1.44 倍遅い (89.7→129.2 秒、ずらした比 1.40)、markshare_4_0 で 1.32 倍遅い (1.9→2.5 秒、ずらした比 1.05)、gen-ip054 は cond が速い (265.1→200.0 秒)。時間切れ (暫定解 def/cond、下界 def/cond): csched008 174/173、171/172。neos-2657525-crna 1.8107/3.7923、0/0。opm2-z10-s4・supportcase42 は同じ。
+  - 回したビルド: M 3: 71cdfafba (pip install -e .、0.1.10、import 先は python/ の新しい .so)。16 行 (8 問 × 種 1、600 秒)・crash 0。解けた def 3 / cond 4 (glass4 は cond だけ 345.9 秒で解けた)、食い違い 0、1.25 倍超なし (irp 18.9→23.1 秒が最大の遅れ)。SGM cond/def 0.957。時間切れ (暫定解 def/cond): neos-3656078-kumeu -12387.4/-12770.5、uccase9 11069.9/11106.9。reblock115・atlanta-ip は同じ。
+  - 回したビルド: M 1: 71cdfafba (pip install -e .、0.1.10、import 先は python/ の新しい .so)。16 行 (8 問 × 種 1、600 秒)・crash 0。解けた def 3 / cond 3、食い違い 0。SGM cond/def 0.990。1.25 倍超は timtab1 22.2→17.1 秒 (cond が速い) だけ (fiball 28.3→34.5 秒が最大の遅れ)。時間切れ (暫定解 def/cond): trento1 3.56864e7/1.85752e8、germanrr 4.89113e7/4.92608e7、academictimetablesmall 3499/3500、neos-3046615-murg 1610/1600、radiationm40-10-02 155394/155371。下界はほぼ同じ。
+  - 回したビルド: M 0: 71cdfafba (pip install -e .、0.1.10)。16 行・crash 0。
+  - 回したビルド: M 2: 71cdfafba (pip install -e .、0.1.10、import 先は python/ の新しい .so)。16 行 (8 問 × 種 1、600 秒)・crash 0。解けた def 3 / cond 3、食い違い 0、1.25 倍超なし (eil33-2 17.1→18.7 秒が最大の遅れ)。SGM cond/def 1.004 [0.988, 1.020]。時間切れ 5 問は暫定解が同じ (assign1-5-8 212、glass-sc 23、neos-3216931-puriri 81380、uccase12 11507.405、rail01 は両方とも解なし)。
+  - 回したビルド: M 4: 71cdfafba (pip install -e .、0.1.10、import 先は python/ の新しい .so)。16 行 (8 問 × 種 1、600 秒)・crash 0。解けた def 3 / cond 3、食い違い 0。SGM cond/def 0.982 [0.939, 1.026]。1.25 倍超は neos-911970 16.7→12.5 秒 (cond が速い) だけ。時間切れ (暫定解 def/cond): b1c1s1 25093.3/24991.3、gmu-35-50 -2607167.7/-2606419.0、uct-subprob 315/317。neos-3754480-nidda・rmatr200-p5 は同じ (下界は def が上)。
+  - 回したビルド: M 7: 71cdfafba (pip install -e .、0.1.10、import 先は python/ の新しい .so)。18 行 (9 問 × 種 1、600 秒)・crash 0。解けた def 5 / cond 5、食い違い 0。SGM cond/def 0.993 [0.917, 1.075]。1.25 倍超なし (gen-ip002 574.0→427.4 秒が最大の速さ、neos-1171448 53.2→66.0 秒 (1.24 倍) が最大の遅れ)。時間切れ (暫定解 def/cond): lectsched-5-obj 33/26、neos-4338804-snowy 1483/1487、satellites2-40 4/5。bnatt500 は両方解なし。下界は同じ。
+  - 回したビルド: M 5: 71cdfafba (pip install -e .、0.1.10、import 先は python/ の新しい .so)。18 行 (9 問 × 種 1、600 秒)・crash 0。解けた def 5 / cond 4、食い違い 0 (gmu-35-40 は def が 591.0 秒で最適 -2406733.3688、cond は時間切れで暫定解 -2406292.1・下界 -2406881.9)。SGM cond/def 0.978 [0.934, 1.025]。1.25 倍超は neos5 41.5→31.8 秒 (cond が速い) だけ。時間切れ (暫定解 def/cond): blp-ar98 6230.9/6225.6、ic97_potential 3947/3945、rocII-5-11 -6.6738/-6.6742。neos-3988577-wolgan は両方解なし。下界は ic97_potential で def が上 (3905.1/3881.5)、ほかはほぼ同じ。
+  - 回したビルド: M 6: 71cdfafba (pip install -e .、0.1.10、import 先は python/ の新しい .so)。18 行 (9 問 × 種 1、600 秒)・crash 0。解けた def 4 / cond 4、食い違い 0。SGM cond/def 1.041 [0.989, 1.096]。ずらした比で 1.25 倍超なし (素の比では beasleyC3 26.9→34.1 秒が 1.27 倍、ずらすと 1.19。ns1830653 128.0→154.9 秒は 1.20)。時間切れ (暫定解 def/cond): rococoB10-011000 19646/20156 (下界 16451/16026)、neos-4300652-rahue 2.9982/2.5634、blp-ic98 4537.7/4525.4、icir97_tension 6376/6380、snp-02-004-104 はほぼ同じ。
+  - 回したビルド: M 9: 71cdfafba (pip install -e .、0.1.10、python/enomoto_solver の .so を 17:33 に作り直して読み込み)。20 行 (10 問 × 種 1、600 秒)・crash 0。分担 9 だけの集計: 10 問、cond/def 1.024 [0.994, 1.056]、解けた def 5 / cond 5、食い違い 0、1.25 倍超なし (遅れの最大は seymour1 1.15 倍 107.2→122.9 秒)。時間切れ 5 問 (暫定解 def/cond、下界 def/cond、最小化): app1-2 -41/解なし (cond が悪い)、-50/-62。brazil3 283/230、20/20。leo2 4.08943e8/4.10112e8、3.95026e8/3.93987e8。neos-4763324-toguru 2005.46/2074.50、1143.01/1143.01。sct2 -230.98916/同じ、-231.04739/同じ。
+  - 回したビルド: M 19: 71cdfafba (M 9 と同じ .so)。20 行 (10 問 × 種 1、600 秒)・crash 0。分担 19 だけの集計: 10 問、cond/def 1.051 [0.939, 1.175]、解けた def 5 / cond 5 (fhnw-binpack4-4 は両方 infeasible)、食い違い 0。1.25 倍超: fast0507 で cond が 1.71 倍遅い (299.3→511.6 秒)。ほか bnatt400 1.13 倍遅い (254.4→288.8 秒)、neos-2978193-inde 1.26 倍速い (32.4→25.7 秒、ずらした比 0.84)。時間切れ 4 問 (暫定解 def/cond、下界 def/cond、最小化): cvs16r128-89 -95/-94、-115/-115。neos-2746589-doon・peg-solitaire-a3 はどちらも解なしで下界も同じ。thor50dday 43006/43006、29303/29303。
+  - 回したビルド: M 10: 71cdfafba (pip install -e .、0.1.10、import 先は python/ の新しい .so)。20 行 (10 問 × 種 1、600 秒)・crash 0。解けた def 6 / cond 6 (neos859080 はどちらも infeasible)、食い違い 0。SGM cond/def 1.034。1.25 倍超は CMS750_4 96.7→134.9 秒 (cond が遅い) だけ。時間切れ (暫定解 def/cond、下界 def/cond): lotsize 1483274/1480494、1461048/1457569。neos-4954672-berkel 2612829/2616650、2472551/2428136。seymour 423/424、413/413。
+  - 回したビルド: M 12: 71cdfafba (pip install -e .、0.1.10、import 先は python/ の新しい .so、M 2 と同じビルド)。20 行 (10 問 × 種 1、600 秒)・crash 0。解けた def 6 / cond 6、食い違い 0。SGM cond/def 0.955 [0.838, 1.088]。1.25 倍超は chromaticindex512-7 345.3→180.9 秒 (cond が速い) だけ (mas74 80.6→94.3 秒・mzzv11 120.9→134.8 秒が最大の遅れ、1.17・1.11 倍)。時間切れ (暫定解 def/cond): comp07-2idx 24/22。markshare2 13・neos-5188808-nattai 0.1102・sing44 8131614.66 は同じ。下界も同じ。
+  - 回したビルド: M 16: 71cdfafba (pip install -e .、0.1.10、import 先は python/ の新しい .so、M 6 と同じビルド)。20 行 (10 問 × 種 1、600 秒)・crash 0。解けた def 7 / cond 6 (neos-1171737 は def が 163.9 秒で最適 -195、cond は時間切れで暫定解 -194・下界 -195)、食い違い 0。SGM cond/def 1.021 [0.740, 1.410]。1.25 倍超の遅れは neos-1171737 (ずらした比 3.51)、速さは tbfp-network 569.5→225.1 秒 (0.41)。enlight_hard は 0.0 秒どうしで素の比だけ 2.01。時間切れ (暫定解 def/cond): nexp-150-20-8-5 233/235。supportcase18 50/50、cryptanalysiskb128n5obj16 は両方解なし。下界は同じ。
+  - 回したビルド: M 14: 71cdfafba (pip install -e .、0.1.10、import 先は python/ の新しい .so、M 4 と同じビルド)。20 行 (10 問 × 種 1、600 秒)・crash 0。解けた def 6 / cond 6、食い違い 0。SGM cond/def 1.016 [0.983, 1.051]。1.25 倍超なし (unitcal_7 336.8→382.3 秒、supportcase33 153.7→172.3 秒が最大の遅れ)。時間切れ (暫定解 def/cond): neos-873061 121.486/119.359、sp97ar 6.71214e8/6.74295e8。cost266-UUE・momentum1 は同じ (cost266-UUE の下界は def が上)。
+  - 回したビルド: M 11: 71cdfafba (pip install -e .、0.1.10、import 先は python/ の新しい .so)。20 行 (10 問 × 種 1、600 秒)・crash 0。解けた def 6 / cond 6、食い違い 0。SGM cond/def 0.997。1.25 倍超: neos-1456979 178.4→287.1 秒 (cond が遅い)、traininstance6 323.0→254.9 秒 (cond が速い)。時間切れ (暫定解 def/cond、下界 def/cond): neos-5107597-kakapo 6381/4968、375.68/144.27 (下界は cond が悪い)。cmflsp50-24-8-8 5.58360e7/5.61809e7、5.48673e7/5.48919e7。sing326 8039156/8045088、下界は同じ。mad 0.050/0.044。
+  - 回したビルド: M 17: 71cdfafba (pip install -e .、0.1.10、import 先は python/ の新しい .so、M 7 と同じビルド)。20 行 (10 問 × 種 1、600 秒)・crash 0。解けた def 7 / cond 8 (csched007 は cond だけ 417.4 秒で解けた、def は 353/下界 334 で時間切れ)、食い違い 0。SGM cond/def 0.947 [0.832, 1.078]。1.25 倍超の遅れは neos-662469 412.4→566.8 秒 (1.37 倍、ノード 21287→21852)。速いほうは graphdraw-domain 363.5→230.4 秒 (0.63 倍)。時間切れ: neos-1354092・ns1952667 は両方解なしで下界も同じ。
+  - 回したビルド: M 13: 71cdfafba (pip install -e .、0.1.10、import 先は python/ の新しい .so)。20 行 (10 問 × 種 1、600 秒)・crash 0。解けた def 6 / cond 6、食い違い 0。1.25 倍超: rail507 343.9→174.3 秒 (cond が速い)、wachplan 357.8→476.0 秒 (cond が 1.33 倍遅い)。SGM cond/def 0.991。時間切れ (暫定解 def/cond、下界 def/cond): comp21-2idx 147/162、38/38。milo-v12-6-r2-40-1 326481/327160、317167/319109。neos-5195221-niemur 0.00563/0.00384、同じ。sorrell3 は同じ。
+  - 回したビルド: M 15: 71cdfafba (pip install -e .、0.1.10、import 先は python/ の新しい .so、M 5 と同じビルド)。20 行 (10 問 × 種 1、600 秒)・crash 0。解けた def 6 / cond 6、食い違い 0。SGM cond/def 1.014 [0.959, 1.071]。1.25 倍超は supportcase26 421.7→546.0 秒 (1.29 倍、cond が遅い) だけ。時間切れ (暫定解 def/cond): sp98ar 530592719.2/531844512.0、n3div36 131000/131000、net12 214/214 (下界 def 100/cond 92)。cryptanalysiskb128n5obj14 は両方解なし。
 - `summ.py` → `summ.txt`・`summ_rows.json`: 4 スレッドの組ごとの表と構造。`cond.py` → `cond.txt`・`cond_rows.json`: 条件ごとの得失。
