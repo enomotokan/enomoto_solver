@@ -223,7 +223,17 @@ fn cut_quality(c: &Candidate, p: &MipProblem, cnorm: f64) -> f64 {
     c.efficacy + tunable!("ENOMOTO_T_CUTSEL_W_OBJPAR", 0.1, f64) * objpar + tunable!("ENOMOTO_T_CUTSEL_W_INTSUP", 0.1, f64) * intsup
 }
 
-/// `cands[n0..]` のうち質 ([`cut_quality`]、`ENOMOTO_MIP_KEEP_BEST_EFF` なら効き目だけ) の最も大きい 1 本だけ残す。
+/// 試作 `ENOMOTO_MIP_GEN_TYPE` (既定では使わない、analysis/gentype_20261121): [`keep_best`] で、集約行 1 本 (の向き 1 つ) の候補から
+/// 1 本だけでなく、カットの種類 ([`super::cuts::gen_kind`]: CMIR・持ち上げつきの被覆・拡張被覆・flow cover) ごとに質の最も大きい 1 本を残す
+/// (最大で種類の数だけ)。残す候補はどれも [`finish_cut`] の効き目の下限 (違反 1e-6・効き目 1e-5) を通ったもので、新しい閾値は置かない。
+/// 最良との差や似たカットの間引きは全体の選択 (`select_cuts_hybrid` の最良の 0.5 倍の下限・平行度) に任せる。持ち上げつきの被覆を
+/// 集約行に当てるかは今までどおり `ENOMOTO_MIP_LIFTED_COVER` で決まる。`keep_best` を使う所 (元の行・経路集約・tableau 行・mcf の集約など) 全てに効く
+fn gen_type() -> bool {
+    env_str!("ENOMOTO_MIP_GEN_TYPE").is_some()
+}
+
+/// `cands[n0..]` のうち質 ([`cut_quality`]、`ENOMOTO_MIP_KEEP_BEST_EFF` なら効き目だけ) の最も大きい 1 本だけ残す
+/// (`ENOMOTO_MIP_GEN_TYPE` では種類ごとに 1 本、[`gen_type`])。
 fn keep_best(cands: &mut Vec<Candidate>, n0: usize, p: &MipProblem) {
     if cands.len() <= n0 + 1 {
         return;
@@ -231,6 +241,31 @@ fn keep_best(cands: &mut Vec<Candidate>, n0: usize, p: &MipProblem) {
     let eff_only = env_str!("ENOMOTO_MIP_KEEP_BEST_EFF").is_some();
     let cnorm = p.cost.iter().map(|c| c * c).sum::<f64>().sqrt();
     let q = |c: &Candidate| if eff_only { c.efficacy } else { cut_quality(c, p, cnorm) };
+    if gen_type() {
+        // 種類ごとの最良 (種類の番号, 位置, 質)。残す順は最初に現れた種類の順 (決定的)
+        let mut best: Vec<(u8, usize, f64)> = Vec::new();
+        for i in n0..cands.len() {
+            let (k, qi) = (cands[i].kind, q(&cands[i]));
+            match best.iter_mut().find(|b| b.0 == k) {
+                Some(b) if qi > b.2 => {
+                    b.1 = i;
+                    b.2 = qi;
+                }
+                Some(_) => {}
+                None => best.push((k, i, qi)),
+            }
+        }
+        let mut kept: Vec<Candidate> = Vec::with_capacity(best.len());
+        let mut rest = cands.split_off(n0);
+        best.sort_by_key(|b| b.1);
+        // 位置の大きい方から取り出す (swap_remove で動くのは後ろの要素だけなので、残りの位置は変わらない)
+        for b in best.iter().rev() {
+            kept.push(rest.swap_remove(b.1 - n0));
+        }
+        kept.reverse();
+        cands.extend(kept);
+        return;
+    }
     let mut bi = n0;
     let mut bq = q(&cands[n0]);
     for i in n0 + 1..cands.len() {
@@ -289,6 +324,8 @@ struct Candidate {
     /// 元の行 1 本ずつの分離 (`SRC_ROWS`) の中の種類 (`ENOMOTO_MIP_SEPSTAT` の集計だけに使う、[`super::cuts::GenKind`]。
     /// 0: CMIR (と種類の分からないもの)、1: 持ち上げつきの被覆、2: 拡張被覆、3: flow cover)
     sub: u8,
+    /// [`generate_cuts`] の種類 ([`super::cuts::gen_kind`]、ほかは 0)。試作 `ENOMOTO_MIP_GEN_TYPE` の [`keep_best`] で使う
+    kind: u8,
 }
 
 /// 診断 (`ENOMOTO_MIP_DEBUG_SEPPROF`): 根のカットのループの 1 ラウンドの時間を段階ごとに集計する (スレッドごと)。
@@ -1294,7 +1331,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if pool && r > 0 && alt_has('P') {
                     for (eff, kk) in self.pool_violated(&x) {
                         let (cc, rr, _) = &self.cut_pool[kk];
-                        c.push(Candidate { coefs: cc.clone(), rhs: *rr, efficacy: eff, forced: false, src: sepprof::SRC_POOL, sub: 0 });
+                        c.push(Candidate { coefs: cc.clone(), rhs: *rr, efficacy: eff, forced: false, src: sepprof::SRC_POOL, sub: 0, kind: 0 });
                     }
                 }
                 c.into_iter().partition(|c| !c.forced)
@@ -2803,7 +2840,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let forced = symavg == Some('1');
                     if forced || (eff > 1e-4 && act - r > 1e-6 * (1.0 + r.abs())) {
                         avg_added += 1;
-                        cands.push(Candidate { coefs: c, rhs: r, efficacy: eff, forced, src: sepprof::SRC_POOL, sub: 0 });
+                        cands.push(Candidate { coefs: c, rhs: r, efficacy: eff, forced, src: sepprof::SRC_POOL, sub: 0, kind: 0 });
                     }
                 }
             }
@@ -2813,13 +2850,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         continue;
                     }
                     let (c, r, _) = &self.cut_pool[k];
-                    cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff, forced: false, src: sepprof::SRC_POOL, sub: 0 });
+                    cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff, forced: false, src: sepprof::SRC_POOL, sub: 0, kind: 0 });
                 }
             }
             if ((self.params.restarts > 0 && env_str!("ENOMOTO_MIP_RESTART_CUTS_TO_POOL").is_some()) || ((env_str!("ENOMOTO_MIP_CUTSEL_HIGHS_POOL").is_some() || self.pool_part('P')) && !self.cutsel_guard_fc())) && round < tunable!("ENOMOTO_T_MIP_ROOT_POOL_ROUNDS", if self.pool_part('P') { 1000usize } else { 5 }, usize) && env_str!("ENOMOTO_MIP_NO_ROOT_POOL").is_none() {
                 for (eff, k) in self.pool_violated(&x) {
                     let (c, r, _) = &self.cut_pool[k];
-                    cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff, forced: false, src: sepprof::SRC_POOL, sub: 0 });
+                    cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff, forced: false, src: sepprof::SRC_POOL, sub: 0, kind: 0 });
                 }
             }
             // 試作 `ENOMOTO_MIP_OPTFACE_PARCUTS` の `s`: 他の写し (別の頂点から始めた) が作ったカットを `ENOMOTO_T_MIP_OPTFACE_SHARE_EVERY`
@@ -2829,7 +2866,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // `x`: 勝ったときに集めた負けた写しのカットを、このラウンドの候補に足す (1 回だけ)
             for (eff, c, r) in race_extra.drain(..) {
                 share_keys.insert(c.iter().map(|&(j, a)| (j, a.to_bits())).collect());
-                cands.push(Candidate { coefs: c, rhs: r, efficacy: eff, forced: false, src: sepprof::SRC_POOL, sub: 0 });
+                cands.push(Candidate { coefs: c, rhs: r, efficacy: eff, forced: false, src: sepprof::SRC_POOL, sub: 0, kind: 0 });
             }
             if let Some((sh, id)) = job.as_ref().and_then(|j| j.share.lock().unwrap().clone()) {
                 let every = tunable!("ENOMOTO_T_MIP_OPTFACE_SHARE_EVERY", 2usize, usize).max(1);
@@ -2869,7 +2906,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         // 受け取ったカットは送り返さない (`g`)
                         share_pub.insert(k.clone());
                         share_keys.insert(k);
-                        cands.push(Candidate { coefs: c, rhs: r, efficacy: eff, forced: false, src: sepprof::SRC_POOL, sub: 0 });
+                        cands.push(Candidate { coefs: c, rhs: r, efficacy: eff, forced: false, src: sepprof::SRC_POOL, sub: 0, kind: 0 });
                     }
                 }
             }
@@ -4676,7 +4713,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         crate::simplex::slope_intercept_dual::xprof("hcm_sep");
         for (eff, k) in self.pool_violated(x) {
             let (c, r, _) = &self.cut_pool[k];
-            cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff, forced: false, src: sepprof::SRC_POOL, sub: 0 });
+            cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff, forced: false, src: sepprof::SRC_POOL, sub: 0, kind: 0 });
         }
         crate::simplex::slope_intercept_dual::xprof("hcm_pool");
         if cands.is_empty() {
@@ -6792,7 +6829,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let nrm = (1.0 + cy * cy).sqrt();
                 if act - rhs > 1e-6 * nrm * (1.0 + rhs.abs()) {
                     let coefs = if y < k { vec![(y, cy), (k, sk)] } else { vec![(k, sk), (y, cy)] };
-                    viol.push(((act - rhs) / nrm, RawCut { coefs, rhs }));
+                    viol.push(((act - rhs) / nrm, RawCut { coefs, rhs, kind: 0 }));
                 }
             }
             viol.sort_by(|a, b| b.0.total_cmp(&a.0));
@@ -7969,6 +8006,7 @@ fn finish_cut(
     incumbent: Option<&[f64]>,
     scratch: &mut [f64],
 ) -> Option<Candidate> {
+    let kind = raw.kind;
     // 試作 `ENOMOTO_MIP_CMIRDELTA` の診断: 新しい δ で作った CMIR か
     let cmirdelta_new = super::cmirdelta::on() && super::cmirdelta::is_new_raw(&raw.coefs, raw.rhs);
     // 構造変数ごとの係数を密な作業領域 (呼び出し側が長さ n の 0 で用意し、ここで 0 に戻す) に集める。
@@ -8148,7 +8186,7 @@ fn finish_cut(
     if cmirdelta_new {
         super::cmirdelta::note_new_cand(&coefs, rhs);
     }
-    Some(Candidate { coefs, rhs, efficacy, forced: false, src: 0, sub: 0 })
+    Some(Candidate { coefs, rhs, efficacy, forced: false, src: 0, sub: 0, kind })
 }
 
 /// 効き目の大きい順に、既に選んだものとほぼ平行 (|cos| > 0.99) なものを除いて選ぶ。
