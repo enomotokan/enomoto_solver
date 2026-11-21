@@ -114,5 +114,53 @@
 - P・M の広い計測で数える。台本は `wrun.py`、分担表は `shards_P.json` (6 組、348 回、各 0.47 時間) と `shards_M.json` (20 組、372 回、各 1.83〜1.85 時間)。def と sft0 を比べる。実行は `python analysis/primalgap_20261121/wrun.py P K` (K=0..5) と `python analysis/primalgap_20261121/wrun.py M K` (K=0..19)。d0a9eea36 を含むコミットからビルドすること。結果 res_SET_sK.jsonl の `submip` 欄に、sub-MIP の数、0 ノードで Infeasible の回数と時間、そのうち根で起きた分、ラベル別の内訳が入る。
 
 ### 回したビルド
+- P 2: c3bdeaa7c (d0a9eea36・1cb61bc9a 以降) を `pip install -e .` で入れて回した (0.1.10)。58 行・crash 0。
+- P 5: c3bdeaa7c (1cb61bc9a・d0a9eea36 を含む、リポジトリの根で `pip install -e .`、0.1.10)。58 行・crash 0。
 - P 4: c3bdeaa7c (d0a9eea36・1cb61bc9a 以降、`pip install -e .`、0.1.10)。58 行・crash 0。
 - P 1: c3bdeaa7c (d0a9eea36・1cb61bc9a 以降、`pip install -e .`、0.1.10)。58 行・crash 0。
+- P 3: c3bdeaa7c (d0a9eea36・1cb61bc9a 以降、`pip install -e .`、0.1.10)。58 行・crash 0。
+- P 0: c3bdeaa7c (d0a9eea36・1cb61bc9a 以降、`pip install -e .`、0.1.10)。58 行・crash 0。
+
+## 7. 広い計測 P の結果 (6 分担そろい、ci_P.txt)
+
+- `python ../rootgap_20261121/ci.py 60 sft0 def res_P_s*.jsonl`: def/sft0 (直しあり/なし) のずらし幾何平均の比 1.005 (95% [0.992, 1.018])、解けた sft0 137 / def 136。
+- 全種で 1.25 倍超の遅れ: なし。optimal 同士の目的値の食い違い: なし。crash 0。
+- 解けた数の差 1 は neos5 種 2 (sft0 は 42.8 秒で最適、def は時間切れで暫定解 15・下界 14.35)。他の種の neos5 は両方解けている。
+- 1 回だけの遅速は両向きに散らばる (10teams は種 1・2 で def が遅く、種 3 で def が速い)。
+- 0 ノードで Infeasible の sub-MIP は分担により増減し、根の分はほぼ変わらない。P では誤判定の起きる問題が少なく、momentum1 (M) のような効きは P では見えない。
+- 解けた数が 1 減ったので、neos5 を種を増やして確かめる。
+
+## 8. 確かめ: neos5 の解けた数の差と、sorrell3・kakapo の 0 ノード Infeasible (`chk8.py`)
+
+ビルドは e1e7bf585 (`pip install -e .`、0.1.10)、4 スレッド。`ENOMOTO_MIP_DEBUG_DUMP_SUBINF` で、前処理で実行不能になった sub-MIP を wlogs/dump/ に書き出した (ログ・書き出しはコミットしない)。結果は res_N5.jsonl・res_SK.jsonl。
+
+### neos5 (def・sft0 × 種 1〜10 × 各 2 回、60 秒): 揺れで、系統的な差ではない
+`python analysis/primalgap_20261121/chk8.py N5`
+
+| | 解けた数 | ずらし 10 秒の幾何平均 | 中央値 | 解けた回の時間 | 0 ノード Infeasible (根) | 書き出し |
+|---|---|---|---|---|---|---|
+| def (直しあり) | 18/20 | 43.5 秒 | 44.5 秒 | 30.7〜56.2 秒 | 28 (20) | 0 |
+| sft0 (直しなし) | 18/20 | 43.6 秒 | 44.6 秒 | 32.3〜56.4 秒 | 25 (20) | 1 |
+
+- 時間切れは def が種 2 の 1 回目・種 5 の 2 回目、sft0 が種 10 の 2 回とも。同じ種でも回によって解けたり解けなかったりする (def の種 2 は 2 回目が 46.3 秒で最適)。§7 の差 1 (neos5 種 2) はこの揺れの範囲にある。
+- 0 ノード Infeasible は、どの回も根の locks の 1 回と、主のスレッドの sub-MIP (seq) が 0〜2 回。根の分は両方とも 20 回で同じで、直しで消えたラベル・増えたラベルはない。
+- 前処理で実行不能になって書き出されたのは sft0 の種 4・1 回目の主スレッドの sub-MIP (18 自由列) 1 つだけで、HiGHS で解くと Infeasible (本当の実行不能)。neos5 には momentum1 のような誤判定はない。
+
+### sorrell3・neos-5107597-kakapo (def・sft0 × 種 1、600 秒): 直しでは消えない、本当の実行不能
+`python analysis/primalgap_20261121/chk8.py SK`
+
+| 問題 | 設定 | 最終 (暫定解 / 下界) | 0 ノード Infeasible |
+|---|---|---|---|
+| sorrell3 | def | -14 / -19 | 根の clique 1 |
+| sorrell3 | sft0 | -14 / -19 | 根の clique 1 |
+| kakapo | def | 9423 / 415.1 | 根の RENS 1、主スレッドの sub-MIP 1 (書き出し 1) |
+| kakapo | sft0 | 4428 / 477.0 | 根の RENS 1 |
+
+- sorrell3 の clique は固定率 1.00 (自由列 0) の sub-MIP で、固定した点そのものが制約を満たしていない。直しあり (許容 1e-6) でも同じく Infeasible なので、許容誤差の誤判定ではない。
+- kakapo の根の RENS (1134 自由列) は、直しあり・なしの両方で 0.5 秒で Infeasible。直しありでも変わらないので、momentum1 の型 (1e-9 級の違反での誤判定) ではない。def の主スレッドの sub-MIP (575 自由列) は前処理で実行不能になり書き出され、HiGHS で解くと Infeasible (本当の実行不能)。
+- 根の並列 sub-MIP (clique・RENS) は書き出しに出てこなかった (前処理ではなく別の所で実行不能と分かっている)。ただし、直しの有無で結果が変わらないことで、誤判定ではないと判断した。
+- kakapo の最終値の差 (9423 と 4428) は 1 回ずつの比べで、§2 にある 224〜493 秒の急落の時刻の揺れによる。直しとは関係しない。
+
+### まとめ
+- §6 の誤判定 (1e-9 級の違反で sub-MIP の前処理が実行不能と判定する) は、確かめた範囲では momentum1 にだけ起きている。neos5・sorrell3・kakapo の 0 ノード Infeasible は、直しの有無で変わらない本当の実行不能である。
+- P の解けた数の差 1 (neos5) は揺れで、直しの既定入りを妨げるものではない。
