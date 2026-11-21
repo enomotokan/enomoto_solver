@@ -25,6 +25,13 @@ analysis/vsscip_20261117 (0.1.9 の既定と SCIP 10.0.2 の比べ) と同じ問
 回すときの先端で `pip install -e .` (11/17 と同じく highspy 1.15.1 も要る。pyscipopt は要らない)。結果の行には版の印が残らないので、
 回した先端のコミットを README に書き足すこと。
 
+- M 2: 71923cc9d (d882b0772 以降) で pip install -e .。16 行・crash 0。
+- M 4: 5ab4c62d8 (d882b0772 以降) で build.sh の wheel を .venv に入れて回した。16 行・crash 0 (11 行で一度止めて続きから)。
+- M 3: de9524a54 (d882b0772 以降) で pip install -e .。16 行・crash 0。
+- M 7: a9fd1e6ee (0.1.10) で build.sh の wheel を入れて回した。14 行・crash 0。
+- M 12: 2556cccac (d882b0772 以降) で pip install -e .。14 行・crash 0。
+- M 24: de9524a54 (d882b0772 以降) で pip install -e .。16 行・crash 0。
+
 ## 集計 (summ.py)
 
 `python summ.py M > summ_M.txt`、`python summ.py P > summ_P.txt`。11/17 の summ.py の写しに次を足した:

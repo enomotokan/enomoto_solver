@@ -192,9 +192,10 @@ fn default_threads() -> usize {
 }
 
 /// Python 拡張モジュール `enomoto_solver._core` の初期化。`PyModel` クラスと
-/// `last_solve_events` を登録する。
+/// `last_solve_events` を登録し、`__version__` に Cargo.toml の版 (ビルドしたときの値) を入れる。
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_class::<PyModel>()?;
     m.add_function(wrap_pyfunction!(last_solve_events, m)?)?;
     m.add_function(wrap_pyfunction!(max_threads, m)?)?;

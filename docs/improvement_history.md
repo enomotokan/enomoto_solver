@@ -11032,3 +11032,20 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
   nw04 の TPRE=pl で再スタートする種は def の 2 倍 → 1.4 倍。
 - 確かめ: cargo test 419 通過。fuzz (mip_fuzz_vs_highs 300、再スタートの閾値 0 で mip_fuzz_vs_highs 300・1000・mip_fuzz_symmetric 300・mip_fuzz_fixed_charge 200) で bad 0。
 - 記録: analysis/objtarget_20261119/README.md 10 節。
+
+## 2026-11-21: 1 スレッドで同じ種の結果を再現させる ENOMOTO_MIP_TIMEDEP=b と ENOMOTO_MIP_DET1T=onil を既定にする (採用)
+
+- 既定にした (戻すのは `ENOMOTO_MIP_TIMEDEP=0 ENOMOTO_MIP_DET1T=0`。それぞれの文字は値に書いたものだけ効く):
+  - `ENOMOTO_MIP_TIMEDEP` の `b`: 割合で決める量 (サブ MIP の手間の予算など) の基準を、前処理の後の残り時間 (壁時計) でなく元の時間上限にする。
+    ほかの文字 (`w` など) を指定すると `b` は外れるので、続けて使うなら `bw` のように足す。
+  - `ENOMOTO_MIP_DET1T` の `o`: 根のカットのループの乱択丸め (OBJPROBE `r`) の枠を、壁時計の秒でなく手間で数える。
+  - `n`: 手間の期限の中で解くサブ MIP (木の大近傍探索) の時間の上限を 10 倍の安全網にする (壁時計で先に止まっていた)。
+  - `i`: 根の interior rounding の予算を手間で数え、内点法の反復も KKT の分解の演算数で手間の期限まで (壁時計は 10 倍の安全網)。
+    内点法の手間はスレッドの手間の合計には足さない (足すと後のサブ MIP の予算が変わり、rout の種 2 が 1.4 倍になった)。
+  - `l`: ノードの LP の 1 回の上限 (平均の 50 倍・最低 0.5 秒) を手間で数える (cvs16r128-89 は 0.5 秒の上限で回ごとに違う反復で止まっていた)。
+- 結果:
+  - 再現性 (P の 58 問、1 スレッド・種 1・60 秒、2 回の記録 (ノードの LP の列) と結果の一致): 既定 54 / 58 → **58 / 58** (`RAYON_NUM_THREADS=1` なし)。
+  - 費用 (P の 58 問 × 種 1〜3、60 秒、比は bonil / def): 4 スレッド **−0.1% [−1.4%, +1.3%]**、解けた 138 → 138。
+    1 スレッド **+0.3% [−0.4%, +1.0%]**、解けた 123 → 121 (timtab1 の種 2・3。`i` の直しの前の版で、直した版では解ける)。全種で 1.25 倍超の遅れなし。
+- 確かめ: cargo test 419 通過。fuzz (analysis/slowm_20261119/fuzz.sh の 7 本) bad 0。
+- 記録: analysis/det1t_20261120/README.md、analysis/slowm_20261119/README.md 18 節 (DT の計測)。
