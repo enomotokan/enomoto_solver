@@ -7,7 +7,8 @@ D = Path(__file__).resolve().parent
 WT = D.parents[1]
 sys.path.insert(0, str(WT / "scripts"))
 import run_miplib_benchmark as rb  # noqa: E402
-from run import P, M  # noqa: E402
+P = "neos-911970 misc07 neos5 mik-250-20-75-4 noswot".split()
+M = "fiball csched008 neos-3627168-kasai neos-957323 mzzv11 tr12-30 uccase12".split()
 out = open(sys.argv[1], "w")
 for p in P + M:
     rec = [json.loads(l) for l in gzip.open(D / "logs" / f"res_{p}_t1_s1.jsonl.gz", "rt") if l.strip()]

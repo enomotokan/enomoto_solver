@@ -154,8 +154,8 @@ def rootinfo(recs):
 
 def cross(stem, th, rows, probs):
     print(f"\n### 問題をまたいだ並び (スレッド {th}、種をまとめる)\n")
-    print("| 問題 | 始めの暫定解 | 始めのギャップ | 根で閉じた割合 | 根のカットの手間 (1e9) | 閉じた割合/1e9 手間 | 木の分離の秒の割合 | 1 ラウンドの伸び 中央 (深さ 1-4 / 9+) | 見つからない率 (1-4 / 9+) | 張った回/LP にあった回 (1-4 / 9+) | 伸びの和/1e9 手間 (1-4 / 9+) |")
-    print("|---|---|---|---|---|---|---|---|---|---|---|")
+    print("| 問題 | 始めの暫定解 | 始めのギャップ | 根で閉じた割合 | 根のカットの手間 (1e9) | 閉じた割合/1e9 手間 | 木の分離の秒の割合 | 1 ラウンドの伸び 中央 (深さ 1-4 / 9+) | 見つからない率 (1-4 / 9+) | 張った回/LP にあった回 (1-4 / 9+) | 伸びの和/1e9 手間 (1-4 / 9+) | 木の分離の手間のうち深さ 1-4 の割合 | 寿命 中央 (1-4 / 9+) | 張った回/本 (1-4 / 9+) |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for p in probs:
         rr = [r for r in rows if r["problem"] == p and r["threads"] == th]
         per = []
@@ -174,6 +174,8 @@ def cross(stem, th, rows, probs):
             return g, c
         sh, ch = agg(0, 3)
         dp, cd = agg(4, 6)
+        lsh = [v for i in range(0, 3) for v in B[i]["lin"]]
+        ldp = [v for i in range(4, 6) for v in B[i]["lin"]]
         secs = sum(C[i]["secs"] for i in range(6))
         wall = sum(min(r["result"].get("time") or r["tl"], r["tl"]) for r in rr) * th
         f = lambda v, fmt: (fmt.format(v) if v is not None else "-")
@@ -182,7 +184,8 @@ def cross(stem, th, rows, probs):
             f"{'/'.join(f'{x[3]:.2g}' for x in ri)} | {'/'.join(f(x[2] / x[3] if x[2] is not None and x[3] > 0 else None, '{:.2g}') for x in ri)} | {secs / max(wall, 1e-9):.3f} | "
             f"{q(sh, 0.5):.2g} / {q(dp, 0.5):.2g} | {ch['none'] / max(ch['rounds'], 1):.2f} / {cd['none'] / max(cd['rounds'], 1):.2f} | "
             f"{ch['bind'] / max(ch['lin_sum'], 1):.3f} / {cd['bind'] / max(cd['lin_sum'], 1):.3f} | "
-            f"{sum(sh) / max(ch['ticks'] / 1e9, 1e-9):.2f} / {sum(dp) / max(cd['ticks'] / 1e9, 1e-9):.2f} |"
+            f"{sum(sh) / max(ch['ticks'] / 1e9, 1e-9):.2f} / {sum(dp) / max(cd['ticks'] / 1e9, 1e-9):.2f} | "
+            f"{ch['ticks'] / max(T, 1):.2f} | {q(lsh, 0.5):.0f} / {q(ldp, 0.5):.0f} | {ch['bind'] / max(ch['ncut'], 1):.1f} / {cd['bind'] / max(cd['ncut'], 1):.1f} |"
         )
 
 
