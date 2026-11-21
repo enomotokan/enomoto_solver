@@ -109,6 +109,7 @@
 - M 8: 12bf2ca03 (5c4f5260d 以降、pip install -e .、0.1.10)。20 行・crash 0。
 - M 12: dd8cc6e88 (5c4f5260d 以降、pip install -e .、0.1.10)。20 行・crash 0。
 - M 14: 12bf2ca03 (5c4f5260d 以降、pip install -e .、0.1.10)。20 行・crash 0。
+- M 9: 12bf2ca03 (5c4f5260d 以降、pip install -e .、0.1.10)。20 行・crash 0。
 
 ### P の結果 (6 分担そろい、wide/ci_P.txt・wide/rss_P.txt)
 
