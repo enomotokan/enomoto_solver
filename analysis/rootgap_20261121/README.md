@@ -246,6 +246,7 @@ app1-1 は SCIP 2382 列、当方は前処理の LP による固定の後で自�
 - M 16: 7f801a8e0 (2d210db89 以降、build.sh の wheel、0.1.10)。20 行・crash 0 (11 行と 9 行に分けて回した)。
 - M 18: 7f801a8e0 (2d210db89 以降、build.sh の wheel、0.1.10)。18 行・crash 0。**istanbul-no-cutoff で glc が誤答** (glc optimal 242.8404 を 1 ノード・42 秒で返した。def と 11/17 の scip の最適値は 204.0817)。
 - M 15: 1e12472d0 (2d210db89 以降、build.sh の wheel、0.1.10)。20 行・crash 0。食い違いなし。
+- M 17: 7f801a8e0 (2d210db89 以降、build.sh の wheel、0.1.10)。22 行・crash 0。食い違いなし (neos-662469 は glc だけ optimal 184380 で、既知の最適値と一致)。
 
 ### 7.1 P の結果 (6 分担そろい、親の集計 2026-11-21、`ci_P.txt`)
 
