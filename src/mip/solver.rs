@@ -3987,7 +3987,8 @@ pub(crate) fn in_submip_thread() -> bool {
 ///   既定を 5 → 1 (1 本の上限 = max(1 秒, 0.02 x 時間の上限, T))、全体は `ENOMOTO_T_MIP_ROOTCAP_TOT` の既定を 20 → 2 (= max(0.05 x 時間の上限, 2T)、
 ///   残り時間の割合の上限はそのまま)。あわせて interior rounding は、根の LP の秒がその予算を超えるなら内点法を始めない
 ///   (`ENOMOTO_MIP_IPM_HEUR_LPGATE` と同じ判定。内点法の準備 (順序付け・記号分解) は止めの合図を見ないので予算を大きく超える:
-///   sorrell3 (根の LP 46 秒) で予算 30 秒に対して 72 秒使い、失敗していた)
+///   sorrell3 (根の LP 46 秒) で予算 30 秒に対して 72 秒使い、失敗していた)。`h` を書かずに `k` だけなら、上限 (と interior rounding の判定) は
+///   T の項が時間の上限の項を上回る (T > 0.02 x 時間の上限) 問題だけにかける (根の LP の軽い問題は既定と同じ)
 pub(crate) fn rootcap(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let v = V.get_or_init(|| env_str!("ENOMOTO_MIP_ROOTCAP").map_or(String::new(), |v| v.to_string()));
@@ -10920,9 +10921,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 // 試作 `ENOMOTO_MIP_ROOTCAP` の `h` ([`rootcap`]): 根のヒューリスティクスの期限と 1 本の上限を根の LP の重さから決める
                 self.rootcap_until = None;
-                if rootcap('h') && !self.params.submip && self.snap.is_none() {
-                    let t_lp = self.root_lp_secs.max(f64::from_bits(ROOTCAP_PROBE_SECS.load(std::sync::atomic::Ordering::Relaxed)));
-                    let tl = if self.params.frac_tl().is_finite() { self.params.frac_tl() } else { 0.0 };
+                // `k` だけ (`h` を書かない) なら、T の項 (`ENOMOTO_T_MIP_ROOTCAP_EACH` x T) が時間の上限の項 (`ENOMOTO_T_MIP_ROOTCAP_EACH_TL` x 時間の上限)
+                // を上回る (根の LP が重い) 問題だけ上限をかける。根の LP の軽い問題では時間の上限の床で根のサブ MIP を切らない (既定と同じ動き。
+                // 10teams: 床の 1 本 1.2 秒で LP face のサブ MIP が 0 ノードで止まり、既定なら見つかる最適値を逃していた。analysis/biglp_20261121 7.6・7.7 節)
+                let rc_t_lp = self.root_lp_secs.max(f64::from_bits(ROOTCAP_PROBE_SECS.load(std::sync::atomic::Ordering::Relaxed)));
+                let rc_tl = if self.params.frac_tl().is_finite() { self.params.frac_tl() } else { 0.0 };
+                let rc_heavy = tunable!("ENOMOTO_T_MIP_ROOTCAP_EACH", 1.0, f64) * rc_t_lp > tunable!("ENOMOTO_T_MIP_ROOTCAP_EACH_TL", 0.02, f64) * rc_tl;
+                let rc_k_only = rootcap('k') && env_str!("ENOMOTO_MIP_ROOTCAP").is_some_and(|v| !v.contains('h'));
+                if rootcap('h') && !self.params.submip && self.snap.is_none() && !(rc_k_only && !rc_heavy) {
+                    let t_lp = rc_t_lp;
+                    let tl = rc_tl;
                     let each = tunable!("ENOMOTO_T_MIP_ROOTCAP_EACH_MIN", 1.0, f64)
                         .max(tunable!("ENOMOTO_T_MIP_ROOTCAP_EACH_TL", 0.02, f64) * tl)
                         .max(tunable!("ENOMOTO_T_MIP_ROOTCAP_EACH", if rootcap('k') { 1.0 } else { 5.0 }, f64) * t_lp);
@@ -22111,6 +22119,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             let all = lits.iter().all(|&(j, upper, v)| if upper { x[j] <= v + 1e-6 } else { x[j] >= v - 1e-6 });
             if all {
+                let gap = super::domain::dbg_lits_gap(&x, lits.iter().copied());
+                if gap > 1e-9 {
+                    eprintln!("MIP_DBGTOL: conflict ({tag}) misses the debug solution only by {gap:.3e} (within the tolerance) at node {} thread {}, len {}", self.nodes, self.pool_tid, lits.len());
+                    return;
+                }
                 let terms: Vec<String> = lits.iter().take(12).map(|&(j, upper, v)| format!("x{j}{}{v}[{}]", if upper { "<=" } else { ">=" }, x[j])).collect();
                 eprintln!(
                     "MIP_DEBUG_SOL: conflict ({tag}) cuts off the debug solution at node {} thread {} ({}): domain contains the debug solution: {}, len {}, stack {}: {}",
