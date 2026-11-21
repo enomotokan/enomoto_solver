@@ -11,6 +11,13 @@ use super::problem::MipProblem;
 /// 実行可能性の許容誤差。
 pub const FEASTOL: f64 = 1e-6;
 
+/// 診断用 (デバッグ解、analysis/rootgap_20261121 の 8.3): リテラルの組 (列, 上限か, 値) をデバッグ解 `x` がどれだけ外れるかの最大
+/// (正なら外れ、0 以下なら全部成り立つ)。衝突がデバッグ解を「切る」かの確かめは許容 1e-6 で見るので、許容の内側の外れ (0 < 外れ <= 1e-6) は
+/// 厳密には切っていない見かけの出力になる。これが 1e-9 以下なら本物 (`MIP_DEBUG_SOL:`)、それより大きければ見かけ (`MIP_DBGTOL:`) として分けて出す
+pub(crate) fn dbg_lits_gap(x: &[f64], lits: impl Iterator<Item = (usize, bool, f64)>) -> f64 {
+    lits.map(|(j, up, v)| if up { x[j] - v } else { v - x[j] }).fold(f64::NEG_INFINITY, f64::max)
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Change {
     col: usize,
@@ -913,6 +920,8 @@ impl Domain {
         if !chosen.iter().all(|&k| holds(k)) {
             return;
         }
+        // 選んだ変更が許容の内側でしか成り立たなければ見かけ (デバッグ解は厳密にはその枝にない)
+        let gap = dbg_lits_gap(x, chosen.iter().map(|&k| (self.stack[k].col, self.stack[k].upper, self.stack[k].new)));
         let act: f64 = terms.iter().filter(|&&(j, _)| j != skip).map(|&(j, a)| a * x[j]).sum();
         if act >= m_req - 1e-6 * (1.0 + m_req.abs()) {
             return;
@@ -929,6 +938,10 @@ impl Domain {
             }
         }
         let skip_s = if skip == usize::MAX { "start".to_string() } else { format!("for x{skip}") };
+        if gap > 1e-9 {
+            eprintln!("MIP_DBGTOL: conflict explanation ({skip_s}, before {before}) fails at the debug solution only within the tolerance: chosen changes miss it by {gap:.3e}, sum a x = {act:.10e} < required {m_req:.10e}");
+            return;
+        }
         eprintln!(
             "MIP_DEBUG_SOL: conflict explanation ({skip_s}, before {before}) is wrong at the debug solution: sum a x = {act:.10e} < required {m_req:.10e}, chosen {} changes (all hold), len {}; columns outside the bounds used as global: {}",
             chosen.len(),
@@ -1359,6 +1372,11 @@ impl Domain {
         if let Some(x) = &self.dbg_sol {
             for (n, c) in out.iter().enumerate() {
                 if c.iter().all(|&(j, up, v)| if up { x[j] <= v + 1e-6 } else { x[j] >= v - 1e-6 }) {
+                    let gap = dbg_lits_gap(x, c.iter().copied());
+                    if gap > 1e-9 {
+                        eprintln!("MIP_DBGTOL: analyze_multi conflict {n} of {} misses the debug solution only by {gap:.3e} (within the tolerance): {:?}", out.len(), c);
+                        continue;
+                    }
                     eprintln!("MIP_DEBUG_SOL: analyze_multi conflict {n} of {} cuts off the debug solution: {:?}", out.len(), c);
                     for t in trace.borrow().iter().take(40) {
                         eprintln!("MIP_DEBUG_SOL:   trace {t}");

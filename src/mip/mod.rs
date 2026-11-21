@@ -1325,6 +1325,8 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
     let _dbg_sol = params.submip.then(DebugSolScope::enter);
     // 診断 `ENOMOTO_MIP_GFIX_LOG`: 大域の固定の記録にサブ MIP の中かどうかを付ける
     let _gfix_sub = params.submip.then(domain::GfixSubScope::enter);
+    // `ENOMOTO_MIP_SUBMIP_FEASTOL` ([`crate::presolve::submip_feastol_on`]): サブ MIP の前処理の実行不能の判定を MIP の実行可能性の許容誤差より厳しくしない
+    let _sub_feastol = (params.submip && crate::presolve::submip_feastol_on()).then(crate::presolve::SubmipFeasTolScope::enter);
     if outer {
         subb::reset();
         heur_subfix::reset();
@@ -2225,6 +2227,14 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     }
     match presolved {
         Some(Presolved::Infeasible) => {
+            // 診断用 (`ENOMOTO_MIP_DEBUG_DUMP_SUBINF=接頭辞`): 前処理で実行不能になったサブ MIP を前処理の前の形で `接頭辞_番号.mps` に書く
+            // (本当に実行不能かを別のソルバーで確かめる。analysis/primalgap_20261121/)
+            if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_DUMP_SUBINF").filter(|_| params.submip) {
+                static CNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                let f = format!("{f}_{}.mps", CNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+                dump_mps(p, &f);
+                eprintln!("MIP: DUMP_SUBINF: the sub-MIP infeasible by presolve written to {f}");
+            }
             solver::START_SOL.with(|s| *s.borrow_mut() = None);
             solver::REF_SOL.with(|s| *s.borrow_mut() = None);
             RESTART_CUTS.with(|s| *s.borrow_mut() = None);
