@@ -3930,9 +3930,15 @@ pub(crate) fn in_submip_thread() -> bool {
 /// - `q`: `p` の前に、止まった LP をそのまま (尺度・DSE 重み・摂動を保ったまま) 続けて解き、解ければその最適基底を渡す
 /// - `w`: 根のヒューリスティクスの後に裏のカットを待つのも `h` の期限の残り (最低 1 秒) まで
 /// - `d`: 根の LP が重い問題の根のカットのループで、1 ラウンドに足すカットの非零の和に上限 (`separation.rs` の `ROOTCAP d`)
+/// - `k` (analysis/biglp_20261121 10 節): `h` の上限を根の LP の重さ T に比例する側で締める (`h` を含む)。1 本は `ENOMOTO_T_MIP_ROOTCAP_EACH` の
+///   既定を 5 → 1 (1 本の上限 = max(1 秒, 0.02 x 時間の上限, T))、全体は `ENOMOTO_T_MIP_ROOTCAP_TOT` の既定を 20 → 2 (= max(0.05 x 時間の上限, 2T)、
+///   残り時間の割合の上限はそのまま)。あわせて interior rounding は、根の LP の秒がその予算を超えるなら内点法を始めない
+///   (`ENOMOTO_MIP_IPM_HEUR_LPGATE` と同じ判定。内点法の準備 (順序付け・記号分解) は止めの合図を見ないので予算を大きく超える:
+///   sorrell3 (根の LP 46 秒) で予算 30 秒に対して 72 秒使い、失敗していた)
 pub(crate) fn rootcap(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_str!("ENOMOTO_MIP_ROOTCAP").map_or(String::new(), |v| v.to_string())).contains(c)
+    let v = V.get_or_init(|| env_str!("ENOMOTO_MIP_ROOTCAP").map_or(String::new(), |v| v.to_string()));
+    v.contains(c) || (c == 'h' && v.contains('k'))
 }
 
 /// [`rootcap`] の `h` 用: 外側の前処理の LP による固定の最初の LP の秒 (期限で止まったものも。f64 のビット、なければ 0)
@@ -10164,6 +10170,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if restart_basis_used && self.params.verbose {
             eprintln!("MIP: root LP after the restart: {root_st:?}, {} iters ({:.2}s)", self.lp.total_iterations() - root_iters0, self.start.elapsed().as_secs_f64());
+            // 診断 (`ENOMOTO_MIP_NODELP_DIAG` のとき、振る舞いは変えない。analysis/biglp_20261121 9 節): 再スタートの後の warm start の出発の状態
+            if crate::simplex::slope_intercept_dual::nodelp_diag() {
+                let r = crate::simplex::slope_intercept_dual::NODELP_REC.with(|c| c.get());
+                let i3 = crate::simplex::slope_intercept_dual::NODELP_INF3.with(|c| c.get());
+                eprintln!(
+                    "MIP: root LP after the restart (diag): warm {} primal infeasible rows {} (columns {}, rows {}, cut rows {}), cost-shifted columns {}, refactorizations {}, DSE {}, phase A {} ({} iters), perturbed {}",
+                    r[0], r[1], i3[0], i3[1], i3[2], r[2], r[3], r[4], r[5], r[6], r[7]
+                );
+            }
         }
         // 診断用 (`ENOMOTO_MIP_DEBUG_RESTART_CUT_USE`): 再スタートの後の根の LP 解で、カットプールのカットと LP のカットの行が
         // 破られている・等号で効いている・緩んでいる数
@@ -10850,10 +10865,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let tl = if self.params.frac_tl().is_finite() { self.params.frac_tl() } else { 0.0 };
                     let each = tunable!("ENOMOTO_T_MIP_ROOTCAP_EACH_MIN", 1.0, f64)
                         .max(tunable!("ENOMOTO_T_MIP_ROOTCAP_EACH_TL", 0.02, f64) * tl)
-                        .max(tunable!("ENOMOTO_T_MIP_ROOTCAP_EACH", 5.0, f64) * t_lp);
+                        .max(tunable!("ENOMOTO_T_MIP_ROOTCAP_EACH", if rootcap('k') { 1.0 } else { 5.0 }, f64) * t_lp);
                     let rem = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
                     let f_rem = if self.incumbent.is_some() { tunable!("ENOMOTO_T_MIP_ROOTCAP_REM", 0.15, f64) } else { tunable!("ENOMOTO_T_MIP_ROOTCAP_REM_NOINC", 0.25, f64) };
-                    let tot = (tunable!("ENOMOTO_T_MIP_ROOTCAP_TOT_TL", 0.05, f64) * tl).max(tunable!("ENOMOTO_T_MIP_ROOTCAP_TOT", 20.0, f64) * t_lp).min(f_rem * rem);
+                    let tot = (tunable!("ENOMOTO_T_MIP_ROOTCAP_TOT_TL", 0.05, f64) * tl).max(tunable!("ENOMOTO_T_MIP_ROOTCAP_TOT", if rootcap('k') { 2.0 } else { 20.0 }, f64) * t_lp).min(f_rem * rem);
                     let each = each.min(tot);
                     self.rootcap_late = (tunable!("ENOMOTO_T_MIP_ROOTCAP_LATE", 1.0, f64) * t_lp).clamp(tunable!("ENOMOTO_T_MIP_ROOTCAP_EACH_MIN", 1.0, f64), each.max(1.0));
                     self.rootcap_each = each;
