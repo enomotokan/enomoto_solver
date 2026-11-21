@@ -1,4 +1,4 @@
-//! 試作 `ENOMOTO_MIP_ROOTLP3` (既定では使わない、analysis/rootlp3_20261111.md): 主の根の LP (最初・再スタートの後) を、
+//! `ENOMOTO_MIP_ROOTLP3` (未設定は `e` で**既定で使う**、`=0` で切る。`e` は 2026-11-21 採用、analysis/biglp_20261121 7 節。`s`・`3` は試作、analysis/rootlp3_20261111.md): 主の根の LP (最初・再スタートの後) を、
 //! 渡した基底が特異なら基底を捨てて基底なしの同時実行 (二段解法と内点法 + クロスオーバー) で解く。
 //!
 //! 今の既定では、根の LP に渡した基底 (前処理の LP・再スタートの直前の LP の基底) の LU が特異だと、単体法の中で warm start を
@@ -17,9 +17,9 @@ use super::lp_api::MipLp;
 use super::solver::Solver;
 use std::time::Instant;
 
-/// 試作 `ENOMOTO_MIP_ROOTLP3` の値に文字 `c` が入っているか。
+/// `ENOMOTO_MIP_ROOTLP3` の値 (未設定は `e`、`0`・`off` は空) に文字 `c` が入っているか。
 pub(crate) fn rootlp3_has(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_ROOTLP3").is_some_and(|v| v.contains(c))
+    env_def!("ENOMOTO_MIP_ROOTLP3", "e").is_some_and(|v| v.contains(c))
 }
 
 /// 試作 `ENOMOTO_MIP_ROOTLP3` の `e`: この求解の最初の主の根の LP (種類 4) を基底なしで解いた反復 (0 なら知らない)
