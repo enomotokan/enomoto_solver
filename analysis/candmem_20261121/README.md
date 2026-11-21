@@ -98,6 +98,7 @@
 - P 0: 29b63ac01 (84adc12dd 以降、pip install -e .、0.1.10)。58 行・crash 0。
 - M 3: 12bf2ca03 (5c4f5260d 以降、pip install -e .、0.1.10)。16 行・crash 0。
 - M 2: 12bf2ca03 (5c4f5260d 以降、pip install -e .、0.1.10)。16 行・crash 0。
+- M 10: 12bf2ca03 (5c4f5260d 以降、pip install -e .、0.1.10)。20 行・crash 0。
 - M 0: 12bf2ca03 (5c4f5260d 以降、pip install -e .、0.1.10)。16 行・crash 0。
 - M 1: 12bf2ca03 (5c4f5260d 以降、pip install -e .、0.1.10)。16 行・crash 0。
 - M 4: 12bf2ca03 (5c4f5260d 以降、pip install -e .、0.1.10)。16 行・crash 0。
