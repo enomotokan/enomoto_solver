@@ -136,10 +136,11 @@ if __name__ == "__main__":
 
 def rootinfo(recs):
     """木の始めの値: (暫定解の有無, 相対ギャップ, 根で閉じた割合, 根のカットの手間 (1e9), 木の始めまでの手間 (1e9))。値は最小化形"""
-    main = [r for r in recs if r.get("root")]
+    # 根のカットの記録は主スレッド (tid 0) の最後の求解のものを使う。再スタートがあれば、その後の根の値になる
+    main = [r for r in recs if r.get("root") and r["tid"] == 0]
     if not main:
         return None
-    m = main[0]
+    m = main[-1]
     o0 = m["root"][0][0]
     o1 = m["root"][-1][1]
     rt = sum(x[2] for x in m["root"]) / 1e9
