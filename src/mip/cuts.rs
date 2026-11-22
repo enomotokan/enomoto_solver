@@ -246,6 +246,7 @@ const MIN_FRAC: f64 = 0.005;
 /// `SCIPcutGenerationHeuristicCMIR` (cuts.c) 寄りにする。値の文字で選ぶ:
 /// - `f`: f0 (右辺 / δ の小数部) の上限を 1 − 0.005 から SCIP の maxfrac 0.999 にする (下限は今の 0.005 のまま)。係数 212・右辺 −1 の行 (mc11) は
 ///   δ = 212 で f0 = 0.9953 になり、今は捨てているが、δ = 106 のカット (効き目 0.240) より強い (0.445)
+/// - `u`: f0 の決め打ちの上限を外す ([`max_frac`])
 /// - `d`: δ の候補を SCIP と同じにする: 境界の内側にある整数の項の係数をすべて (境界からの距離の大きい順)、係数を全部整数にする倍率 s からの
 ///   1/s と 1/(s ⌊maxfrac / f⌋)、係数の最大 + 1、1。1/2・1/4・1/8 は最良の δ だけ
 fn cmirgen(c: char) -> bool {
@@ -253,10 +254,25 @@ fn cmirgen(c: char) -> bool {
     V.get_or_init(|| env_str!("ENOMOTO_MIP_CMIRGEN").unwrap_or("").to_string()).contains(c)
 }
 
-/// f0 の上限 (試作 `ENOMOTO_MIP_CMIRGEN` の `f` で 0.999)
+/// f0 の上限 (試作 `ENOMOTO_MIP_CMIRGEN` の `f` で 0.999)。`u` (利用者の案、`f` より優先): 決め打ちの上限を外し、1 − f0 が既存の
+/// 可能性の許容誤差 ([`super::domain::FEASTOL`]、1e-6) 以下のもの (右辺 / δ がほぼ整数で、丸めの意味がない) だけを除く。数値的に不安定な
+/// カットは既存の [`super::separation`] の `finish_cut` の検査 (係数の幅 1e6・小さい係数の吸収・打ち消しの確かめ) に任せる
 fn max_frac() -> f64 {
-    if cmirgen('f') { 0.999 } else { 1.0 - MIN_FRAC }
+    if cmirgen('u') {
+        1.0 - super::domain::FEASTOL
+    } else if cmirgen('f') {
+        0.999
+    } else {
+        1.0 - MIN_FRAC
+    }
 }
+
+/// 試作 `ENOMOTO_MIP_CMIRGEN` の診断 (`ENOMOTO_MIP_LOG` で全体の最後に出す): 今の上限 (0.995) を超える f0 で作った CMIR の数と f0 の分布、
+/// その `finish_cut` での行方。[0] 作った数、[1] f0 ∈ (0.995, 0.999]、[2] (0.999, 0.9999]、[3] (0.9999, 1)、[4] finish_cut に来た数、
+/// [5] 通った数、[6] 係数の幅 (1e6) で外れた数、[7] ほかの理由で外れた数、[8]〜[10] 通ったカットの係数の幅 (≤ 1e2、≤ 1e4、≤ 1e6)。カットの `kind` の上位ビット ([`HIGH_F0`]) で印をつける
+pub static HF0_STATS: [std::sync::atomic::AtomicU64; 11] = [const { std::sync::atomic::AtomicU64::new(0) }; 11];
+/// [`HF0_STATS`] の印 (`RawCut::kind` の上位ビット。`finish_cut` で外す)
+pub const HIGH_F0: u8 = 0x80;
 
 /// 小さい分母 (`maxden` まで) の有理数で `v` を近似したときの分母 (連分数)。近似が `tol` に届かなければ `None`
 fn small_denom(v: f64, maxden: u64, tol: f64) -> Option<u64> {
@@ -916,7 +932,18 @@ fn cmir_terms_fast(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<RawCut
     if coefs.is_empty() {
         return None;
     }
-    let cut = RawCut { coefs, rhs: r, kind: 0 };
+    let mut cut = RawCut { coefs, rhs: r, kind: 0 };
+    // 試作 `ENOMOTO_MIP_CMIRGEN` の診断: 今の上限 (0.995) を超える f0 のカットに印をつけて数える
+    if max_frac() > 1.0 - MIN_FRAC {
+        let b = beta / delta;
+        let f0 = b - b.floor();
+        if f0 > 1.0 - MIN_FRAC {
+            use std::sync::atomic::Ordering::Relaxed;
+            HF0_STATS[0].fetch_add(1, Relaxed);
+            HF0_STATS[if f0 <= 0.999 { 1 } else if f0 <= 0.9999 { 2 } else { 3 }].fetch_add(1, Relaxed);
+            cut.kind |= HIGH_F0;
+        }
+    }
     // 最良の δ の 1/2・1/4・1/8 (HIGHS) が勝ったときは新しい δ とみなさない
     if (delta - deltas[best_i]).abs() <= 1e-12 * delta {
         cmirdelta_note(&kinds, n_old, best_i, eff0, best_old, Some(&cut));

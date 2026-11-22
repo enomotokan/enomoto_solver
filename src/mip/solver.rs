@@ -27255,6 +27255,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: cut small-coefficient floor (all threads): coefficients absorbed only by the floor {}, in cuts {}, cuts emptied {}, cuts dropped (infinite bound) {}", st[0], st[1], st[2], st[3]);
                 let ct: Vec<u64> = super::separation::CANCEL_STATS.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
                 eprintln!("MIP: cut cancellation check (all threads): residual coefficients {}, in cuts {}, of which not absorbed by the small-coefficient rule {}, cuts changed {}, cuts emptied {}", ct[0], ct[1], ct[2], ct[3], ct[4]);
+                let hf: Vec<u64> = super::cuts::HF0_STATS.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
+                if hf[0] > 0 {
+                    eprintln!("MIP: CMIRGEN high f0 (> 0.995) CMIR cuts (all threads): made {} (f0 <= 0.999 {}, <= 0.9999 {}, above {}), finished {}, kept {}, dropped by the coefficient range {}, dropped otherwise {}; kept coefficient range <= 1e2 {}, <= 1e4 {}, <= 1e6 {}", hf[0], hf[1], hf[2], hf[3], hf[4], hf[5], hf[6], hf[7], hf[8], hf[9], hf[10]);
+                }
             }
             if gap4('l') {
                 eprintln!("MIP: GAP4 l: cuts shortened to 100 + 0.15 n nonzeros (all threads): {}", super::separation::GAP4_CUT_SHORTENED.load(std::sync::atomic::Ordering::Relaxed));
