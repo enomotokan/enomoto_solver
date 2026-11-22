@@ -11239,6 +11239,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if !lpface_first && env_str!("ENOMOTO_MIP_NO_LPFACE").is_none() {
                     heur!("LP face", self.lp_face());
                 }
+                // 試作 `ENOMOTO_MIP_RENSDIVE` (analysis/rensdive_20261122): 外側の根で RENS の前に、RENS と同じ固定の定義域で丸めとダイブ
+                if super::lpbox::rensdive_on() && !self.params.submip && self.nodes <= 1 && self.snap.is_none() {
+                    heur!("RENSDIVE", self.rensdive());
+                }
                 heur!("RENS", self.rens(&x));
                 // `ENOMOTO_MIP_RENS_LPBC_MAX_DEPTH` (既定 1、2026-11-01 に trim3 として既定化。大きな値 (例 `1000`) で上限なし = 元の振る舞い): `RENS (LP before cuts)` のサブ MIP の入れ子の深さ
                 // (今の深さ + 1、`SMT begin` の `depth` と同じ) がこの値を超えるなら呼ばない。`1` で深さ 1 のサブ MIP の中の
