@@ -8,7 +8,7 @@ D = Path(__file__).resolve().parent
 WT = D.parents[1]
 sys.path.insert(0, str(WT / "scripts"))
 import run_miplib_benchmark as rb  # noqa: E402
-CFGS = {"def": {}, "lpbox": {"ENOMOTO_MIP_LPBOX": "1"}}
+CFGS = {"def": {}, "lpbox": {"ENOMOTO_MIP_LPBOX": "1"}, "lpboxd": {"ENOMOTO_MIP_LPBOX": "d"}}
 plan = json.loads((D / sys.argv[1]).read_text())
 OUT = D / "res_small.jsonl"
 done = set()
