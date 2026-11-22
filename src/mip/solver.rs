@@ -12963,6 +12963,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             first = false;
             self.nodes += 1;
+            // 診断 `ENOMOTO_MIP_CUTSTOP_LOG` (analysis/cutstop_20261122、振る舞いは変えない): 木の進み (ノード数が 2 の冪のとき)
+            if self.nodes >= 16 && self.nodes.is_power_of_two() && !self.params.submip && self.snap.is_none() && env_str!("ENOMOTO_MIP_CUTSTOP_LOG").is_some_and(|v| v != "0") {
+                eprintln!(
+                    "TREETK nodes {} secs {:.3} total_tk {:.0} lb {:.10e} open {}",
+                    self.nodes,
+                    self.start.elapsed().as_secs_f64(),
+                    crate::ticks::total_with_diag(),
+                    self.global_lower_bound() + self.p.offset,
+                    self.queue.len()
+                );
+            }
             // 試作 `ENOMOTO_MIP_CWM`: このノードの衝突の重みの倍率 (札の対の側の大きさも数える)
             if super::cwm::mode().is_some() && !self.params.submip {
                 // 次元 ([`super::cwm::DIMS`]): 0 = 衝突の重みの倍率の対数 θ、1 = シグモイドの真ん中のずれ Δ、2 = 幅の対数のずれ κ。
