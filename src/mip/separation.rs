@@ -8330,7 +8330,7 @@ fn finish_cut(
     incumbent: Option<&[f64]>,
     scratch: &mut [f64],
 ) -> Option<Candidate> {
-    // 試作 `ENOMOTO_MIP_CMIRGEN` の診断の印 ([`super::cuts::HIGH_F0`]) を外し、行方を数える
+    // `ENOMOTO_MIP_CMIRGEN` の診断の印 ([`super::cuts::HIGH_F0`]) を外し、行方を数える
     if raw.kind & super::cuts::HIGH_F0 != 0 {
         use std::sync::atomic::Ordering::Relaxed;
         raw.kind &= !super::cuts::HIGH_F0;
@@ -8350,7 +8350,7 @@ fn finish_cut(
 }
 
 thread_local! {
-    /// [`finish_cut_impl`] が係数の幅 (1e6) で外したか (試作 `ENOMOTO_MIP_CMIRGEN` の診断)
+    /// [`finish_cut_impl`] が係数の幅 (1e6) で外したか (`ENOMOTO_MIP_CMIRGEN` の診断)
     static FINISH_DYN_REJ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// [`finish_cut_impl`] の係数の幅 (最大 / 最小、同じ診断)
     static FINISH_DYN: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };

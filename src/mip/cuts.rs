@@ -242,21 +242,31 @@ fn vb_tie_old() -> bool {
 
 const MIN_FRAC: f64 = 0.005;
 
-/// 試作 `ENOMOTO_MIP_CMIRGEN` (既定では使わない。analysis/cmirgen_20261122): CMIR の δ の選び方を SCIP 10.0 の
-/// `SCIPcutGenerationHeuristicCMIR` (cuts.c) 寄りにする。値の文字で選ぶ:
-/// - `f`: f0 (右辺 / δ の小数部) の上限を 1 − 0.005 から SCIP の maxfrac 0.999 にする (下限は今の 0.005 のまま)。係数 212・右辺 −1 の行 (mc11) は
-///   δ = 212 で f0 = 0.9953 になり、今は捨てているが、δ = 106 のカット (効き目 0.240) より強い (0.445)
-/// - `u`: f0 の決め打ちの上限を外す ([`max_frac`])
-/// - `d`: δ の候補を SCIP と同じにする: 境界の内側にある整数の項の係数をすべて (境界からの距離の大きい順)、係数を全部整数にする倍率 s からの
-///   1/s と 1/(s ⌊maxfrac / f⌋)、係数の最大 + 1、1。1/2・1/4・1/8 は最良の δ だけ
+/// `ENOMOTO_MIP_CMIRGEN` (analysis/cmirgen_20261122): CMIR の δ の選び方を SCIP 10.0 の `SCIPcutGenerationHeuristicCMIR` (cuts.c) と
+/// 並べて見つけた違いを切り替える。値の文字で選ぶ。**未設定なら `u` (2026-11-22 から既定、利用者の判断)、`=0` で以前の既定 (上限 0.995)**。
+/// - `u` (既定): f0 (右辺 / δ の小数部) の決め打ちの上限 (0.995) を外す ([`max_frac`])。9 問・種 1〜3 で 0.985 倍 (95% [0.903, 1.074])、
+///   `f` との比 1.002 (`f` は P 58 問 × 種 1〜3 で 1.004 [0.973, 1.035]、解けた 138 / 138)。上限を外して作るカットで `finish_cut` の係数の幅 (1e6)
+///   で外れたものは 9 問で 0
+/// - `f` (試作): 上限を SCIP の maxfrac 0.999 にする (下限は今の 0.005 のまま)。係数 212・右辺 −1 の行 (mc11) は δ = 212 で f0 = 0.9953 になり、
+///   以前は捨てていたが、δ = 106 のカット (効き目 0.240) より強い (0.445)
+/// - `d` (試作): δ の候補を SCIP と同じにする: 境界の内側にある整数の項の係数をすべて (境界からの距離の大きい順)、係数を全部整数にする倍率 s
+///   からの 1/s と 1/(s ⌊maxfrac / f⌋)、係数の最大 + 1、1。1/2・1/4・1/8 は最良の δ だけ (9 問で 1.084、nw04 が 1.69 倍遅く閉じた)
+///
+/// 明示した値 (`f`・`d` など) は書いた文字だけが効く (`u` を含めなければ上限は 0.995 か `f` の 0.999)
 fn cmirgen(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_str!("ENOMOTO_MIP_CMIRGEN").unwrap_or("").to_string()).contains(c)
+    V.get_or_init(|| match env_str!("ENOMOTO_MIP_CMIRGEN") {
+        None => "u".to_string(),
+        Some("0") => String::new(),
+        Some(v) => v.to_string(),
+    })
+    .contains(c)
 }
 
-/// f0 の上限 (試作 `ENOMOTO_MIP_CMIRGEN` の `f` で 0.999)。`u` (利用者の案、`f` より優先): 決め打ちの上限を外し、1 − f0 が既存の
-/// 可能性の許容誤差 ([`super::domain::FEASTOL`]、1e-6) 以下のもの (右辺 / δ がほぼ整数で、丸めの意味がない) だけを除く。数値的に不安定な
-/// カットは既存の [`super::separation`] の `finish_cut` の検査 (係数の幅 1e6・小さい係数の吸収・打ち消しの確かめ) に任せる
+/// f0 の上限。`u` (既定): 決め打ちの上限を外し、1 − f0 が既存の可能性の許容誤差 ([`super::domain::FEASTOL`]、1e-6) 以下のもの
+/// (右辺 / δ がほぼ整数で、丸めの意味がない) だけを除く。数値的に不安定なカットは既存の [`super::separation`] の `finish_cut` の検査
+/// (係数の幅 1e6・小さい係数の吸収・打ち消しの確かめ) に任せる (f0 が 1 に近い δ は連続列の係数とノルムが大きくなって効き目が下がるので、
+/// δ の選びでも自然に抑えられる)。`f` (試作) で 0.999、`ENOMOTO_MIP_CMIRGEN=0` で以前の 1 − 0.005
 fn max_frac() -> f64 {
     if cmirgen('u') {
         1.0 - super::domain::FEASTOL
@@ -267,7 +277,7 @@ fn max_frac() -> f64 {
     }
 }
 
-/// 試作 `ENOMOTO_MIP_CMIRGEN` の診断 (`ENOMOTO_MIP_LOG` で全体の最後に出す): 今の上限 (0.995) を超える f0 で作った CMIR の数と f0 の分布、
+/// `ENOMOTO_MIP_CMIRGEN` の診断 (`ENOMOTO_MIP_LOG` で全体の最後に出す): 今の上限 (0.995) を超える f0 で作った CMIR の数と f0 の分布、
 /// その `finish_cut` での行方。[0] 作った数、[1] f0 ∈ (0.995, 0.999]、[2] (0.999, 0.9999]、[3] (0.9999, 1)、[4] finish_cut に来た数、
 /// [5] 通った数、[6] 係数の幅 (1e6) で外れた数、[7] ほかの理由で外れた数、[8]〜[10] 通ったカットの係数の幅 (≤ 1e2、≤ 1e4、≤ 1e6)。カットの `kind` の上位ビット ([`HIGH_F0`]) で印をつける
 pub static HF0_STATS: [std::sync::atomic::AtomicU64; 11] = [const { std::sync::atomic::AtomicU64::new(0) }; 11];
@@ -933,7 +943,7 @@ fn cmir_terms_fast(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<RawCut
         return None;
     }
     let mut cut = RawCut { coefs, rhs: r, kind: 0 };
-    // 試作 `ENOMOTO_MIP_CMIRGEN` の診断: 今の上限 (0.995) を超える f0 のカットに印をつけて数える
+    // `ENOMOTO_MIP_CMIRGEN` の診断: 今の上限 (0.995) を超える f0 のカットに印をつけて数える
     if max_frac() > 1.0 - MIN_FRAC {
         let b = beta / delta;
         let f0 = b - b.floor();
