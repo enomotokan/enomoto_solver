@@ -1,0 +1,56 @@
+問題 種 スレッド | def: 状態 時間 最初の解(秒/値) 根の終わりの解 | rensdive: 同じ + LPBOX の受け入れ・出どころ
+30n20b8 1 1 | time_limit 60.0 -/- root - | time_limit 60.0 -/- root - | src {} last None
+30n20b8 1 4 | time_limit 60.0 6.29/453.000000 root 302.000000 | time_limit 60.0 6.83/453.000000 root 302.000000 | src {} last Local-MIP
+30n20b8 2 4 | time_limit 60.0 6.92/353.000000 root 302.000000 | time_limit 60.1 6.87/453.000000 root 302.000000 | src {} last Local-MIP
+30n20b8 3 4 | time_limit 60.0 7.03/453.000000 root 302.000000 | time_limit 60.0 7.02/453.000000 root 302.000000 | src {} last Local-MIP
+blp-ar98 1 4 | time_limit 60.1 5.45/7624.088494 root 6476.052026 | time_limit 60.1 5.58/7786.955998 root 6469.444533 | src {'RENSDIVE fractional diving': 1} last RENSDIVE fractional diving
+blp-ar98 2 4 | time_limit 60.1 5.52/7585.119070 root 6400.303486 | time_limit 60.1 5.31/7510.682192 root 6439.758352 | src {'RENSDIVE fractional diving': 1} last RENSDIVE fractional diving
+blp-ar98 3 4 | time_limit 60.0 5.44/7353.697445 root 6510.461554 | time_limit 60.0 5.40/7533.765286 root 6439.758352 | src {'RENSDIVE fractional diving': 1} last RENSDIVE fractional diving
+dcmulti 1 4 | optimal 1.1 0.11/197076.800000 root 188186.499990 | optimal 1.2 0.14/197076.800000 root 188186.499990 | src {'RENSDIVE coefficient diving': 1, 'RENSDIVE guided diving': 1} last tree
+dcmulti 2 4 | optimal 1.1 0.11/188684.600000 root 188186.499990 | optimal 1.2 0.11/188684.600000 root 188181.999990 | src {'RENSDIVE coefficient diving': 1} last RENS
+dcmulti 3 4 | optimal 1.2 0.10/195978.400000 root 188186.499990 | optimal 1.4 0.11/195978.400000 root 188181.999990 | src {'RENSDIVE fractional diving': 1, 'RENSDIVE coefficient diving': 1} last RENS
+drayage-100-23 1 4 | optimal 0.2 0.17/622880.427532 root - | optimal 0.2 0.17/622880.427532 root - | src {} last tree
+drayage-100-23 2 4 | optimal 0.2 0.17/103333.874073 root - | optimal 0.2 0.17/103333.874073 root - | src {} last tree
+drayage-100-23 3 4 | optimal 0.3 0.21/564794.983978 root - | optimal 0.3 0.17/564794.983978 root - | src {} last tree
+gen-ip054 1 4 | time_limit 60.0 0.05/7047.815868 root 6919.710111 | time_limit 60.0 0.03/15326.786004 root 6919.710111 | src {} last tree
+gen-ip054 2 4 | time_limit 60.0 0.02/7268.090850 root 6931.750996 | time_limit 60.0 0.03/7268.090850 root 6931.750996 | src {} last other thread: tree rounding
+gen-ip054 3 4 | time_limit 60.0 0.11/7047.815868 root 6931.750996 | time_limit 60.0 0.01/7617.749060 root 6914.741517 | src {'RENSDIVE fractional diving': 1} last other thread: tree randomized rounding
+hypothyroid-k1 1 1 | optimal 1.0 0.99/-2050.000000 root - | optimal 0.9 0.93/-2050.000000 root - | src {} last tree
+hypothyroid-k1 1 4 | optimal 0.9 0.85/-2851.000000 root - | optimal 1.0 0.97/-2851.000000 root - | src {} last tree
+hypothyroid-k1 2 4 | optimal 1.0 0.98/-2851.000000 root - | optimal 1.0 1.03/-2851.000000 root - | src {} last tree
+hypothyroid-k1 3 4 | optimal 1.0 0.96/-2851.000000 root - | optimal 1.0 0.96/-2851.000000 root - | src {} last tree
+mas76 1 4 | optimal 9.1 0.14/47535.141690 root 40005.054142 | optimal 9.4 0.02/102510.843988 root 40005.054142 | src {'RENSDIVE fractional diving': 1, 'RENSDIVE coefficient diving': 1, 'RENSDIVE vector length diving': 1, 'RENSDIVE guided diving': 1} last tree
+mas76 2 4 | optimal 9.1 0.12/48566.141700 root 40005.054142 | optimal 11.0 0.12/48566.141700 root 40005.054142 | src {'RENSDIVE fractional diving': 1, 'RENSDIVE coefficient diving': 1, 'RENSDIVE vector length diving': 1} last tree
+mas76 3 4 | optimal 6.4 0.12/48566.141700 root 40005.054142 | optimal 7.4 0.11/48566.141700 root 40005.054142 | src {'RENSDIVE coefficient diving': 1, 'RENSDIVE vector length diving': 1} last tree
+mik-250-20-75-4 1 1 | optimal 12.2 0.04/0.000000 root -52287.000000 | optimal 9.8 0.05/0.000000 root -52301.000000 | src {} last RENS
+mik-250-20-75-4 1 4 | optimal 3.1 0.06/0.000000 root -52301.000000 | optimal 2.8 0.04/0.000000 root -52301.000000 | src {'RENSDIVE coefficient diving': 1, 'RENSDIVE vector length diving': 1, 'RENSDIVE guided diving': 1} last tree
+mik-250-20-75-4 2 4 | optimal 2.7 0.05/0.000000 root -52301.000000 | optimal 2.7 0.05/0.000000 root -52287.000000 | src {'RENSDIVE fractional diving': 1} last tree RINS
+mik-250-20-75-4 3 4 | optimal 2.0 0.03/0.000000 root -52301.000000 | optimal 2.0 0.03/0.000000 root -52301.000000 | src {'RENSDIVE coefficient diving': 1, 'RENSDIVE vector length diving': 1, 'RENSDIVE guided diving': 1} last tree
+mzzv42z 1 4 | optimal 57.6 10.59/0.000000 root - | time_limit 60.0 10.99/0.000000 root - | src {} last RENS
+mzzv42z 2 4 | time_limit 60.0 11.05/0.000000 root - | time_limit 60.0 10.45/0.000000 root - | src {} last RENS
+mzzv42z 3 4 | time_limit 60.0 10.92/0.000000 root - | time_limit 60.1 10.85/0.000000 root - | src {} last RINS
+neos-1456979 1 1 | time_limit 60.0 15.75/456.000000 root 456.000000 | time_limit 60.0 16.56/456.000000 root 456.000000 | src {} last robust FJ
+neos-1456979 1 4 | time_limit 60.0 2.41/510.000000 root 386.000000 | time_limit 60.0 1.72/432.000000 root 338.000000 | src {} last other thread (tree)
+neos-1456979 2 4 | time_limit 60.0 16.08/349.000000 root 349.000000 | time_limit 60.0 1.83/415.000000 root 415.000000 | src {} last other thread (tree)
+neos-1456979 3 4 | time_limit 60.0 16.29/310.000000 root 310.000000 | time_limit 60.0 16.82/310.000000 root 310.000000 | src {} last other thread: tree local branching
+neos-860300 1 4 | optimal 16.2 5.45/3445.000000 root 3201.000000 | optimal 15.3 5.35/3445.000000 root 3201.000000 | src {'RENSDIVE fractional diving': 1} last tree
+neos-860300 2 4 | optimal 16.2 5.80/3445.000000 root 3201.000000 | optimal 15.9 5.18/8467.000000 root 3201.000000 | src {'RENSDIVE fractional diving': 1} last tree
+neos-860300 3 4 | optimal 14.9 5.04/3445.000000 root 3201.000000 | optimal 15.8 5.23/3445.000000 root 3201.000000 | src {} last tree
+nw04 1 4 | optimal 14.2 8.82/34970.000000 root - | optimal 15.0 9.49/34970.000000 root - | src {} last tree
+nw04 2 4 | optimal 14.9 9.48/34970.000000 root - | optimal 15.4 9.84/34970.000000 root - | src {} last tree
+nw04 3 4 | optimal 14.2 8.87/34970.000000 root - | optimal 15.0 9.55/34970.000000 root - | src {} last tree
+physiciansched6-2 1 4 | optimal 48.7 10.75/50124.000000 root 50124.000000 | optimal 24.9 9.60/50024.000000 root 49324.000000 | src {} last RENS
+physiciansched6-2 2 4 | optimal 29.6 8.17/50625.000000 root 49324.000000 | optimal 26.0 7.98/51727.000000 root 49324.000000 | src {} last RENS
+physiciansched6-2 3 4 | optimal 24.7 8.41/50124.000000 root 49324.000000 | optimal 25.9 8.46/49924.000000 root 49324.000000 | src {} last RENS
+roll3000 1 1 | optimal 53.6 4.40/13515.000000 root 13515.000000 | optimal 42.2 4.75/13515.000000 root 13148.000000 | src {} last tree rounding
+roll3000 1 4 | optimal 26.4 1.31/19115.000000 root 13107.000000 | optimal 28.5 3.39/15118.000000 root 13262.000000 | src {} last other thread: tree randomized rounding
+roll3000 2 4 | optimal 28.8 3.82/14670.999999 root 14670.999999 | optimal 33.5 4.41/14670.999999 root 12965.000000 | src {} last other thread: tree rounding
+roll3000 3 4 | optimal 29.4 1.01/18345.000000 root 13229.000000 | optimal 30.3 1.82/17982.000000 root 13203.000000 | src {'RENSDIVE guided diving': 1} last tree rounding
+timtab1 1 1 | optimal 57.6 2.67/983511.000000 root 856963.000000 | optimal 56.5 3.09/931709.000000 root - | src {'RENSDIVE guided diving': 1} last tree rounding
+timtab1 1 4 | optimal 16.7 0.26/1010456.000000 root - | optimal 22.7 0.25/1010456.000000 root 859470.000000 | src {} last other thread: tree rounding
+timtab1 2 4 | optimal 15.4 0.24/1143748.000000 root - | optimal 23.0 0.24/1143748.000000 root 835257.000000 | src {} last other thread: tree rounding
+timtab1 3 4 | optimal 15.3 0.25/1175543.000000 root 898283.000000 | optimal 26.0 0.25/1175543.000000 root 877451.000000 | src {} last other thread: tree rounding
+
+解けた数 def 35 rensdive 34 / 51
+SGM (ずらし 1 秒、時間切れは上限) def 15.32 rensdive 15.58 比 1.016
+最初の解の時間の SGM def 2.46 rensdive 2.41
