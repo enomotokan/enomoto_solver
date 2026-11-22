@@ -1,5 +1,5 @@
 """根のラウンドの得・損の診断 (ENOMOTO_MIP_CUTSTOP_LOG=1 の CUTTK・TREETK の行) を 1 スレッド・種 1 で集める。
-設定は def と long (analysis/rootstop_20261121/cfg.py の LONG)、mc11 は CMIRGEN=u (cmu・cmu_long) も。上限は P の問題 120 秒、swath1・beasleyC3 も 120 秒。
+設定は def と long (analysis/rootstop_20261121/cfg.py の LONG)、mc11 は CMIRGEN=u (cmu・cmu_long) も。上限はどれも 120 秒。
 python diag.py → diag.jsonl (結果) と logs/<問題>_<設定>.log"""
 import json, os, subprocess, sys
 from pathlib import Path
@@ -12,6 +12,10 @@ GOOD = ["noswot", "10teams", "qiu", "eil33-2", "neos8", "swath1", "beasleyC3"]
 CF = {"def": {}, "long": LONG}
 RUNS = [(p, c) for p in BAD + GOOD for c in CF] + [("mc11", "cmu"), ("mc11", "cmu_long")]
 CF["cmu"] = {"ENOMOTO_MIP_CMIRGEN": "u"}; CF["cmu_long"] = {**LONG, "ENOMOTO_MIP_CMIRGEN": "u"}
+# 停滞の判定 (相対 1e-4・+2・10) の側 (親の参考情報、rootcutoff_20261121 7 節): stall30 = ENOMOTO_T_MIP_CUT_STALL=30。swath1 は得、
+# h80x6320d・neos-911970・neos-1582420 は RSTLOOP=n で遅かった
+CF["stall30"] = {"ENOMOTO_T_MIP_CUT_STALL": "30"}
+RUNS += [(p, c) for p in ("swath1", "h80x6320d", "neos-911970", "neos-1582420") for c in ("def", "stall30") if (p, c) not in RUNS]
 OUT = D / "diag.jsonl"
 done = {(r["problem"], r["cfg"]) for r in map(json.loads, OUT.open())} if OUT.exists() else set()
 for p, c in RUNS:
