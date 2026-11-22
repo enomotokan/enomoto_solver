@@ -236,6 +236,11 @@ fn gen_type() -> bool {
 /// 最良 1 本だけでなく、その中で最良の質の `ENOMOTO_T_CUTSEL_MIN_REL` (既定 0.5、全体の選択 `select_cuts_hybrid` の質の下限と同じ値) 倍以上の
 /// ものから良い順に最大 `ENOMOTO_T_MIP_GEN_TOP3_N` (既定 3) 本残す。平行度・本数は全体の選択に任せる。`ENOMOTO_MIP_GEN_TYPE` より優先。
 /// `ENOMOTO_MIP_GEN_TOP3_LOG` で集約行ごとの候補の数と下限以上の数を `GENTOP3 n above` と出す (診断)
+/// 試作 `ENOMOTO_MIP_AGGRSEL` ([`Solver::path_aggregation_highs`] の相手の行を SCIP の点数で選ぶ、analysis/aggrsel_20261121)
+fn aggrsel() -> bool {
+    env_str!("ENOMOTO_MIP_AGGRSEL").is_some()
+}
+
 fn gen_top3() -> bool {
     env_str!("ENOMOTO_MIP_GEN_TOP3").is_some()
 }
@@ -5416,6 +5421,44 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let feastol = PATHH_FEASTOL;
         let bound_dist = |j: usize| -> f64 { pathh_bound_dist(vars, j) };
         let (rtype, cont, col_rows, subst) = pathh_row_types(vars, lp_rows, n);
+        // 試作 `ENOMOTO_MIP_AGGRSEL` (既定では使わない。analysis/aggrsel_20261121): 消す連続変数の相手の行を、乱数の位置から最初に
+        // 使えるものでなく、SCIP の sepa_aggregation.c の行の点数 (|双対値| × 分数の活動量 / 行のノルム) が最も高いものにする。
+        // 分数の活動量 = Σ |a_ij| × min(f_j, 1 − f_j) (整数列)、連続列は効いている変数上界・下界の相手の整数列の分数 × 係数 (SCIP と同じ)。
+        // SCIP の点数の密度・すき間の小さな項 (densityscore 1e-4・slackscore 1e-3) は入れない (新しい閾値を置かない)。同点は行の番号の小さい方
+        let rscore: Option<Vec<f64>> = aggrsel().then(|| {
+            let duals = self.lp.row_duals();
+            let frac = |v: f64| {
+                let f = v - v.floor();
+                f.min(1.0 - f).max(0.0)
+            };
+            let fj: Vec<f64> = (0..n)
+                .map(|j| {
+                    if vars.is_int[j] {
+                        return frac(vars.x[j]);
+                    }
+                    let mut f = 0.0;
+                    if let Some(vb) = vars.vb {
+                        for &(y, a, e) in &vb.vub[j] {
+                            if (a * vars.x[y] + e - vars.x[j]).abs() <= feastol {
+                                f += a.abs() * frac(vars.x[y]);
+                            }
+                        }
+                        for &(y, a, e) in &vb.vlb[j] {
+                            if (vars.x[j] - a * vars.x[y] - e).abs() <= feastol {
+                                f += a.abs() * frac(vars.x[y]);
+                            }
+                        }
+                    }
+                    f
+                })
+                .collect();
+            (0..m)
+                .map(|i| {
+                    let (fa, nr) = lp_rows[i].iter().fold((0.0, 0.0), |(fa, nr), &(j, a)| (fa + (a * fj[j]).abs(), nr + a * a));
+                    duals.get(i).map_or(0.0, |d| d.abs()) * fa / nr.sqrt().max(0.1)
+                })
+                .collect()
+        });
         // 連続変数ごとの入る行・出る行
         let mut in_arcs: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
         let mut out_arcs: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
@@ -5622,6 +5665,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let find_row = |j: usize, v: f64, arcs: &Vec<(usize, f64)>, s: &mut Self, path: &Vec<usize>| -> Option<(usize, f64)> {
                         if arcs.is_empty() {
                             return None;
+                        }
+                        if let Some(rs) = rscore.as_ref() {
+                            let mut best: Option<(usize, f64, f64)> = None;
+                            for &(r, a) in arcs {
+                                let w = -v / a;
+                                if !in_path(r, path) && w.abs() <= 1.0 / feastol && w.abs() >= feastol && best.is_none_or(|b| rs[r] > b.2) {
+                                    best = Some((r, w, rs[r]));
+                                }
+                            }
+                            let _ = j;
+                            return best.map(|b| (b.0, b.1));
                         }
                         let k0 = ((s.rand() * arcs.len() as f64) as usize).min(arcs.len() - 1);
                         for t in 0..arcs.len() {
