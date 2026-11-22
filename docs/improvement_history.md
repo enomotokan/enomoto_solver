@@ -11161,7 +11161,7 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
   - 1 スレッドで misc07・neos-911970・brazil3 が、変更前 + `ENOMOTO_MIP_ORBPP=cond` と新しい既定で一致した (ノード・目的値・判断の行。brazil3 は時間切れなのでノードは除く)。
   - cargo test・fuzz (mip_fuzz_symmetric 600・fuzz_tiny 400・mip_fuzz_vs_highs 300) は bad 0 (analysis/orbpp_20261121/checks/)。
 
-## 2026-11-22: CMIR の f0 (右辺 / δ の小数部) の決め打ちの上限を外す ENOMOTO_MIP_CMIRGEN=u を既定にする (採用、P の確かめは計測中)
+## 2026-11-22: CMIR の f0 (右辺 / δ の小数部) の決め打ちの上限を外す ENOMOTO_MIP_CMIRGEN=u を既定にする (採用)
 
 - 既定にした: `ENOMOTO_MIP_CMIRGEN` の未設定 (`=u`)。
   - CMIR (src/mip/cuts.rs の `cmir_terms_fast`・`mir_efficacy`) は、δ ごとに f0 = 右辺 / δ − ⌊右辺 / δ⌋ を見る。以前は f0 > 1 − 0.005 の δ を捨てていた。
@@ -11181,8 +11181,9 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
   |---|---|---|---|
   | 9 問 (neos-1582420・mc11・p200x1188c・beasleyC3・neos-911970・exp-1-500-5-5・timtab1・qiu・nw04) | 種 1〜3 | u/def 0.985 (0.903〜1.074)、u/f 1.002 (0.958〜1.049) | def 27 / u 26 (neos-1582420 種 1 は最適値 91 で証明が時間切れ) |
   | P (`f`、0.999 の形) | 58 問 × 種 1〜3 | f/def 1.004 (0.973〜1.035) | 138 / 138 |
-  | P (`u`、新しい既定対 `=0`) | 58 問 × 種 1〜3 | 計測中 (analysis/cmirgen_20261122/shards_P2.json) | |
+  | P (`u`、新しい既定対 `=0`) | 58 問 × 種 1〜3 | def/old 0.995 (0.976〜1.014)、全回で 1.25 倍超の遅れなし | old 138 / def 139 |
 
+  - P の def/old (問題ごと): noswot 0.84・p200x1188c 0.86・pk1 0.89・timtab1 0.90 が良い。10teams 1.50 (種 3 だけ、根は同じで解探しの揺れ)・mc11 1.20 が悪い。
   - 9 問の u/def: p200x1188c 0.82・neos-911970 0.87・neos-1582420 0.90 が良い。mc11 1.28 が悪い (根のループが 25 巡で止まり、第 2 段階に入らなくなる)。
   - 診断 (根だけ・1 スレッド、9 問): 上限を外して作るカットは次のとおり。
     - 新たに f0 > 0.999 で選ばれる δ は少ない (p200x1188c 329、exp-1-500-5-5 46、mc11 35、beasleyC3 28、nw04 5)。
@@ -11193,3 +11194,15 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
   - fuzz 11 本 (fuzz_tiny 400 × 3 種・HiGHS との比べ 300 × 2・objint 1000 × 3・slack 1000 × 3) は、新しい既定で bad 0・mismatches 0。
   - 1 スレッドで mc11・p200x1188c・neos-1582420 の根だけ (NODE_LIMIT=1) が、変更前 (同じ HEAD) + `ENOMOTO_MIP_CMIRGEN=u` と新しい既定とで一致した。根の下界・ラウンド数・ノード・暫定解のすべて (analysis/cmirgen_20261122/adopt/)。
 - 診断の出力: `ENOMOTO_MIP_LOG` で、最後に `MIP: CMIRGEN high f0 (> 0.995) CMIR cuts` の行が出る (以前なら捨てていた f0 のカットの数・f0 の分布・`finish_cut` での行方・係数の幅)。
+
+## 2026-11-22: 前処理の整数への丸めの余裕を許容誤差 (1e-6) に揃える ENOMOTO_MIP_FZ2_FIX を既定にする (採用)
+- 中身 (src/mip/mod.rs の `fz2_fix`):
+  - `n`: 整数行の正規化 (`normalize_integer_rows`、係数の最大公約数で割って右辺を丸める) の丸めの余裕を 1e-9 から 1e-6 に。
+  - `m`: 併合した整数列の上限の丸めの余裕を 1e-9 から 1e-6 に。
+  - 1e-9 だと、右辺 `1 − 2e-9` が 0 に切り下がり、許容誤差の内で実行可能な点を厳密に切っていた (他の整数の丸めと不揃い)。
+- 戻し方: `ENOMOTO_MIP_FZ2_FIX=0`。明示した値 `1` は全部、文字の並び (`n`・`m`) はその部分だけ。
+- 経緯: 2026-11-03 に fuzz_tiny の悪い最適の直しとして作り (analysis/fuzz_tiny_worse_20261103.md、悪い最適 5 → 0)、「MIPLIB で前処理の結果が変わるかを見てから」で止まっていた。
+  見送った試作の洗い出し (analysis/shelved_20261122/README.md) で「正しさの直しで中立」の候補として測り直した。
+- 根拠 (P、58 問 × 種 1〜3、4 スレッド・60 秒、ビルド 25562ff71): fz2/def 1.003 (0.985〜1.021)、解けた数 138 / 138、全回で 1.25 倍超の遅れなし、最適値の食い違い 0。
+  - Mittelmann は効く問題が少ない見込みで計測しなかった。
+- 確かめ: cargo test 419 通過 (既定)。fuzz 7 本 (analysis/shelved_20261122/adopt/fuzz.sh) は bad 0・mismatches 0 (fuzz_tiny の strict は種 0 で 9、種 1000 で 12、出力は fuzz_out.txt)。
