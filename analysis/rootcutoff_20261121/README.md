@@ -245,6 +245,15 @@ SCIP 10.0.2 のソース (prop_redcost.c・prop_rootredcost.c、github の scipo
 - 試作は作っていない。対称性の表と pseudocost を詰めた番号へ写す形は手間が大きい。nw04 のように列の大部分が固定される大きな問題でなければ効きが見込めない
   (neos-911970 は 888 列)。
 
-## 10. 続き 1〜3 の確かめ
+## 10. 続き 1〜3 の確かめと判断
 
-(fuzz と cargo test の結果をここに書く)
+- `bash analysis/rootcutoff_20261121/fuzz2.sh`: rootgap の 7 本を `ENOMOTO_MIP_RSTLOOP=n` + `ENOMOTO_MIP_TREE4_RCUNION=1` + `ENOMOTO_MIP_RCSTRONG_KROOT=1` で回した。
+  結果は tiny 0/400、highs 0/300、objint 0/1000、slack の食い違い 0、tiny2 0/400、objint2 0/1000、slack2 の食い違い 0。
+- cargo test (`--release --lib`、既定): 419 passed、0 failed、19 ignored。
+- 判断: どれも既定にしない。P の分担表は作っていない。
+  - RSTLOOP n は通しで def 比 1.101。
+  - k (RCUNION + KROOT) は通しで 1.072。
+  - DROP_FIXED の広げは、効くのが手間だけと分かったので試作していない。
+- 分かったこと:
+  - swath1 の根の差は、停滞で 5 ラウンドで止める規則で説明できる (上限 30 で 342.90、SCIP 342.51)。ただし、ループを長く回すと全体では損になる問題の方が多い。
+  - neos-911970 の SCIP の 1 回の根の中の +2.4 は、連続列の締めでも列ごとの最良の被約費用でもない。元は未特定。

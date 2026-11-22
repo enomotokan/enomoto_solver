@@ -1,6 +1,6 @@
 #!/bin/bash
-# 試作 ENOMOTO_MIP_RSTLOOP=n ENOMOTO_MIP_TREE4_RCUNION=1 ENOMOTO_MIP_RCSTRONG_KROOT=1 の誤答の確かめ。analysis/rootgap_20261121/fuzz.sh と同じ 7 本を RCLOOP=fr で回し、cargo test を既定で回す。
-# リポジトリの根から: bash analysis/rootcutoff_20261121/fuzz.sh   ログは analysis/rootcutoff_20261121/fuzz2_logs/ (コミットしない)。
+# 試作 ENOMOTO_MIP_RSTLOOP=n ENOMOTO_MIP_TREE4_RCUNION=1 ENOMOTO_MIP_RCSTRONG_KROOT=1 の誤答の確かめ。analysis/rootgap_20261121/fuzz.sh と同じ 7 本をその組で回し、cargo test を既定で回す。
+# リポジトリの根から: bash analysis/rootcutoff_20261121/fuzz2.sh   ログは analysis/rootcutoff_20261121/fuzz2_logs/ (コミットしない)。
 set -u
 cd "$(dirname "$0")/../.."
 L=analysis/rootcutoff_20261121/fuzz2_logs; mkdir -p $L
