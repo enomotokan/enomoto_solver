@@ -9,15 +9,20 @@ D = Path(__file__).resolve().parent
 WT = D.parents[1]
 sys.path.insert(0, str(WT / "scripts"))
 import run_miplib_benchmark as rb  # noqa: E402
-CFGS = {"def": {}, "g1e-3": {"ENOMOTO_MIP_STALL_GAIN": "1e-3"}, "g1e-2": {"ENOMOTO_MIP_STALL_GAIN": "1e-2"}, "g3e-2": {"ENOMOTO_MIP_STALL_GAIN": "3e-2"}}
+CFGS = {"def": {}, "g1e-3": {"ENOMOTO_MIP_STALL_GAIN": "1e-3"}, "g1e-2": {"ENOMOTO_MIP_STALL_GAIN": "1e-2"}, "g3e-2": {"ENOMOTO_MIP_STALL_GAIN": "3e-2"},
+        "w1e-2": {"ENOMOTO_MIP_STALL_GAIN": "1e-2w"}, "w3e-2": {"ENOMOTO_MIP_STALL_GAIN": "3e-2w"}}
+# 2 回目 (窓つき、3 節): `GS_RUN=2` で設定を def・g3e-2・w1e-2・w3e-2 に、問題に neos-827175・graph20-20-1rand を足し、res_<MODE>2.jsonl に
+RUN2 = os.environ.get("GS_RUN") == "2"
+if RUN2: CFGS = {k: CFGS[k] for k in ("def", "g3e-2", "w1e-2", "w3e-2")}
 # cutstop・fracstall の 10 問と、根の下界の絶対値が 1 未満の問題 (P・M の def の root_bound から)
 PROBS = ["swath1", "beasleyC3", "mik-250-20-75-4", "timtab1", "mc11", "roll3000", "neos17", "neos-911970", "neos-1582420", "h80x6320d",
          "neos-5188808-nattai", "neos-5195221-niemur", "markshare_4_0", "pk1", "mad", "ns1208400"]
+if RUN2: PROBS += ["neos-827175", "graph20-20-1rand"]
 TL = 120
 modes = sys.argv[1:] or ["root", "full"]
 (D / "logs").mkdir(exist_ok=True)
 for mode in modes:
-    out = D / f"res_{mode}.jsonl"
+    out = D / f"res_{mode}{'2' if RUN2 else ''}.jsonl"
     done = set()
     if out.exists():
         for l in out.read_text().splitlines():
@@ -36,7 +41,7 @@ for mode in modes:
             log = pr.stderr
             try: res = json.loads([l for l in pr.stdout.splitlines() if l.startswith("{")][-1])
             except Exception: res = {"status": "crash", "returncode": pr.returncode}  # noqa: BLE001
-            with gzip.open(D / "logs" / f"{p}_{cfg}_{mode}.log.gz", "wt") as f: f.write(log + "\n" + pr.stdout)
+            with gzip.open(D / "logs" / f"{p}_{cfg}_{mode}{'2' if RUN2 else ''}.log.gz", "wt") as f: f.write(log + "\n" + pr.stdout)
             cs = [json.loads(m) for m in re.findall(r"^CUTSTOP (\{.*\})$", log, re.M)]
             first = next((c for c in cs if c.get("restarts") == 0 and not c.get("bg")), None)
             row = {"problem": p, "cfg": cfg, "mode": mode, "result": res, "wall": round(time.time() - t0, 1), "cutstop_first": first, "cutstop_all": cs,
