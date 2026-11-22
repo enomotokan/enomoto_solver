@@ -1,6 +1,6 @@
 """rootpar: 根 (前処理〜木に入るまで) の時間の内訳と、段ごとに実際に動いているスレッドの数。python run.py PLAN (例 plan.json、記録済みは飛ばす)。
 計画の 1 項目は [問題, 種, スレッド数]。ENOMOTO_MIP_LOG=1 で解き (既定の動きは変えない)、stderr の行を受け取った時刻 (起動からの壁の秒) つきで読み、
-/proc/PID/task/*/stat を 0.2 秒ごとに見て、段ごとのスレッドの CPU 秒を出す。res.jsonl に 1 回 1 行。
+/proc/PID/task/*/stat を 0.2 秒ごとに見て、段ごとの CPU 秒を出す (プロセス全体の CPU 秒の差。終わったスレッドの分も入る。スレッドごとの差は最も多い 1 本と、区間の半分以上動いた本数にだけ使う)。res.jsonl に 1 回 1 行。
 段の区切り (印の行、求解ごと = 再スタートごとに繰り返す):
   pre  : 求解の始め (起動 / 前の求解の `MIP: restart`) 〜 `MIP: solving the root LP`  (外側の前処理・この求解の前処理・プロービング・対称性・FJ の起動など)
   lp   : 〜 `MIP: root LP <値> (` (根の LP)
@@ -25,7 +25,13 @@ M_HEUR = re.compile(r"^MIP: after root heuristics")
 M_TREE = re.compile(r"^TRSTAT: tree start")
 M_RH = re.compile(r"^MIP: root heuristic (.+?): (\S+).*\(([0-9.]+)s\)$")
 def cpu_snap(pid):
+    """スレッドごとの CPU 秒と、"__proc__" にプロセス全体 (終わったスレッドの分も含む、/proc/PID/stat) の CPU 秒"""
     out = {}
+    try:
+        s = open(f"/proc/{pid}/stat").read(); f = s[s.rindex(")") + 2:].split()
+        out["__proc__"] = (int(f[11]) + int(f[12])) / TICK
+    except (OSError, ValueError):
+        return {}
     try:
         for t in os.listdir(f"/proc/{pid}/task"):
             try:
@@ -48,7 +54,9 @@ def one(p, seed, th):
     th_ = threading.Thread(target=rd, daemon=True); th_.start()
     snaps = []
     while pr.poll() is None:
-        snaps.append((time.time() - t0, cpu_snap(pr.pid))); time.sleep(0.2)
+        sn = cpu_snap(pr.pid)
+        if sn: snaps.append((time.time() - t0, sn))  # 終わりかけで読めなかった回は捨てる
+        time.sleep(0.2)
         if time.time() - t0 > TL + 300: pr.kill()
     wall = time.time() - t0
     th_.join(5)
@@ -87,9 +95,10 @@ def one(p, seed, th):
     phases = {}
     for name, a, b in ivs:
         ca, cb = at(a), at(b)
-        d = sorted((cb.get(k, 0) - ca.get(k, 0) for k in cb), reverse=True)
+        d = sorted((cb.get(k, 0) - ca.get(k, 0) for k in cb if k != "__proc__"), reverse=True)
         ph = phases.setdefault(name, {"secs": 0.0, "cpu": 0.0, "cpu_top": 0.0, "busy_threads_secs": 0.0})
-        ph["secs"] += b - a; ph["cpu"] += sum(d); ph["cpu_top"] += d[0] if d else 0.0
+        # cpu はプロセス全体の差 (区間の中で始まって終わったスレッドの分も入る)。cpu_top・busy は区間の両端で生きていたスレッドだけ
+        ph["secs"] += b - a; ph["cpu"] += cb.get("__proc__", 0) - ca.get("__proc__", 0); ph["cpu_top"] += d[0] if d else 0.0
         ph["busy_threads_secs"] += sum(1 for x in d if x > 0.5 * (b - a)) * (b - a)  # 区間の半分以上動いたスレッドの数 × 秒
     for ph in phases.values():
         for k in ph: ph[k] = round(ph[k], 3)
