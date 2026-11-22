@@ -11,6 +11,10 @@
   経路集約 (path・path_highs) と、その出発行からの cmir の材料になる。tableau 行・mcf・hnfcut は元の行だけを見る。
 - 診断 `ENOMOTO_MIP_OBJSTEPCUT_LOG=1`: 分離のたびに `OBJSTEP g … zk … lk …`。
 
+> **2026-11-22 利用者の判断で閉じた。** P は中立 (1.010 [0.992, 1.028]、解けた 138 → 140)、M も中立 (0.997 [0.967, 1.029]、解けた 96 → 95)。
+> a・b とも既定にしない。コードは既定オフのまま残す (`ENOMOTO_MIP_OBJSTEPCUT`)。
+> 30n20b8 の暫定解の悪化は副作用と確かめた: 根が短くなり、根の間だけ回る Local-MIP の時間が減る (P の節)。
+
 ## 結論 (先に)
 
 - **a は根の下界を下げる問題が多く、採らない。** 根だけの比べ (1 スレッド、刻みの行を作った 24 問) で見た。
@@ -53,6 +57,27 @@
   根だけの比べで b が何もしなかった問題 (z がすでに刻みの上、または刻みの行を作らない) で、4 スレッドの揺れ。
 - 判断の案: 全体は中立 (区間が 1 をまたぐ)。効くのは刻みのある少数の問題 (mzzv42z の解けた +2、30n20b8 の下界)。
   30n20b8 の暫定解の悪化 (3 種とも) は気になる。既定にするなら M で確かめてから。a は採らない。
+
+## M の通し (b、12 分担を別の子が回した。ビルド 3ff8ed729、4 スレッド・600 秒・種 1)
+
+- **`python wide/ci.py 600 def osb wide/res_M_s*.jsonl`: 186 問、ずらし幾何平均の比 0.997 (95% [0.967, 1.029])、解けた def 96 / osb 95** (`wide/ci_M.txt`)。
+  crash 0、最適値の食い違い 0 (各分担の報告)。
+- 解けた数の入れ替わり:
+  - osb が落とした: tbfp-network (def 323 秒)、peg-solitaire-a3 (def 566 秒)、supportcase40 (def 568 秒)。
+  - osb が得た: graphdraw-domain (247.5 秒)、csched007 (518.8 秒)。
+- 種 1 だけの比べで、1.25 倍超遅れた 14 問: fiball 5.75、mzzv11 2.22、tbfp-network 1.86、gen-ip054 1.60、30n20b8 1.54、mas74 1.54、
+  neos-1582420 1.69、pg5_34 1.44、beasleyC3 1.43、neos-933966 1.41、traininstance6 1.34、neos5 1.28、p200x1188c、neos-787933。
+  - b が働く問題かは `acts.py` → `acts_M.txt` で確かめた (下に追記)。
+  - 働かない問題 (目的に刻みがない) の差は、既定と同じ計算の揺れ。
+  - 確かめの結果 (`acts_M.txt`、1 スレッドで最初の分離まで):
+    - b が働く (刻みの行を作る): mzzv11・neos-1582420・p200x1188c・30n20b8・beasleyC3・traininstance6・peg-solitaire-a3・mzzv42z。
+      このうち遅れ・落としは mzzv11 (2.22)・neos-1582420 (1.69)・30n20b8 (1.54)・beasleyC3 (1.43)・traininstance6 (1.34)・peg-solitaire-a3 (落とし)。
+      traininstance6 は zk 0・lk 0 で行が LP 解を切らない (材料が 1 本増えるだけ)。
+    - 働かない (既定と同じ計算、揺れ): fiball (5.75)・tbfp-network (落とし)・gen-ip054・mas74・pg5_34・neos5・neos-933966・supportcase40 (落とし)・
+      csched007・graphdraw-domain (得た 2 問)。neos-787933 は 0.3 秒で解けて分離に届かない。
+    - つまり、大きな遅れのうち fiball・tbfp-network は揺れ。b が働く問題では、遅れ (mzzv11・neos-1582420・30n20b8・beasleyC3) と
+      速まり (mzzv42z、および b が働く chromaticindex512-7 462 → 228 秒・fast0507 353 → 218 秒・CMS750_4 167 → 100 秒) が混じる。
+- 速くなった側: chromaticindex512-7 462 → 228 秒、fast0507 353 → 218 秒、CMS750_4 167 → 100 秒、physiciansched6-2 104 → 25 秒。
 
 ## 表 (根だけ、1 スレッド・種 1・`ENOMOTO_MIP_NODE_LIMIT=1`、`summ.py` → `root.txt`)
 
