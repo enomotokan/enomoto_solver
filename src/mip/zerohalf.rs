@@ -53,13 +53,14 @@ pub(crate) fn with_zh_deadline<R>(deadline: Option<std::time::Instant>, f: impl 
     r
 }
 
-/// `ENOMOTO_MIP_OVERRUN3` (試作、既定では使わない。analysis/mittelmann_ready_20261103/overrun.md): 時間の上限の超過を減らす直しを文字で選ぶ。
+/// `ENOMOTO_MIP_OVERRUN3` (既定 `ild`、2026-11-22 から。`=0` で使わない、文字を明示すればその文字だけ。analysis/mittelmann_ready_20261103/overrun.md・
+/// analysis/shelved_20261122): 時間の上限の超過を減らす直しを文字で選ぶ。
 /// `z`: zerohalf の分離が期限を見る ([`with_zh_deadline`])。`i`: 期限を過ぎた後に受け取った解の twoopt などをしない (`o` は oneopt も)。
 /// `l`: 双対単体法の破綻の後の解き直しを期限の後にしない。`h`: 根の局所探索の時間の枠を期限までの残りで頭打ちにする。
 /// `d`: 求解の後の木の待ち行列の片付けを裏のスレッドに回す。`r`: 期限の直前 (残りが max(1 秒, 根の LP の 2 倍) 未満) には再スタートしない。
 /// `t`: 解の受け取りの各手順の時間をログに出す (診断用)
 pub(crate) fn overrun3(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_OVERRUN3").is_some_and(|v| v.contains(c))
+    env_def!("ENOMOTO_MIP_OVERRUN3", "ild").is_some_and(|v| v.contains(c))
 }
 
 /// zerohalf の分離が求解の期限・止めの合図を見るか (`ENOMOTO_MIP_ZH_DEADLINE`、既定 1、`=0` で以前の形 = `ENOMOTO_MIP_OVERRUN3` の `z` の

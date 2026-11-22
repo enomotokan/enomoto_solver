@@ -826,7 +826,7 @@ fn set_cleanup_hint(nb_status: &[Option<NbStatus>], which: u8) {
     super::slope_intercept_dual::set_warm_nb(Some(hint));
 }
 
-/// 試作 `ENOMOTO_XO_MIP_CLEANUP_HINT=1` を効かせる LP の大きさか (列 (スラックを含む) + 非零の数が
+/// `ENOMOTO_XO_MIP_CLEANUP_HINT` (既定 1) を効かせる LP の大きさか (列 (スラックを含む) + 非零の数が
 /// `ENOMOTO_T_XO_MIP_CLEANUP_HINT_MIN_SIZE` (既定 50000、0 で大きさによらず) 以上)。小さい LP (mc11: 約 1.1 万) では仕上げは
 /// 向きがなくても数十ミリ秒で、向きを渡すと最適な頂点が変わるだけ (mc11 では根のカットの道が下界 11616 の遅い道に固まり、
 /// 4 スレッド・60 秒で 3 回とも 40 秒以上か時間切れ。analysis/ipmx_harm_20261106.md)。効く例 (physiciansched6-2・chromaticindex512-7・
@@ -898,10 +898,10 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     // (`ENOMOTO_T_XO_BOUND_GAP`、既定 1e-6 は第 11 回の比較で決めた。0 で使わない)。
     // 費用をずらしたとき (`ENOMOTO_T_IPM_COST_PERTURB`) は元の費用の下界と比べられないので使わない。
     let bound_gap = if cost_perturb > 0.0 { 0.0 } else { tunable!("ENOMOTO_T_XO_BOUND_GAP", 1e-6f64, f64) };
-    // 試作 `ENOMOTO_XO_NO_BOUND_STOP_ZERO_COST=1` (既定では使わない。analysis/rootlp_ipm_fail_20261105.md): 費用がすべて 0 の問題では
+    // `ENOMOTO_XO_NO_BOUND_STOP_ZERO_COST` (既定 1、2026-11-22 から。`=0` で以前の形。analysis/rootlp_ipm_fail_20261105.md・analysis/shelved_20261122): 費用がすべて 0 の問題では
     // 共有の下界で内点法を止めない。目的値と下界がどちらも 0 で差が常に 0 になり、主残差が許容の 1e4 倍以内に入った途端に止まる
     // (cryptanalysiskb128n5obj16 の根の LP: 4 反復目、主残差が許容の 728 倍で止まり、頂点の主実行不能 16,419、仕上げ 9 万反復超)。
-    let bound_gap = if bound_gap > 0.0 && env_str!("ENOMOTO_XO_NO_BOUND_STOP_ZERO_COST").is_some_and(|v| v != "0") && c_j.iter().all(|&v| v == 0.0) { 0.0 } else { bound_gap };
+    let bound_gap = if bound_gap > 0.0 && env_def!("ENOMOTO_XO_NO_BOUND_STOP_ZERO_COST", "1").is_some() && c_j.iter().all(|&v| v == 0.0) { 0.0 } else { bound_gap };
     let shared = crate::cancel::bound().filter(|sb| bound_gap > 0.0 && sb.n_total == std.n_total && sb.n_rows == std.n_rows);
     let fixed_obj: f64 = (0..std.n_total).filter(|&j| !(std.lb[j] < std.ub[j])).map(|j| std.c[j] * std.lb[j]).sum();
     let lb_fn = move || shared.as_ref().map_or(f64::NEG_INFINITY, |sb| sb.get() - fixed_obj);
@@ -1008,11 +1008,11 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
             solve_box_lp_warm(&a_j, &b_j, &c_j, &l_j, &u_j, max_iters, Some(&warm))
         }
     };
-    // 試作 `ENOMOTO_XO_IPM_RETRY_PC=k` (既定 0 = しない。analysis/rootlp_ipm_fail_20261105.md): そろえずに解いた内点法が受理できる点に
+    // `ENOMOTO_XO_IPM_RETRY_PC=k` (既定 3、2026-11-22 から。`=0` でしない。analysis/rootlp_ipm_fail_20261105.md・analysis/shelved_20261122): そろえずに解いた内点法が受理できる点に
     // 達しなければ、行・列をそろえた問題 ([`ipm_prescaled`] の `mode` = k) で一度だけ解き直す。mas74 (MIP の根の LP) は上限 6.4e6 の
     // 列があり、そろえない内点法は相補性 1e-60 でもギャップ 0.25 のまま 172 反復で破綻したが、k = 2・3 なら数ミリ秒で収束した。
     crate::interior_point::boxed::clear_prebuilt_kkt();
-    let retry_pc = if xo.given_point.is_none() && pc.is_none() && pdlp_mode == 0 && cost_perturb == 0.0 { tunable!("ENOMOTO_XO_IPM_RETRY_PC", 0u8, u8) } else { 0 };
+    let retry_pc = if xo.given_point.is_none() && pc.is_none() && pdlp_mode == 0 && cost_perturb == 0.0 { tunable!("ENOMOTO_XO_IPM_RETRY_PC", 3u8, u8) } else { 0 };
     if retry_pc != 0 && !crate::cancel::is_cancelled() && !(xo.dual_feasible_known && ipm.status == Status::Infeasible) {
         let acc_gap = tunable!("ENOMOTO_T_XO_ACCEPT_GAP_REL", prm::IPM_ACCEPT_GAP_REL, f64);
         let ok = ipm.rel_res.0.max(ipm.rel_res.1) <= prm::IPM_ACCEPT_REL && ipm.rel_res.2 <= acc_gap;
@@ -2601,7 +2601,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
                 rb
             }
             None => {
-                // 試作 `ENOMOTO_XO_MIP_CLEANUP_HINT=1` (既定では使わない。analysis/rootlp_ipm_fail_20261105.md): 双対の記録が要求されている
+                // `ENOMOTO_XO_MIP_CLEANUP_HINT` (既定 1、2026-11-22 から。`=0` で以前の形。analysis/rootlp_ipm_fail_20261105.md・analysis/shelved_20261122): 双対の記録が要求されている
                 // とき (MIP の根の LP の競争・解き直し) に限って、仕上げにも非基底の向きを渡す (`ENOMOTO_T_XO_CLEANUP_HINT` のビット 2 と
                 // 同じ。LP 単独 (irish-electricity) では仕上げが遅くなったので、MIP の根の LP だけに絞る)。向きなしでは押し出しで得た主・双対
                 // 実行可能な基底からでも非基底の列を被約費用の符号で置き直し、主実行不能 1.7 万〜3.3 万本から解き直していた
@@ -2609,7 +2609,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
                 if XO_NO_CLEANUP_HINT.with(|f| f.get()) {
                     // 尺度をそろえた写しで解いていて係数の幅が極端に大きい (`ENOMOTO_XO_MIP_SCALE`): 仕上げに向きを渡さない
                     // (momentum1: 渡すと仕上げが 1.5 → 15.5 秒)
-                } else if outer && env_str!("ENOMOTO_XO_MIP_CLEANUP_HINT").is_some_and(|v| v != "0") && mip_cleanup_hint_size_ok(std) {
+                } else if outer && env_def!("ENOMOTO_XO_MIP_CLEANUP_HINT", "1").is_some() && mip_cleanup_hint_size_ok(std) {
                     set_cleanup_hint(&nb_status, 0);
                 } else {
                     set_cleanup_hint(&nb_status, 2);

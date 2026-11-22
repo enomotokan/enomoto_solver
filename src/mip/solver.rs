@@ -5979,7 +5979,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
     let r = s.run();
     crate::simplex::nb_diag::set_in_sub(prev_sub);
     warm.store(prev, Ordering::Relaxed);
-    // `ENOMOTO_MIP_OVERRUN3` の `d` (試作、analysis/mittelmann_ready_20261103/overrun.md): 木を分け合う待ち行列 (`WorkPool`、開いたノードの写し
+    // `ENOMOTO_MIP_OVERRUN3` の `d` (既定、2026-11-22 から。analysis/mittelmann_ready_20261103/overrun.md): 木を分け合う待ち行列 (`WorkPool`、開いたノードの写し
     // `SnapNode`) の片付けを裏のスレッドに回す。radiationm40-10-02 を 300 秒で解くと待ち行列が数 GB になり、求解が終わった後のこの解放
     // (`free`・`munmap`) に 5 秒かかって、その分だけ時間の上限を越えて返っていた。従のスレッドは合流済みで、最後の参照はここにある
     if super::zerohalf::overrun3('d') && !s.params.submip {
@@ -7742,7 +7742,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if orig_only && self.params.verbose {
                 eprintln!("MIP: accepting a solution feasible in the problem without the symmetry rows ({z:.10e})");
             }
-            // `ENOMOTO_MIP_OVERRUN3` の `i` (試作): 期限を過ぎてから受け取った解は twoopt・連続変数の解き直し・被約費用の固定をしない
+            // `ENOMOTO_MIP_OVERRUN3` の `i` (既定、2026-11-22 から): 期限を過ぎてから受け取った解は twoopt・連続変数の解き直し・被約費用の固定をしない
             // (`o` は oneopt もしない)。sorrell3 では根の LP が期限で止まった後、FJ のスレッドを待つ間に受け取った Local-MIP の解の
             // oneopt に 0.5 秒、twoopt (期限を見ない) に数秒かかっていた。oneopt はその解を -1 から -11 にする
             let past = self.deadline.is_some_and(|d| Instant::now() >= d);
