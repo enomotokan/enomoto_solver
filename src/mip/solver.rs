@@ -10857,6 +10857,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // (FJ・Local-MIP・ヒューリスティクス) で被約費用による固定が進まない (根の終わりに 1 回だけ)。カットの後の LP も緩和なので固定は正しい
             if super::early_redcost_on() && !self.params.submip && self.snap.is_none() {
                 self.store_root_redcost(root_obj);
+                // 診断 `ENOMOTO_MIP_DIAG_OBJAGG` (src/mip/objagg.rs、振る舞いは変えない): 目的関数の行から作るカットが固定を増やすか
+                if super::objagg::on() {
+                    self.diag_objagg();
+                }
                 // 診断 `ENOMOTO_MIP_DIAG_OBBT=U` (analysis/slowm_20261119 §15、振る舞いは変えない): 暫定解の値 U (元の目的の向き) で、根の LP (カットの後) + c x ≤ U の
                 // OBBT の天井と、被約費用・目的の伝播で今固定できる列の数を比べる。固定の前に数える
                 if let Some(u) = env_str!("ENOMOTO_MIP_DIAG_OBBT").and_then(|v| v.parse::<f64>().ok()) {
