@@ -11161,7 +11161,7 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
   - 1 スレッドで misc07・neos-911970・brazil3 が、変更前 + `ENOMOTO_MIP_ORBPP=cond` と新しい既定で一致した (ノード・目的値・判断の行。brazil3 は時間切れなのでノードは除く)。
   - cargo test・fuzz (mip_fuzz_symmetric 600・fuzz_tiny 400・mip_fuzz_vs_highs 300) は bad 0 (analysis/orbpp_20261121/checks/)。
 
-## 2026-11-22: CMIR の f0 (右辺 / δ の小数部) の決め打ちの上限を外す ENOMOTO_MIP_CMIRGEN=u を既定にする (採用、P の確かめは計測中)
+## 2026-11-22: CMIR の f0 (右辺 / δ の小数部) の決め打ちの上限を外す ENOMOTO_MIP_CMIRGEN=u を既定にする (採用)
 
 - 既定にした: `ENOMOTO_MIP_CMIRGEN` の未設定 (`=u`)。
   - CMIR (src/mip/cuts.rs の `cmir_terms_fast`・`mir_efficacy`) は、δ ごとに f0 = 右辺 / δ − ⌊右辺 / δ⌋ を見る。以前は f0 > 1 − 0.005 の δ を捨てていた。
@@ -11181,8 +11181,9 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
   |---|---|---|---|
   | 9 問 (neos-1582420・mc11・p200x1188c・beasleyC3・neos-911970・exp-1-500-5-5・timtab1・qiu・nw04) | 種 1〜3 | u/def 0.985 (0.903〜1.074)、u/f 1.002 (0.958〜1.049) | def 27 / u 26 (neos-1582420 種 1 は最適値 91 で証明が時間切れ) |
   | P (`f`、0.999 の形) | 58 問 × 種 1〜3 | f/def 1.004 (0.973〜1.035) | 138 / 138 |
-  | P (`u`、新しい既定対 `=0`) | 58 問 × 種 1〜3 | 計測中 (analysis/cmirgen_20261122/shards_P2.json) | |
+  | P (`u`、新しい既定対 `=0`) | 58 問 × 種 1〜3 | def/old 0.995 (0.976〜1.014)、全回で 1.25 倍超の遅れなし | old 138 / def 139 |
 
+  - P の def/old (問題ごと): noswot 0.84・p200x1188c 0.86・pk1 0.89・timtab1 0.90 が良い。10teams 1.50 (種 3 だけ、根は同じで解探しの揺れ)・mc11 1.20 が悪い。
   - 9 問の u/def: p200x1188c 0.82・neos-911970 0.87・neos-1582420 0.90 が良い。mc11 1.28 が悪い (根のループが 25 巡で止まり、第 2 段階に入らなくなる)。
   - 診断 (根だけ・1 スレッド、9 問): 上限を外して作るカットは次のとおり。
     - 新たに f0 > 0.999 で選ばれる δ は少ない (p200x1188c 329、exp-1-500-5-5 46、mc11 35、beasleyC3 28、nw04 5)。
