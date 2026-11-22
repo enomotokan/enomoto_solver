@@ -1,6 +1,8 @@
 # 集約行ごとに 0.5 倍以上から最大 3 本残す (GENTOP3、2026-11-21、利用者の案)
 
-**閉じた (2026-11-21、利用者の判断)。** `ENOMOTO_MIP_GEN_TOP3` は既定オフのまま残す (P は回さない)。
+**閉じた (2026-11-21、利用者の判断) → 2026-11-22 に利用者の判断で広い計測を再開 (既定化の方向で P と M を同時に、§5)。** `ENOMOTO_MIP_GEN_TOP3` は既定オフのまま。
+
+- 広い計測のビルドは CMIRGEN=u が既定になった後 (186e9f076 以降) なので、def・t3 とも u の上で比べる。
 
 試作 `ENOMOTO_MIP_GEN_TOP3` (src/mip/separation.rs の `keep_best`、既定オフ) を作り、8 問で既定と比べた。
 
@@ -114,3 +116,22 @@ LIFTED_COVER なしの 10teams・exp-1-500-5-5・nw04・qiu と、LIFTED_COVER �
   - `shards_P.json` は作成済み (`python plan.py P 6 t3`): P 58 問 × 種 1〜3 × {def, t3}、60 秒、6 本、1 本 0.47 時間。
   - 回し方は `python run.py P K` (K = 0〜5)、集計は `python ci.py 60 def t3 res_P_s*.jsonl`。
 - 誤答の確かめ: `fuzz.sh [lc]` で回し、結果は `fuzz_t3.out`・`fuzz_t3lc.out`。
+
+
+## 5. 広い計測 (2026-11-22、利用者の判断で再開)
+
+- P: shards_P.json (58 問 × 種 1〜3 × {def, t3}、60 秒、6 分担)。集計 `python ci.py 60 def t3 res_P_s*.jsonl`。
+- M: shards_M.json (186 問 × 種 1 × {def, t3}、600 秒、20 分担・各 1.84 時間)。集計 `python ci.py 600 def t3 res_M_s*.jsonl`。
+- 集計は分担がそろってから (まとめ役)。
+
+### 5.1 P の集計 (6 分担そろい、348 回)
+
+- ビルド: 分担ごとに 64eed7d7d・27d87ea36・138ac4150 のどれか (b4e76e55a 以降、pip install -e .)。どれも CMIRGEN=u が既定。
+- `python ci.py 60 def t3 res_P_s*.jsonl`: **t3/def 1.017 (95% [0.994, 1.040])**。解けた数は def 137 / t3 138 (10teams 種 2 が t3 だけ解けた)。最適値の食い違いは 0、crash も 0。
+- 全回で 1.25 倍超遅れた問題: **neos-911970 (素の比 1.78・1.39・2.55、ずらした比 1.39・1.22・1.86)**。
+- 問題ごとのずらし幾何平均の比 (種 1〜3):
+  - 良い: physiciansched6-2 0.94、mc11 0.95、binkar10_1 0.95、nw04 0.97、10teams 0.97。
+  - 悪い: noswot 1.65 (種 2 で 3.7 → 59.0 秒、揺れの大きい問題)、neos-911970 1.47、roll3000 1.13、timtab1 1.11、p200x1188c 1.10。
+- 時間切れの回の暫定解は良い・悪いが混じる。
+  - 悪い例: neos-1456979 種 1 196 → 359、blp-ar98・supportcase26 (分担 2)。
+- 8 問の t3/def 0.979 (§3) は、P では見えない。

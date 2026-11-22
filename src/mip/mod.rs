@@ -69,6 +69,7 @@ pub(crate) mod rcstrong;
 pub(crate) mod fixmore;
 pub(crate) mod objagg;
 pub(crate) mod propcut;
+pub(crate) mod lpbox;
 
 use crate::solver::solve_lp;
 use crate::types::{ConstraintRow, LpOptions, MipSettings, MipSummary, Objective, RootSolver, SolveResult, Status, VarType, VariableData};
@@ -9274,11 +9275,14 @@ fn tighten_coefficients(rows: &mut [Vec<(usize, f64)>], row_lo: &mut [f64], row_
     count
 }
 
-/// `ENOMOTO_MIP_FZ2_FIX` (試作、既定では使わない): 前処理の整数への丸めの余裕を許容誤差 (1e-6) に揃える
-/// (analysis/fuzz_tiny_worse_20261103.md)
-/// 値が `1` なら全部、文字の並びならその部分だけ: `n` 整数行の正規化 ([`normalize_integer_rows`])、`m` 併合した整数列の上限
+/// `ENOMOTO_MIP_FZ2_FIX` (2026-11-22 に既定化、`=0` で切る): 前処理の整数への丸めの余裕を許容誤差 (1e-6) に揃える
+/// (analysis/fuzz_tiny_worse_20261103.md、analysis/shelved_20261122)
+/// 既定 (未指定) と値 `1` は全部、文字の並びならその部分だけ: `n` 整数行の正規化 ([`normalize_integer_rows`])、`m` 併合した整数列の上限
 pub(crate) fn fz2_fix(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_FZ2_FIX").is_some_and(|v| v == "1" || v.contains(c))
+    match env_str!("ENOMOTO_MIP_FZ2_FIX") {
+        None => true,
+        Some(v) => v != "0" && (v == "1" || v.contains(c)),
+    }
 }
 
 /// 整数列だけで係数が整数の片側の行を係数の最大公約数で割り、右辺を整数に丸める (`<=` は切り下げ、`>=` は切り上げ。
@@ -9300,7 +9304,7 @@ fn normalize_integer_rows(rows: &mut [Vec<(usize, f64)>], row_lo: &mut [f64], ro
         if g < 1.0 {
             continue;
         }
-        // `ENOMOTO_MIP_FZ2_FIX` (試作、既定では使わない): 丸めの余裕を 1e-9 でなく整数の許容誤差 1e-6 にする。1e-9 だと右辺
+        // `ENOMOTO_MIP_FZ2_FIX` (既定、`=0` で切る): 丸めの余裕を 1e-9 でなく整数の許容誤差 1e-6 にする。1e-9 だと右辺
         // `1 - 2e-9` が 0 に切り下がり、許容誤差の内 (違反 2e-9) で実行可能な点を厳密に切る (右辺 `1 - 1e-9` は 1 に残るので、
         // 違反 1e-9 は通し 2e-9 は切る不揃いになる。analysis/fuzz_tiny_worse_20261103.md)
         let rt = if fz2_fix('n') { 1e-6 } else { 1e-9 };

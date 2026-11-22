@@ -9673,6 +9673,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 時間の上限は Local-MIP と同じ。実行可能性問題 (目的が全部 0) では今までどおり
                 let mix = fj_lmip_mix_on() && !fjl;
                 let fjl_cap = if ftl.is_finite() { (tunable!("ENOMOTO_T_MIP_LOCALMIP_TIME_FRAC", 0.1, f64) * ftl).min(10.0) } else { 10.0 };
+                // 試作 `ENOMOTO_MIP_LPBOX` の `s`: 箱の問題と予算を分ける (FJ のスレッドの上限を半分に)
+                let fjl_cap = if super::lpbox::on('s') { 0.5 * fjl_cap } else { fjl_cap };
                 let fjl_box: std::sync::Arc<std::sync::Mutex<Vec<Vec<f64>>>> = Default::default();
                 if fjl || mix {
                     self.lmip_mailbox = Some(fjl_box.clone());
@@ -10613,6 +10615,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if t1mix_on() && mip_threads() == 1 && !self.params.submip && self.snap.is_none() && self.params.restarts == 0 && !proof_only() && self.fj_thread.is_none() && !self.root_gap_closed() {
             self.t1_fj_lmip_mix();
         }
+        // 試作 `ENOMOTO_MIP_LPBOX` (analysis/lpbox_20261122): 根のカットのループの後の LP 解のまわりに整数列を狭めて伝播した問題で
+        // FJ・Local-MIP を回す ([`Self::lpbox_heur`])。FJ のスレッドはまだ止めない
+        if super::lpbox::enabled() && !self.params.submip && self.snap.is_none() && self.params.restarts == 0 && !proof_only() && !self.root_gap_closed() && !self.fractional(&self.lp.col_values()).is_empty() {
+            self.lpbox_heur();
+        }
         if fjkeep_on() && !self.params.submip && self.snap.is_none() && self.fj_thread.is_some() && (self.incumbent.is_none() || self.inc_only_fj) && !self.root_gap_closed() {
             self.poll_lmip_thread();
             if self.params.verbose {
@@ -11231,6 +11238,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if !lpface_first && env_str!("ENOMOTO_MIP_NO_LPFACE").is_none() {
                     heur!("LP face", self.lp_face());
+                }
+                // 試作 `ENOMOTO_MIP_RENSDIVE` (analysis/rensdive_20261122): 外側の根で RENS の前に、RENS と同じ固定の定義域で丸めとダイブ
+                if super::lpbox::rensdive_on() && !self.params.submip && self.nodes <= 1 && self.snap.is_none() {
+                    heur!("RENSDIVE", self.rensdive());
                 }
                 heur!("RENS", self.rens(&x));
                 // `ENOMOTO_MIP_RENS_LPBC_MAX_DEPTH` (既定 1、2026-11-01 に trim3 として既定化。大きな値 (例 `1000`) で上限なし = 元の振る舞い): `RENS (LP before cuts)` のサブ MIP の入れ子の深さ
@@ -20425,7 +20436,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut n = 0;
         // 既定ではリテラルの衝突プールに入れる (行にして証明のプールに入れると、数が多いので双対証明を追い出す)
         let rows = env_str!("ENOMOTO_MIP_MULTI_CONFLICT_ROWS").is_some();
-        for c in &confs {
+        let metas: Vec<super::conflict_pool::DeepMeta> = if super::conflict_pool::confdeep_diag() {
+            super::domain::CONF_META.with(|m| std::mem::take(&mut *m.borrow_mut()))
+        } else {
+            Vec::new()
+        };
+        for (ci, c) in confs.iter().enumerate() {
+            self.lit_conflicts.pending_meta = metas.get(ci).copied();
             let ok = if rows {
                 self.add_conflict_lits(c)
             } else {
@@ -20434,6 +20451,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 self.add_lit_conflict(c)
             };
+            self.lit_conflicts.pending_meta = None;
             if ok {
                 n += 1;
             }
@@ -27191,6 +27209,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if super::cutconf::mode().is_some() {
                 let c = super::cutconf::stats();
                 eprintln!("MIP: cutconf (ENOMOTO_MIP_CUTCONF): calls {}, no start {}, steps plain {} reduced {} (by remembered external rows {}), stop fail {} (general integer {}, continuous {}) decision {} uip {} budget {}, no step {}, dropped {}, out {} (non-binary {}, mean length {:.1}), used: pruned {} tightened {}, {:.2}s", c[0], c[1], c[2], c[3], c[13], c[4], c[14], c[15], c[5], c[6], c[7], c[11], c[10], c[8], c[12], c[9] as f64 / c[8].max(1) as f64, c[16], c[17], super::cutconf::total_secs());
+            }
+            if super::conflict_pool::confdeep_diag() && !self.params.submip {
+                for l in super::conflict_pool::DEEP.lock().unwrap().report() {
+                    eprintln!("{l}");
+                }
             }
             eprintln!("MIP: conflict analysis (HiGHS style): calls {}, conflicts {}, added {}, mean length {:.1}, max length {}, {:.2}s", self.multi_stats[0], self.multi_stats[1], self.multi_stats[2], self.multi_stats[3] as f64 / self.multi_stats[1].max(1) as f64, self.conflict_max_len_multi(), self.multi_secs);
             eprintln!("MIP: conflict score diag: analyses {}, bumped columns per analysis {:.2}, analyses without conflict {:.3}, lit reasons asked per analysis {:.2} (max {}), used {:.2}, analyses cut by the budget {:.3}", self.hcs_diag[0], self.hcs_diag[1] as f64 / self.hcs_diag[0].max(1) as f64, self.hcs_diag[2] as f64 / self.hcs_diag[0].max(1) as f64, self.hcs_diag[3] as f64 / self.hcs_diag[0].max(1) as f64, self.hcs_diag[5], self.hcs_diag[4] as f64 / self.hcs_diag[0].max(1) as f64, self.hcs_diag[6] as f64 / self.hcs_diag[0].max(1) as f64);
