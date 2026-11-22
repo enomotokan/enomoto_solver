@@ -6559,8 +6559,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // unitcal_7 では同じ LP 解で作った経路のカットの LP の伸びが HiGHS の 1/2〜1/3 で、HiGHS のカットは 0-1 列が 1 本あたり 1.3〜1.6 本多い。
         // 値に `r` を含めば外側の根 (ノードの分離でなく、ノード数 1 以下) でだけ使う。`ENOMOTO_T_MIP_VB_IMPL_MINREL` = τ (既定 0) なら、
         // 締め幅 |境界 - b| が列の幅 (U - L、有限のとき) の τ 倍以上の含意だけを使う
+        // `t` (analysis/vbimpl_20261122): 外側の根では全部使い、その最後の分離の LP 解を控える。木 (ノードの分離・写しから解く従) では、
+        // 控えた根の LP 解で張り付いていた (余裕が経路の集約と同じ許容誤差 `PATHH_FEASTOL` (1e-6) 以内の) 含意の変数上下限だけを足す (新しい閾値なし)
         let vb_impl_mode = env_str!("ENOMOTO_MIP_VB_IMPL").filter(|v| *v != "0");
-        let use_impl = vb_impl_mode.is_some_and(|m| !m.contains('r') || (!light && self.nodes <= 1 && self.snap.is_none()));
+        let vb_at_root = !light && self.nodes <= 1 && self.snap.is_none();
+        let use_impl = vb_impl_mode.is_some_and(|m| !m.contains('r') || vb_at_root);
+        let vb_tight = vb_impl_mode.is_some_and(|m| m.contains('t'));
         if use_impl && self.vbounds_impl.is_none() {
             let mut vbs: VarBounds = (**self.vbounds.as_ref().unwrap()).clone();
             let cap = tunable!("ENOMOTO_T_MIP_VB_IMPL_MAX", 8usize, usize);
@@ -6585,6 +6589,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if list.len() < cap && !list.iter().any(|&(yy, dd, ee)| yy == y && (dd - d).abs() <= 1e-9 && (ee - e).abs() <= 1e-9) {
                     list.push((y, d, e));
                     added += 1;
+                    if vb_tight {
+                        self.vb_impl_added.push((k, upper, y, d, e));
+                    }
                 }
             }
             if self.params.verbose && !self.params.submip {
@@ -6593,6 +6600,35 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.vbounds_impl = Some(std::rc::Rc::new(vbs));
         }
         let vb = if use_impl { self.vbounds_impl.clone() } else { self.vbounds.clone() };
+        let vb = if vb_tight && use_impl {
+            if vb_at_root {
+                self.vb_impl_rootx = Some(std::sync::Arc::new(xv[..n].to_vec()));
+                vb
+            } else if let Some(rx) = self.vb_impl_rootx.clone().filter(|rx| rx.len() == n) {
+                if self.vbounds_impl_tree.is_none() {
+                    let mut vbs: VarBounds = (**self.vbounds.as_ref().unwrap()).clone();
+                    let tol = PATHH_FEASTOL;
+                    let mut kept = 0usize;
+                    for &(k, upper, y, d, e) in &self.vb_impl_added {
+                        let slack = if upper { d * rx[y] + e - rx[k] } else { rx[k] - d * rx[y] - e };
+                        if slack <= tol {
+                            if upper { vbs.vub[k].push((y, d, e)) } else { vbs.vlb[k].push((y, d, e)) }
+                            kept += 1;
+                        }
+                    }
+                    if self.params.verbose && !self.params.submip && self.snap.is_none() {
+                        eprintln!("MIP: VB_IMPL t: {kept} of {} implied variable bounds tight at the root LP kept for the tree", self.vb_impl_added.len());
+                    }
+                    self.vbounds_impl_tree = Some(std::rc::Rc::new(vbs));
+                }
+                self.vbounds_impl_tree.clone()
+            } else {
+                // 根の LP 解がない (根の分離を経ていない) なら含意は足さない
+                self.vbounds.clone()
+            }
+        } else {
+            vb
+        };
         // 試作 `ENOMOTO_MIP_IMPLINT_TU2` の `a` ([`Solver::cut_imp`]): TU2 で足した暗に整数の列は連続の印に戻し、`imp` で渡す
         if !self.cut_imp.is_empty() {
             for j in 0..n {
