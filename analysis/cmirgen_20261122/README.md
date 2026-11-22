@@ -116,3 +116,6 @@ aggrsel_20261121 の続き。根の下界の差のうち、neos-1582420 は SCIP
 - 書き出しのコマンド (リポジトリの根から):
   `ENOMOTO_MIP_CMIRDUMP=300000 ENOMOTO_MIP_NODE_LIMIT=1 ENOMOTO_MIP_NO_RESTART=1 ENOMOTO_MIP_THREADS=1 python3 scripts/run_miplib_benchmark.py --worker-ours .miplib_cache/mc11.mps --time-limit 120 --threads 1 2>&1 >/dev/null | grep ^CMIRDUMP > analysis/cmirgen_20261122/dump/mc11.txt`
 - presolved/ (SCIP の前処理の後の問題) は回して作るだけで、コミットしない。
+
+### 回したビルド (広い計測 P)
+- P 1: b1fdadb74 (2c8314ac3 以降、build.sh の wheel、0.1.10、site-packages から読むのを確かめた)。58 行・crash 0。解けた def 23 / f 23、食い違い 0。
