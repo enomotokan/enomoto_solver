@@ -1,5 +1,7 @@
 # 1 行から作る cmir を SCIP と並べる (CMIRGEN、2026-11-22、案 A)
 
+**利用者の判断 (2026-11-22): `d` は閉じた (既定オフのまま)。`f` を P (58 問 × 種 1〜3) で確かめる (分担 6 本、§6 に集計)。**
+
 aggrsel_20261121 の続き。根の下界の差のうち、neos-1582420 は SCIP の 1 行だけの cmir (集約なし) でも 89.87 に届き、当方は 89.06 だった。
 当方の CMIR (src/mip/cuts.rs の `cmir_terms`) と SCIP 10.0 の `SCIPcutGenerationHeuristicCMIR` (cuts.c) を同じ項で並べ、差の場所を調べた。
 
