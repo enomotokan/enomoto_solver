@@ -194,6 +194,18 @@ pub(super) fn stall_scale(obj: f64, prev: f64, off: f64, submip: bool) -> f64 {
     }
 }
 
+/// 試作 `ENOMOTO_MIP_STALL_GAIN=x[s]` (既定では使わない、analysis/gainstall_20261122): 根のカットのループの停滞の尺度を始めからの伸びにする閾値 x と、
+/// サブ MIP にも効かせるか (末尾の `s`)
+pub(super) fn stall_gain() -> Option<(f64, bool)> {
+    static V: std::sync::OnceLock<Option<(f64, bool)>> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        env_str!("ENOMOTO_MIP_STALL_GAIN").and_then(|v| {
+            let sub = v.ends_with('s');
+            v.trim_end_matches('s').parse::<f64>().ok().filter(|x| *x > 0.0).map(|x| (x, sub))
+        })
+    })
+}
+
 pub(super) fn ho6_stall_frac() -> Option<f64> {
     env_str!("ENOMOTO_MIP_HO6_STALL").map(|v| v.parse::<f64>().ok().filter(|t| *t > 0.0 && *t < 1.0).unwrap_or(1e-3))
 }
@@ -4186,6 +4198,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 「下界の伸びが今までの伸びの 0.1% 以下」と同じ尺度)。unitcal_7 は目的値 1.96e7 に対して根のギャップが 0.35% しかなく、
                 // 1 ラウンド 300〜1000 (今までの伸びの 0.3〜1%) 伸びていても相対変化 1e-4 未満で停滞と数えられ、17 ラウンド前後で止まる
                 // (HiGHS は 47 ラウンド)。この割合以下の伸びのラウンドを停滞とする (分数の列の数の条件は今までどおり)
+                // 試作 `ENOMOTO_MIP_STALL_GAIN=x` (既定では使わない、analysis/gainstall_20261122): 下界の伸びの尺度をループの始めからの伸び
+                // G = obj − first_obj にする。G > 0 なら Δ / G を相対変化の代わりに使い、x 以下で停滞と数える。G = 0 (始めから動かない) なら今の判定のまま。
+                // 外側の求解だけ (値の末尾に `s` でサブ MIP にも)。`ENOMOTO_MIP_CUTSTOP_LOG` で各ラウンドの Δ・G・Δ/G・今の相対変化を出す
+                let reldiff = {
+                    let gain_g = obj - first_obj;
+                    let d = obj - prev_obj;
+                    let sg = stall_gain();
+                    if !self.params.submip && job.is_none() && env_str!("ENOMOTO_MIP_CUTSTOP_LOG").is_some_and(|v| v != "0") {
+                        eprintln!("MIP: STALLGAIN round {round}: d {d:.6e} G {gain_g:.6e} d/G {:.3e} reldiff {reldiff:.3e}", if gain_g > 0.0 { d / gain_g } else { f64::NAN });
+                    }
+                    match sg {
+                        Some((x, sub)) if (sub || !self.params.submip) && gain_g > 1e-9 * obj.abs().max(1.0) => {
+                            if d / gain_g <= x { 0.0 } else { 1.0 }
+                        }
+                        _ => reldiff,
+                    }
+                };
                 let reldiff = match ho6_stall_frac() {
                     Some(t) if !self.params.submip => {
                         let tot = (obj - first_obj).max(1e-9 * obj.abs().max(1.0));
