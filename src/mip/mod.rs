@@ -69,6 +69,7 @@ pub(crate) mod rcstrong;
 pub(crate) mod fixmore;
 pub(crate) mod objagg;
 pub(crate) mod propcut;
+pub(crate) mod lpbox;
 
 use crate::solver::solve_lp;
 use crate::types::{ConstraintRow, LpOptions, MipSettings, MipSummary, Objective, RootSolver, SolveResult, Status, VarType, VariableData};
