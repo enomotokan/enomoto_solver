@@ -155,3 +155,25 @@ LIFTED_COVER なしの 10teams・exp-1-500-5-5・nw04・qiu と、LIFTED_COVER �
   - P は 1.017 (95% [0.994, 1.040])、全回で遅いのは neos-911970。
   - M は 0.982 (95% [0.959, 1.005])、解けた数は t3 が +1 (traininstance6 を除く)。
   - どちらも区間が 1 をまたぎ、向きは P と M で逆。
+
+## 6. GEN_TOP3 の倍率の掃引 (2026-11-22、利用者の案)
+
+- GEN_TOP3 の「集約行ごとに最良の質の何倍以上から残すか」は、全体の選択 (`select_cuts_hybrid`) の質の下限と共用の
+  `ENOMOTO_T_CUTSEL_MIN_REL` (0.5) だった。そのまま掃引すると全体の選択まで変わるので、GEN_TOP3 専用の `ENOMOTO_T_MIP_GEN_TOP3_REL` を足した
+  (src/mip/separation.rs の `keep_best`)。未指定なら今と同じく `ENOMOTO_T_CUTSEL_MIN_REL` の値。
+- 確かめ:
+  - cargo test: 419 passed。
+  - 動きが変わらないこと: 1 スレッド・種 1・GEN_TOP3=1 で p0201・misc07・neos17・rout・pk1 を回した。変更の前のビルド (dc2cc4d17) と
+    後のビルドで、REL 未指定・REL=0.5 のとき、状態・目的値・ノード数がすべて同じ (28・3968・1363・4263・148993 ノード)。
+  - 倍率が効くこと: rout は REL=1.0 で 4263 → 11645 ノード。
+  - REL=0.9 でも上の 5 問のノード数は同じ。misc07 の集約行は候補が 2 本ずつで、どちらも最良の 0.9 倍以上だった。
+  - REL=1.0 (r10) は既定 (最良 1 本だけ) と同じにはならない。質が最良と同じ候補 (同点) は全部残すため。既定は同点なら前の位置の 1 本。
+    misc07 は r10 で 3968 ノード、既定 (GEN_TOP3 なし) は 3810 ノード。
+- 設定 (`cfg.py`): r5・r6・r7・r8・r9・r10 = GEN_TOP3=1 + `ENOMOTO_T_MIP_GEN_TOP3_REL` 0.5〜1.0。r5 は t3 と同じ動き。
+- 分担表: `python plan.py PR 12` → shards_PR.json。
+  - 中身: MIPLIB の 58 問 × 種 1〜3 × {def, r5, r6, r7, r8, r9, r10}、4 スレッド・60 秒。174 組 1218 回。
+  - 見積り: 各 0.81〜0.83 時間、計 9.9 時間 (analysis/final_20261118 の def の時間 + 8 秒)。
+- 回し方: リポジトリの根で `pip install -e .` (または build.sh) の後、`cd analysis/gentop3_20261121 && python run.py PR K` (K = 0〜11)。
+  res_PR_sK.jsonl に足す (途中から再開できる)。回したビルドのコミットを下に書き足すこと。
+
+### 回したビルド (PR)
