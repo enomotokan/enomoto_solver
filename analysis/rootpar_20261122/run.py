@@ -1,5 +1,5 @@
-"""rootpar: 根 (前処理〜木に入るまで) の時間の内訳と、段ごとに実際に動いているスレッドの数。python run.py PLAN (例 plan.json、記録済みは飛ばす)。
-計画の 1 項目は [問題, 種, スレッド数]。ENOMOTO_MIP_LOG=1 で解き (既定の動きは変えない)、stderr の行を受け取った時刻 (起動からの壁の秒) つきで読み、
+"""rootpar: 根 (前処理〜木に入るまで) の時間の内訳と、段ごとに実際に動いているスレッドの数。python run.py PLAN [OUT] (例 plan.json、既定の OUT は res.jsonl、記録済みは飛ばす)。
+計画の 1 項目は [問題, 種, スレッド数] か [問題, 種, スレッド数, 設定 (def・sp)]。ENOMOTO_MIP_LOG=1 で解き (既定の動きは変えない)、stderr の行を受け取った時刻 (起動からの壁の秒) つきで読み、
 /proc/PID/task/*/stat を 0.2 秒ごとに見て、段ごとの CPU 秒を出す (プロセス全体の CPU 秒の差。終わったスレッドの分も入る。スレッドごとの差は最も多い 1 本と、区間の半分以上動いた本数にだけ使う)。res.jsonl に 1 回 1 行。
 段の区切り (印の行、求解ごと = 再スタートごとに繰り返す):
   pre  : 求解の始め (起動 / 前の求解の `MIP: restart`) 〜 `MIP: solving the root LP`  (外側の前処理・この求解の前処理・プロービング・対称性・FJ の起動など)
@@ -14,7 +14,9 @@ from pathlib import Path
 D = Path(__file__).resolve().parent
 WT = D.parents[1]
 PLAN = json.loads((D / sys.argv[1]).read_text())
-OUT = D / "res.jsonl"
+OUT = D / (sys.argv[2] if len(sys.argv) > 2 else "res.jsonl")
+# 計画の項目の 4 つ目 (省略可) は設定の名前。def は既定 (環境変数なし)、sp は試作 ENOMOTO_MIP_SEP_PARALLEL (分離の並列)
+CFGS = {"def": {}, "sp": {"ENOMOTO_MIP_SEP_PARALLEL": "1"}}
 TL = 120
 TICK = os.sysconf("SC_CLK_TCK")
 M_RESTART = re.compile(r"^MIP: restart \d+ \(")
@@ -42,8 +44,9 @@ def cpu_snap(pid):
     except OSError:
         pass
     return out
-def one(p, seed, th):
+def one(p, seed, th, cfg="def"):
     env = {k: v for k, v in os.environ.items() if not k.startswith("ENOMOTO_")}
+    env.update(CFGS[cfg])
     env.update({"ENOMOTO_MIP_THREADS": str(th), "ENOMOTO_T_MIP_SEED": str(seed), "ENOMOTO_MIP_LOG": "1"})
     t0 = time.time()
     pr = subprocess.Popen([sys.executable, str(WT / "scripts/run_miplib_benchmark.py"), "--worker-ours", str(WT / ".miplib_cache" / f"{p}.mps"), "--time-limit", str(TL), "--threads", str(th)],
@@ -108,10 +111,11 @@ done = set()
 if OUT.exists():
     for l in OUT.read_text().splitlines():
         if l.strip():
-            r = json.loads(l); done.add((r["problem"], r["seed"], r["threads"]))
-for p, seed, th in PLAN:
-    if (p, seed, th) in done: continue
-    r = one(p, seed, th)
+            r = json.loads(l); done.add((r["problem"], r["seed"], r["threads"], r.get("cfg", "def")))
+for item in PLAN:
+    p, seed, th = item[:3]; cfg = item[3] if len(item) > 3 else "def"
+    if (p, seed, th, cfg) in done: continue
+    r = one(p, seed, th, cfg)
     with open(OUT, "a") as f:
-        f.write(json.dumps({"problem": p, "seed": seed, "threads": th, **r, "nproc": os.cpu_count(), "at": time.strftime("%H:%M:%S")}) + "\n")
-    print(p, seed, th, r["result"].get("status"), r["result"].get("time"), {k: (v["secs"], round(v["cpu"] / max(v["secs"], 1e-9), 2)) for k, v in r["phases"].items()}, flush=True)
+        f.write(json.dumps({"problem": p, "seed": seed, "threads": th, "cfg": cfg, **r, "nproc": os.cpu_count(), "at": time.strftime("%H:%M:%S")}) + "\n")
+    print(p, seed, th, cfg, r["result"].get("status"), r["result"].get("time"), {k: (v["secs"], round(v["cpu"] / max(v["secs"], 1e-9), 2)) for k, v in r["phases"].items()}, flush=True)

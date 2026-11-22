@@ -4335,6 +4335,12 @@ thread_local! {
     pub(crate) static MIP_THREADS_TL: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// 試作 `ENOMOTO_MIP_RINS_PAR` (analysis/rootpar_20261122、既定では使わない): 外側の根の RINS を並列のサブ MIP で出して待たずに木へ進む
+/// (2 スレッド以上のときだけ。1 スレッドの動きは変えない)
+pub(crate) fn rins_par_on() -> bool {
+    env_str!("ENOMOTO_MIP_RINS_PAR").is_some()
+}
+
 pub(crate) fn mip_threads() -> usize {
     let tl = MIP_THREADS_TL.with(|c| c.get());
     if tl > 0 {
@@ -11537,6 +11543,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let subfix_h = super::heur_subfix::on('h') && !self.params.submip;
                 if (self.incumbent.is_some() || self.ref_sol.is_some()) && env_str!("ENOMOTO_MIP_NO_ROOT_RINS").is_none() && !subfix_h {
                     let z_rins0 = self.incumbent.as_ref().map(|(z, _)| *z);
+                    // 試作 `ENOMOTO_MIP_RINS_PAR` ([`rins_par_on`]、既定では使わない。analysis/rootpar_20261122): 2 スレッド以上の外側の根では、
+                    // RINS を並列のサブ MIP (RENS と同じ形) で出し、待たずに木へ進む。後回しのサブ MIP (改良 (11-08) の `B` と同じ列
+                    // `subcap_deferred`) に入れ、木の中で終わったら受け取り、再スタート・終わりの前に止めて受け取る。1 スレッドの動きは変えない
+                    if rins_par_on() && mip_threads() > 1 && !self.params.submip && self.snap.is_none() {
+                        let n0 = self.pending_submips.len();
+                        let keep = self.parallel_submips;
+                        self.parallel_submips = true;
+                        heur!("RINS (parallel, deferred to the tree)", self.rins(&x));
+                        self.parallel_submips = keep;
+                        while self.pending_submips.len() > n0 {
+                            let item = self.pending_submips.remove(n0).unwrap();
+                            if self.params.verbose {
+                                eprintln!("MIP: RINS_PAR: deferring the parallel sub-MIP ({}) to the tree ({:.2}s)", item.2, self.start.elapsed().as_secs_f64());
+                            }
+                            self.subcap_deferred.push_back(item);
+                        }
+                    } else {
                     heur!("RINS", self.rins(&x));
                     // `ENOMOTO_MIP_INCUMB` の `a` (試作、[`incumb_on`]): RINS が暫定解を良くしたら、新しい暫定解でもう一度
                     if incumb_on('a') && !self.params.submip {
@@ -11552,6 +11575,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             z_prev = z_now;
                             heur!("RINS", self.rins(&x));
                         }
+                    }
                     }
                 }
                 // `ENOMOTO_MIP_ROOT_LMIP` (試作): 根のヒューリスティクスの暫定解 (RENS・RINS などのサブ MIP の解を含む) を出発点に
