@@ -1,7 +1,8 @@
 """gentop3 の広い計測の分担表 (def と試作 X の対、どれも 4 スレッド。X は cfg.py の名前、既定 t3)。rootgap_20261121/plan.py の写し。
 python plan.py P 6 [X]  → shards_P.json (MIPLIB の 58 問 × 種 1〜3 × {def, X}、60 秒)。見積りは analysis/final_20261118 の P の def の時間 + 8 秒。
 python plan.py M 20 [X] → shards_M.json (Mittelmann 186 問 × 種 1 × {def, X}、600 秒)。見積りは analysis/vsscip_20261120 の M の def の時間
-(解けなかった回は上限) + 30 秒。設定の順は問題・種で入れ替える。slowm_20261119/plan.py の CP・CM の写し。"""
+(解けなかった回は上限) + 30 秒。設定の順は問題・種で入れ替える。slowm_20261119/plan.py の CP・CM の写し。
+python plan.py PR 12 → shards_PR.json (6 節の倍率の掃引: MIPLIB の 58 問 × 種 1〜3 × {def, r5, r6, r7, r8, r9, r10}、60 秒。見積りは P と同じ)。"""
 import json, glob, sys
 from pathlib import Path
 D = Path(__file__).resolve().parent
@@ -30,6 +31,11 @@ if SET == "P":
     TP = times(D.parent / "final_20261118" / "res_P_s*.jsonl", 60)
     balance({(p, s): [(p, c, s) for c in (CF[(i + s) % 2:] + CF[:(i + s) % 2])] for i, p in enumerate(PROBS) for s in (1, 2, 3)},
             lambda p, c, s: TP.get((p, s), TP.get((p, 1), 60)) + 8, NS, "shards_P.json", 60)
+elif SET == "PR":
+    TP = times(D.parent / "final_20261118" / "res_P_s*.jsonl", 60)
+    CR = ["def", "r5", "r6", "r7", "r8", "r9", "r10"]
+    balance({(p, s): [(p, c, s) for c in (CR[(i + s) % 7:] + CR[:(i + s) % 7])] for i, p in enumerate(PROBS) for s in (1, 2, 3)},
+            lambda p, c, s: TP.get((p, s), TP.get((p, 1), 60)) + 8, NS, "shards_PR.json", 60)
 elif SET == "M":
     TM = times(D.parent / "vsscip_20261120" / "res_M_s*.jsonl", 600)
     MP = sorted({x for part in json.loads((D.parent / "cbcimpl_20261029/mitt_parts.json").read_text()) for x in part})
