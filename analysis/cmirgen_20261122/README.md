@@ -118,3 +118,7 @@ aggrsel_20261121 の続き。根の下界の差のうち、neos-1582420 は SCIP
 - 書き出しのコマンド (リポジトリの根から):
   `ENOMOTO_MIP_CMIRDUMP=300000 ENOMOTO_MIP_NODE_LIMIT=1 ENOMOTO_MIP_NO_RESTART=1 ENOMOTO_MIP_THREADS=1 python3 scripts/run_miplib_benchmark.py --worker-ours .miplib_cache/mc11.mps --time-limit 120 --threads 1 2>&1 >/dev/null | grep ^CMIRDUMP > analysis/cmirgen_20261122/dump/mc11.txt`
 - presolved/ (SCIP の前処理の後の問題) は回して作るだけで、コミットしない。
+
+## 6. 広い計測 (P、def 対 f、60 秒) の回したビルド
+
+- P 4: b1fdadb74 (2c8314ac3 以降、build.sh の wheel、0.1.10、site-packages から読み込み)。58 行・crash 0。分担 4 だけの集計 (`ci.py 60 def f res_P_s4.jsonl`): 27 問、f/def 1.000 [0.983, 1.018]、解けた def 23 / f 23、食い違い 0。1.25 倍超: pk1 種 2 で f が 1.32 倍遅い (11.4→15.0 秒、ノード 178845→238112)、sp150x300d 種 1 で f が速い (1.01→0.19 秒、根で解けた)。時間切れ 6 件 (両方): 暫定解は f が良い 2 (blp-ar98 種 3 6410.4 vs 6478.4、cvs16r128-89 種 3 -94 vs -93)・悪い 1 (supportcase26 種 3 1823.3 vs 1781.0)・同じ 3 (30n20b8 種 3、gen-ip002 種 1、mas74 種 1)。下界は 30n20b8 種 3 で f が悪い (140 vs 151)、supportcase26 種 3 で f が良い (1415.9 vs 1403.5)、他はほぼ同じ。
