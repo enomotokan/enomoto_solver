@@ -125,7 +125,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `d`: 箱の LP から根の丸めとダイブ
         let mut dive_note = String::new();
         if let Some(pos) = keep_pos {
-            dive_note = self.lpbox_dives(&xbar, pos);
+            dive_note = self.lpbox_dives(&xbar, pos, false);
         }
         // 予算: FJ のスレッドの Local-MIP の上限 × 割合、根までの秒と残り時間で頭打ち
         let t_now = self.start.elapsed().as_secs_f64();
@@ -222,7 +222,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// `d`: 定義域に箱が置かれた状態 (位置 `pos` から上が箱) で呼ぶ。LP を箱で解き直し、丸めとダイブを回してから、定義域と LP を
     /// 箱の前に戻す。ログに足す文字列を返す
-    fn lpbox_dives(&mut self, xbar: &[f64], pos: usize) -> String {
+    pub(super) fn lpbox_dives(&mut self, xbar: &[f64], pos: usize, rd: bool) -> String {
         let p = self.p;
         let saved = self.lp.save_state();
         self.sync_lp();
@@ -237,7 +237,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if st == LpStatus::Optimal {
             let x = self.lp.col_values();
             if self.fractional(&x).is_empty() {
-                self.heur_label = "LPBOX LP";
+                self.heur_label = if rd { "RENSDIVE LP" } else { "LPBOX LP" };
                 if self.try_lp_solution() {
                     found_any += 1;
                     out.push("LP integral".to_string());
@@ -245,8 +245,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.heur_label = "";
             } else {
                 let has_inc = self.incumbent.is_some();
-                let names: [(&'static str, u8); 6] =
-                    [("LPBOX simple rounding", 0), ("LPBOX randomized rounding", 1), ("LPBOX fractional diving", 2), ("LPBOX coefficient diving", 3), ("LPBOX vector length diving", 4), ("LPBOX guided diving", 5)];
+                let names: [(&'static str, u8); 6] = if rd {
+                    [("RENSDIVE simple rounding", 0), ("RENSDIVE randomized rounding", 1), ("RENSDIVE fractional diving", 2), ("RENSDIVE coefficient diving", 3), ("RENSDIVE vector length diving", 4), ("RENSDIVE guided diving", 5)]
+                } else {
+                    [("LPBOX simple rounding", 0), ("LPBOX randomized rounding", 1), ("LPBOX fractional diving", 2), ("LPBOX coefficient diving", 3), ("LPBOX vector length diving", 4), ("LPBOX guided diving", 5)]
+                };
                 for (name, kind) in names {
                     if self.time_up() || (kind == 5 && !has_inc && self.incumbent.is_none()) {
                         continue;
@@ -272,7 +275,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if imp {
                         found_any += 1;
                     }
-                    out.push(format!("{} {}{}", &name[6..], self.lp.total_iterations() - ti, if imp { "*" } else { "" }));
+                    out.push(format!("{} {}{}", name.split_once(' ').map_or(name, |t| t.1), self.lp.total_iterations() - ti, if imp { "*" } else { "" }));
                 }
             }
         }
@@ -285,4 +288,65 @@ impl<'a, L: MipLp> Solver<'a, L> {
             out.join(", ")
         )
     }
+
+    /// 試作 `ENOMOTO_MIP_RENSDIVE` (既定では使わない、analysis/rensdive_20261122、利用者の案): 外側の根で RENS の前に 1 回、サブ MIP を作らず
+    /// 主の LP のまま RENS と同じ固定 (LP で整数値の整数列を全部固定、分数の整数列は ⌊x̄⌋〜⌈x̄⌉) を定義域に置いて伝播し、その LP 解から
+    /// 根の丸めとダイブ (分数・係数・ベクトル長、暫定解があれば誘導) を回す ([`Self::lpbox_dives`] を使い回す。予算も同じ 0.05 × LP 反復 + 1000)。
+    /// サブ MIP の中のダイブ (暫定解がない間だけ、誘導なし) と違い、丸めの成否によらず回す。暫定解が良くなったら真
+    pub(super) fn rensdive(&mut self) -> bool {
+        let p = self.p;
+        let xl = self.lp.col_values();
+        if xl.len() < p.n {
+            return false;
+        }
+        let xbar: Vec<f64> = xl[..p.n].to_vec();
+        let z0 = self.incumbent.as_ref().map(|(z, _)| *z);
+        let t0 = Instant::now();
+        let pos = self.dom.stack_len();
+        let (mut nfix, mut nnar, mut nfree) = (0usize, 0usize, 0usize);
+        for j in 0..p.n {
+            if !p.is_int[j] || self.dom.lo[j] >= self.dom.up[j] || self.dom.infeasible {
+                continue;
+            }
+            nfree += 1;
+            let v = xbar[j];
+            if (v - v.round()).abs() <= FEASTOL {
+                self.dom.tighten_lower(p, j, v.round());
+                self.dom.tighten_upper(p, j, v.round());
+                nfix += 1;
+            } else {
+                let a = self.dom.tighten_lower(p, j, v.floor());
+                let b = self.dom.tighten_upper(p, j, v.ceil());
+                if a || b {
+                    nnar += 1;
+                }
+            }
+        }
+        let ok = !self.dom.infeasible && self.dom.propagate(p);
+        let note = if ok {
+            self.lpbox_dives(&xbar, pos, true)
+        } else {
+            self.dom.backtrack_to(p, pos);
+            "infeasible after the propagation; ".to_string()
+        };
+        let z1 = self.incumbent.as_ref().map(|(z, _)| *z);
+        let imp = match (z0, z1) {
+            (None, Some(_)) => true,
+            (Some(a), Some(b)) => b < a,
+            _ => false,
+        };
+        if self.params.verbose {
+            eprintln!(
+                "MIP: RENSDIVE: {note}fixed {nfix} of {nfree} free integer columns, narrowed {nnar}, incumbent {z0:?} -> {z1:?} ({:.2}s, at {:.2}s)",
+                t0.elapsed().as_secs_f64(),
+                self.start.elapsed().as_secs_f64()
+            );
+        }
+        imp
+    }
+}
+
+/// `ENOMOTO_MIP_RENSDIVE` が付いているか
+pub(crate) fn rensdive_on() -> bool {
+    env_str!("ENOMOTO_MIP_RENSDIVE").is_some_and(|v| v != "0")
 }
