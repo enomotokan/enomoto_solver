@@ -8,6 +8,8 @@
 //! - `s`: 並列の FJ のスレッド (根の FJ・Local-MIP、[`super::heuristics::fj_lmip_mix`]) の時間の上限を半分にする (全体の問題と箱の問題で
 //!   予算を分ける形。FJ のスレッドはふつう根のカットのループの終わりで止められるので、上限が効くのは長い根だけ)
 //! - `l`: FJ を回さず Local-MIP だけ
+//! - `t`: 予算を手間で数える (決定的): 解探しの間だけ主のスレッドの時計を手間 ([`crate::ticks::set_vclock`]、`ENOMOTO_MIP_TICKS` の `j` と
+//!   同じ物差し、手間 × 1e-9 を秒とみなす) にし、根までの秒の頭打ちの代わりに、ここまでの主のスレッドの手間で頭打ちにする。残り時間の頭打ちはしない
 //!
 //! 調整: `ENOMOTO_T_MIP_LPBOX_K` (3) 箱の幅、`ENOMOTO_T_MIP_LPBOX_TRIES` (3) 伝播で実行不能のときのやり直しの回数 (k を倍、0-1 の固定を
 //! 半分 → なし)、`ENOMOTO_T_MIP_LPBOX_SHARE` (0.5) 予算 (FJ のスレッドの Local-MIP の上限 = `ENOMOTO_T_MIP_LOCALMIP_TIME_FRAC` × 時間上限、
@@ -112,9 +114,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let ftl = self.params.frac_tl();
         let full = if ftl.is_finite() { (tunable!("ENOMOTO_T_MIP_LOCALMIP_TIME_FRAC", 0.1, f64) * ftl).min(10.0) } else { 10.0 };
         let mut cap = tunable!("ENOMOTO_T_MIP_LPBOX_SHARE", 0.5, f64) * full;
-        cap = cap.min(t_now.max(0.1));
-        if let Some(d) = self.deadline {
-            cap = cap.min(d.saturating_duration_since(Instant::now()).as_secs_f64());
+        let tk = on('t');
+        if tk {
+            cap = cap.min((crate::ticks::total() * 1e-9).max(0.1));
+        } else {
+            cap = cap.min(t_now.max(0.1));
+            if let Some(d) = self.deadline {
+                cap = cap.min(d.saturating_duration_since(Instant::now()).as_secs_f64());
+            }
         }
         if cap <= 0.0 {
             return false;
@@ -123,6 +130,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let stop = std::sync::atomic::AtomicBool::new(false);
         let mut sols: Vec<Vec<f64>> = Vec::new();
         let t0 = Instant::now();
+        // `t`: 時計を手間に (終わったら戻す)
+        let vprev = crate::ticks::vclock();
+        crate::ticks::set_vclock(tk || vprev);
+        let c0 = crate::ticks::clock_secs(t0);
+        let el = || crate::ticks::clock_secs(t0) - c0;
         // FJ: LP 解を丸めた点から
         let mut t_fj = 0.0;
         let mut fj_found = false;
@@ -134,7 +146,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     sols.push(x);
                 }
             }
-            t_fj = t0.elapsed().as_secs_f64();
+            t_fj = el();
         }
         // Local-MIP: LP 解を丸めた点から (FJ の解があれば受け取って磨く)
         let mut lm_imp = 0usize;
@@ -145,9 +157,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 lm.inject(x);
             }
             let stall = tunable!("ENOMOTO_T_MIP_LPBOX_STALL", 0.5, f64) * cap;
-            let mut t_imp = t0.elapsed().as_secs_f64();
+            let mut t_imp = el();
             while !lm.done {
-                let now = t0.elapsed().as_secs_f64();
+                let now = el();
                 if now >= cap || now - t_imp >= stall.max(0.2) {
                     break;
                 }
@@ -157,12 +169,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if let Some(x) = lm.res.best.clone() {
                         sols.push(x);
                         lm_imp += 1;
-                        t_imp = t0.elapsed().as_secs_f64();
+                        t_imp = el();
                     }
                 }
             }
         }
-        let secs = t0.elapsed().as_secs_f64();
+        let secs = el();
+        crate::ticks::set_vclock(vprev);
         let inc0 = self.incumbent.as_ref().map(|(z, _)| *z);
         let best = sols.last().map(|x| p.objective(x));
         let n = sols.len();
