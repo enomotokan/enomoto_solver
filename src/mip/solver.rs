@@ -1146,6 +1146,11 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) vbounds: Option<Rc<super::cuts::VarBounds>>,
     /// 試作 `ENOMOTO_MIP_VB_IMPL` ([`Self::separate`]): `vbounds` にプロービングの含意の変数上下限を足したもの (最初の分離で作る)
     pub(super) vbounds_impl: Option<Rc<super::cuts::VarBounds>>,
+    /// 試作 `ENOMOTO_MIP_VB_IMPL` の `t`: 含意から足した変数上下限 (列, 上側か, y, d, e) と、外側の根の最後の分離の LP 解・
+    /// 木で使う変数上下限 (`vbounds` + 根の LP 解で張り付いていた含意だけ)
+    pub(super) vb_impl_added: Vec<(usize, bool, usize, f64, f64)>,
+    pub(super) vb_impl_rootx: Option<std::sync::Arc<Vec<f64>>>,
+    pub(super) vbounds_impl_tree: Option<Rc<super::cuts::VarBounds>>,
     /// 診断 `ENOMOTO_MIP_INTVUB_DUMP` を出したか
     pub(super) intvub_dumped: bool,
     /// 根で解を見つけなかったヒューリスティクス ([`heur_bit`] のビット)。再スタートで引き継ぐ。
@@ -1610,6 +1615,8 @@ pub(crate) struct TreeSnapshot {
     hcm_auto: bool,
     /// 根で 1 本も採られなかったのでノードで使わない分離器 (`ENOMOTO_MIP_SEP_ADAPTIVE`、[`super::separation::SepAdapt::node_off`])。
     sep_node_off: u16,
+    /// 試作 `ENOMOTO_MIP_VB_IMPL` の `t`: 外側の根の最後の分離の LP 解 (木の分離で、張り付いていた含意の変数上下限だけを使う)
+    vb_impl_rootx: Option<std::sync::Arc<Vec<f64>>>,
     /// 根で測った分離器の効き目 (`ENOMOTO_MIP_SEPSTAT`、[`super::seplearn::SepLearn::for_tree`])
     sepl: super::seplearn::SepLearn,
     /// 完全オービトープと、対称性の行・固定を加える前の問題 (写しから解く求解も orbitopal fixing をし、ヒューリスティクスの
@@ -5682,6 +5689,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         parord_from_pool: false,
         vbounds: None,
         vbounds_impl: None,
+        vb_impl_added: Vec::new(),
+        vb_impl_rootx: snap.as_ref().and_then(|sn| sn.vb_impl_rootx.clone()),
+        vbounds_impl_tree: None,
         intvub_dumped: false,
         failed_heurs: 0,
         cut_age: Vec::new(),
@@ -24963,7 +24973,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let pool: Vec<(Vec<(usize, f64)>, f64)> = self.cut_pool.iter().map(|(c, r, _)| (c.clone(), *r)).collect();
         let orig = self.orig.as_ref().map(|o| std::sync::Arc::new(if gap4('o') { o.clone_without_implications() } else { (**o).clone() }));
         let root_basis = if tree_root_basis() { Some(self.lp.basis()) } else { None };
-        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), hcm_auto: self.hcm_auto, sep_node_off: self.sep_adapt.node_off, sepl: self.sl.for_tree(), orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone(), sst_chain: (*self.sst_chain).clone(), of_gens: self.of_gens.gens.clone(), refl_gens: self.symdyn.as_ref().map(|d| d.refl()).unwrap_or_default(), root_basis, clq_lazy: self.clq_lazy.clone(), gen_lazy: self.gen_lazy.clone() };
+        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), hcm_auto: self.hcm_auto, sep_node_off: self.sep_adapt.node_off, vb_impl_rootx: self.vb_impl_rootx.clone(), sepl: self.sl.for_tree(), orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone(), sst_chain: (*self.sst_chain).clone(), of_gens: self.of_gens.gens.clone(), refl_gens: self.symdyn.as_ref().map(|d| d.refl()).unwrap_or_default(), root_basis, clq_lazy: self.clq_lazy.clone(), gen_lazy: self.gen_lazy.clone() };
         if self.params.verbose && env_str!("ENOMOTO_MIP_BISECT_VERBOSE").is_some() {
             eprintln!("MIP: tree snapshot {serial}: {} nodes, {} cut rows, valid below {:.10e} ({:.1}s)", snap.nodes.len(), snap.rows.len(), snap.valid_below, self.start.elapsed().as_secs_f64());
         }

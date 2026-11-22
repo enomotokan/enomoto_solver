@@ -236,6 +236,11 @@ fn gen_type() -> bool {
 /// 最良 1 本だけでなく、その中で最良の質の `ENOMOTO_T_CUTSEL_MIN_REL` (既定 0.5、全体の選択 `select_cuts_hybrid` の質の下限と同じ値) 倍以上の
 /// ものから良い順に最大 `ENOMOTO_T_MIP_GEN_TOP3_N` (既定 3) 本残す。平行度・本数は全体の選択に任せる。`ENOMOTO_MIP_GEN_TYPE` より優先。
 /// `ENOMOTO_MIP_GEN_TOP3_LOG` で集約行ごとの候補の数と下限以上の数を `GENTOP3 n above` と出す (診断)
+/// 試作 `ENOMOTO_MIP_AGGRSEL` ([`Solver::path_aggregation_highs`] の相手の行を SCIP の点数で選ぶ、analysis/aggrsel_20261121)
+fn aggrsel() -> bool {
+    env_str!("ENOMOTO_MIP_AGGRSEL").is_some()
+}
+
 fn gen_top3() -> bool {
     env_str!("ENOMOTO_MIP_GEN_TOP3").is_some()
 }
@@ -5416,6 +5421,44 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let feastol = PATHH_FEASTOL;
         let bound_dist = |j: usize| -> f64 { pathh_bound_dist(vars, j) };
         let (rtype, cont, col_rows, subst) = pathh_row_types(vars, lp_rows, n);
+        // 試作 `ENOMOTO_MIP_AGGRSEL` (既定では使わない。analysis/aggrsel_20261121): 消す連続変数の相手の行を、乱数の位置から最初に
+        // 使えるものでなく、SCIP の sepa_aggregation.c の行の点数 (|双対値| × 分数の活動量 / 行のノルム) が最も高いものにする。
+        // 分数の活動量 = Σ |a_ij| × min(f_j, 1 − f_j) (整数列)、連続列は効いている変数上界・下界の相手の整数列の分数 × 係数 (SCIP と同じ)。
+        // SCIP の点数の密度・すき間の小さな項 (densityscore 1e-4・slackscore 1e-3) は入れない (新しい閾値を置かない)。同点は行の番号の小さい方
+        let rscore: Option<Vec<f64>> = aggrsel().then(|| {
+            let duals = self.lp.row_duals();
+            let frac = |v: f64| {
+                let f = v - v.floor();
+                f.min(1.0 - f).max(0.0)
+            };
+            let fj: Vec<f64> = (0..n)
+                .map(|j| {
+                    if vars.is_int[j] {
+                        return frac(vars.x[j]);
+                    }
+                    let mut f = 0.0;
+                    if let Some(vb) = vars.vb {
+                        for &(y, a, e) in &vb.vub[j] {
+                            if (a * vars.x[y] + e - vars.x[j]).abs() <= feastol {
+                                f += a.abs() * frac(vars.x[y]);
+                            }
+                        }
+                        for &(y, a, e) in &vb.vlb[j] {
+                            if (vars.x[j] - a * vars.x[y] - e).abs() <= feastol {
+                                f += a.abs() * frac(vars.x[y]);
+                            }
+                        }
+                    }
+                    f
+                })
+                .collect();
+            (0..m)
+                .map(|i| {
+                    let (fa, nr) = lp_rows[i].iter().fold((0.0, 0.0), |(fa, nr), &(j, a)| (fa + (a * fj[j]).abs(), nr + a * a));
+                    duals.get(i).map_or(0.0, |d| d.abs()) * fa / nr.sqrt().max(0.1)
+                })
+                .collect()
+        });
         // 連続変数ごとの入る行・出る行
         let mut in_arcs: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
         let mut out_arcs: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
@@ -5622,6 +5665,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let find_row = |j: usize, v: f64, arcs: &Vec<(usize, f64)>, s: &mut Self, path: &Vec<usize>| -> Option<(usize, f64)> {
                         if arcs.is_empty() {
                             return None;
+                        }
+                        if let Some(rs) = rscore.as_ref() {
+                            let mut best: Option<(usize, f64, f64)> = None;
+                            for &(r, a) in arcs {
+                                let w = -v / a;
+                                if !in_path(r, path) && w.abs() <= 1.0 / feastol && w.abs() >= feastol && best.is_none_or(|b| rs[r] > b.2) {
+                                    best = Some((r, w, rs[r]));
+                                }
+                            }
+                            let _ = j;
+                            return best.map(|b| (b.0, b.1));
                         }
                         let k0 = ((s.rand() * arcs.len() as f64) as usize).min(arcs.len() - 1);
                         for t in 0..arcs.len() {
@@ -6505,8 +6559,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // unitcal_7 では同じ LP 解で作った経路のカットの LP の伸びが HiGHS の 1/2〜1/3 で、HiGHS のカットは 0-1 列が 1 本あたり 1.3〜1.6 本多い。
         // 値に `r` を含めば外側の根 (ノードの分離でなく、ノード数 1 以下) でだけ使う。`ENOMOTO_T_MIP_VB_IMPL_MINREL` = τ (既定 0) なら、
         // 締め幅 |境界 - b| が列の幅 (U - L、有限のとき) の τ 倍以上の含意だけを使う
+        // `t` (analysis/vbimpl_20261122): 外側の根では全部使い、その最後の分離の LP 解を控える。木 (ノードの分離・写しから解く従) では、
+        // 控えた根の LP 解で張り付いていた (余裕が経路の集約と同じ許容誤差 `PATHH_FEASTOL` (1e-6) 以内の) 含意の変数上下限だけを足す (新しい閾値なし)
         let vb_impl_mode = env_str!("ENOMOTO_MIP_VB_IMPL").filter(|v| *v != "0");
-        let use_impl = vb_impl_mode.is_some_and(|m| !m.contains('r') || (!light && self.nodes <= 1 && self.snap.is_none()));
+        let vb_at_root = !light && self.nodes <= 1 && self.snap.is_none();
+        let use_impl = vb_impl_mode.is_some_and(|m| !m.contains('r') || vb_at_root);
+        let vb_tight = vb_impl_mode.is_some_and(|m| m.contains('t'));
         if use_impl && self.vbounds_impl.is_none() {
             let mut vbs: VarBounds = (**self.vbounds.as_ref().unwrap()).clone();
             let cap = tunable!("ENOMOTO_T_MIP_VB_IMPL_MAX", 8usize, usize);
@@ -6531,6 +6589,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if list.len() < cap && !list.iter().any(|&(yy, dd, ee)| yy == y && (dd - d).abs() <= 1e-9 && (ee - e).abs() <= 1e-9) {
                     list.push((y, d, e));
                     added += 1;
+                    if vb_tight {
+                        self.vb_impl_added.push((k, upper, y, d, e));
+                    }
                 }
             }
             if self.params.verbose && !self.params.submip {
@@ -6539,6 +6600,35 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.vbounds_impl = Some(std::rc::Rc::new(vbs));
         }
         let vb = if use_impl { self.vbounds_impl.clone() } else { self.vbounds.clone() };
+        let vb = if vb_tight && use_impl {
+            if vb_at_root {
+                self.vb_impl_rootx = Some(std::sync::Arc::new(xv[..n].to_vec()));
+                vb
+            } else if let Some(rx) = self.vb_impl_rootx.clone().filter(|rx| rx.len() == n) {
+                if self.vbounds_impl_tree.is_none() {
+                    let mut vbs: VarBounds = (**self.vbounds.as_ref().unwrap()).clone();
+                    let tol = PATHH_FEASTOL;
+                    let mut kept = 0usize;
+                    for &(k, upper, y, d, e) in &self.vb_impl_added {
+                        let slack = if upper { d * rx[y] + e - rx[k] } else { rx[k] - d * rx[y] - e };
+                        if slack <= tol {
+                            if upper { vbs.vub[k].push((y, d, e)) } else { vbs.vlb[k].push((y, d, e)) }
+                            kept += 1;
+                        }
+                    }
+                    if self.params.verbose && !self.params.submip && self.snap.is_none() {
+                        eprintln!("MIP: VB_IMPL t: {kept} of {} implied variable bounds tight at the root LP kept for the tree", self.vb_impl_added.len());
+                    }
+                    self.vbounds_impl_tree = Some(std::rc::Rc::new(vbs));
+                }
+                self.vbounds_impl_tree.clone()
+            } else {
+                // 根の LP 解がない (根の分離を経ていない) なら含意は足さない
+                self.vbounds.clone()
+            }
+        } else {
+            vb
+        };
         // 試作 `ENOMOTO_MIP_IMPLINT_TU2` の `a` ([`Solver::cut_imp`]): TU2 で足した暗に整数の列は連続の印に戻し、`imp` で渡す
         if !self.cut_imp.is_empty() {
             for j in 0..n {

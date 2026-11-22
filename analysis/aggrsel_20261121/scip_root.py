@@ -1,12 +1,12 @@
 """SCIP (pyscipopt) の根だけ: python scip_root.py 並べる数 [札=param:value,... ...]。
 問題 PROBS × 札 (VARS) を 1 スレッド・limits/nodes=1・再スタートなし (presolving/maxrestarts=0) で解き、根の下界と分離器ごとの統計
 (Separators の表: 呼んだ回数・見つけたカット・LP に入ったカット) を scip_root.jsonl に足す。統計の全文は logs/scip_<問題>_<札>.stats。"""
-import json, sys, re
+import json, os, sys, re
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 D = Path(__file__).resolve().parent
 WT = D.parents[1]
-PROBS = "unitcal_7 neos-911970 neos-1582420 mc11 p200x1188c beasleyC3".split()
+PROBS = os.environ.get("AGGRSEL_PROBS", "unitcal_7 neos-911970 neos-1582420 mc11 p200x1188c beasleyC3").split()
 BASE = {"limits/nodes": 1, "presolving/maxrestarts": 0, "limits/time": 900.0, "randomization/randomseedshift": 0}
 VARS = {
     "base": {},
@@ -23,6 +23,10 @@ VARS = {
     "r25": {"separating/maxroundsroot": 25},
     "r25_noaggr": {"separating/maxroundsroot": 25, "separating/aggregation/freq": -1},
     "r25_aggr0": {"separating/maxroundsroot": 25, "separating/aggregation/maxaggrsroot": 0},
+    # 1 行だけ (aggr0) で、集約行から作るカットの種類を 1 つずつ切る
+    "r25_aggr0_nokc": {"separating/maxroundsroot": 25, "separating/aggregation/maxaggrsroot": 0, "separating/knapsackcover/freq": -1},
+    "r25_aggr0_nofc": {"separating/maxroundsroot": 25, "separating/aggregation/maxaggrsroot": 0, "separating/flowcover/freq": -1},
+    "r25_aggr0_nocmir": {"separating/maxroundsroot": 25, "separating/aggregation/maxaggrsroot": 0, "separating/cmir/freq": -1},
 }
 def sep_table(txt):
     out = {}; on = False
