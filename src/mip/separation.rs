@@ -2777,7 +2777,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             // 診断 (`ENOMOTO_MIP_CUTSTOP_LOG`、analysis/sepalloc_20261121/): ラウンドの初めの LP の値とループの手間 (同じ手間での伸びの比べ用)
             if !self.params.submip && job.is_none() && env_str!("ENOMOTO_MIP_CUTSTOP_LOG").is_some_and(|v| v != "0") {
-                eprintln!("CUTTK round {round} obj {:.10e} tk {:.0}", self.lp.objective() + p.offset, super::sepalloc::loop_ticks());
+                // (analysis/cutstop_20261122: LP の行の数と非零・全体の手間も出す。ラウンドの損の見積り用)
+                let nr = self.lp.num_rows();
+                let nnz: usize = (0..nr).map(|i| self.lp.row(i).len()).sum();
+                eprintln!(
+                    "CUTTK round {round} obj {:.10e} tk {:.0} rows {nr} nnz {nnz} total_tk {:.0} secs {:.3}",
+                    self.lp.objective() + p.offset,
+                    super::sepalloc::loop_ticks(),
+                    crate::ticks::total_with_diag(),
+                    self.start.elapsed().as_secs_f64()
+                );
             }
             // 診断 (`ENOMOTO_MIP_DEBUG_SEP_AT=<接頭辞>`、analysis/slow2_20261117): 外側の最初の根の 0 ラウンド目に、ほかのソルバー (計装した HiGHS) の
             // 各ラウンドの LP 解 `<接頭辞>_r<k>.txt` (1 行 1 値、この問題と同じ列の番号) を k = 0, 1, ... の順に読み、その点で分離器を回した候補を
