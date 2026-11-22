@@ -1,5 +1,5 @@
 """根だけ (1 スレッド・NODE_LIMIT=1・再スタートなし・種 1): python root.py 並べる数 [設定 ...]。問題 PROBS × 設定 (cfg.py) を解き、
-CUTSTOP (最初の根のループの理由・ラウンド・下界) と全体の結果を root.jsonl に足す (済んだ組は飛ばす)。"""
+CUTSTOP (最初の根のループの理由・ラウンド・下界) と全体の結果と試作 CMIRGEN の診断 (f0 > 0.995 のカットの数と行方) を root.jsonl に足す (済んだ組は飛ばす)。"""
 import json, os, subprocess, sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -12,13 +12,14 @@ OUT = D / "root.jsonl"
 def one(job):
     p, c = job
     env = {k: v for k, v in os.environ.items() if not k.startswith("ENOMOTO_")}
-    env.update({"ENOMOTO_MIP_NODE_LIMIT": "1", "ENOMOTO_MIP_NO_RESTART": "1", "ENOMOTO_MIP_CUTSTOP_LOG": "1", "ENOMOTO_MIP_THREADS": "1", "ENOMOTO_T_MIP_SEED": "1"})
+    env.update({"ENOMOTO_MIP_NODE_LIMIT": "1", "ENOMOTO_MIP_NO_RESTART": "1", "ENOMOTO_MIP_CUTSTOP_LOG": "1", "ENOMOTO_MIP_LOG": "1", "ENOMOTO_MIP_THREADS": "1", "ENOMOTO_T_MIP_SEED": "1"})
     env.update(CFGS[c])
     r = subprocess.run([sys.executable, str(R / "scripts/run_miplib_benchmark.py"), "--worker-ours", str(R / ".miplib_cache" / f"{p}.mps"), "--time-limit", "900", "--threads", "1"],
                        cwd=R, env=env, capture_output=True, text=True)
     cs = [json.loads(l.split("CUTSTOP", 1)[1]) for l in r.stderr.splitlines() if l.startswith("CUTSTOP {")]
     res = json.loads([l for l in r.stdout.splitlines() if l.startswith("{")][-1])
-    row = {"problem": p, "cfg": c, "cut": {k: cs[0][k] for k in ("reason", "rounds", "obj0", "obj1")} if cs else None, "result": res}
+    hf = [l.split(": ", 1)[1] for l in r.stderr.splitlines() if "CMIRGEN high f0" in l]
+    row = {"problem": p, "cfg": c, "cut": {k: cs[0][k] for k in ("reason", "rounds", "obj0", "obj1")} if cs else None, "result": res, "hf0": hf[-1] if hf else None}
     with open(OUT, "a") as f:
         f.write(json.dumps(row) + "\n")
     print(c, p, row["cut"], round(res["time"], 1), flush=True)

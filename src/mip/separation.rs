@@ -8311,6 +8311,44 @@ pub(super) static CANCEL_STATS: [std::sync::atomic::AtomicU64; 5] = [const { std
 pub(super) static GAP4_CUT_SHORTENED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn finish_cut(
+    mut raw: RawCut,
+    n: usize,
+    lp_rows: &[Vec<(usize, f64)>],
+    is_int: &[bool],
+    lo: &[f64],
+    up: &[f64],
+    x: &[f64],
+    incumbent: Option<&[f64]>,
+    scratch: &mut [f64],
+) -> Option<Candidate> {
+    // 試作 `ENOMOTO_MIP_CMIRGEN` の診断の印 ([`super::cuts::HIGH_F0`]) を外し、行方を数える
+    if raw.kind & super::cuts::HIGH_F0 != 0 {
+        use std::sync::atomic::Ordering::Relaxed;
+        raw.kind &= !super::cuts::HIGH_F0;
+        FINISH_DYN_REJ.with(|c| c.set(false));
+        let r = finish_cut_impl(raw, n, lp_rows, is_int, lo, up, x, incumbent, scratch);
+        let st = &super::cuts::HF0_STATS;
+        st[4].fetch_add(1, Relaxed);
+        st[if r.is_some() { 5 } else if FINISH_DYN_REJ.with(|c| c.get()) { 6 } else { 7 }].fetch_add(1, Relaxed);
+        if r.is_some() {
+            // 通ったカットの係数の幅: [8] ≤ 1e2、[9] ≤ 1e4、[10] ≤ 1e6
+            let d = FINISH_DYN.with(|c| c.get());
+            st[if d <= 1e2 { 8 } else if d <= 1e4 { 9 } else { 10 }].fetch_add(1, Relaxed);
+        }
+        return r;
+    }
+    finish_cut_impl(raw, n, lp_rows, is_int, lo, up, x, incumbent, scratch)
+}
+
+thread_local! {
+    /// [`finish_cut_impl`] が係数の幅 (1e6) で外したか (試作 `ENOMOTO_MIP_CMIRGEN` の診断)
+    static FINISH_DYN_REJ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// [`finish_cut_impl`] の係数の幅 (最大 / 最小、同じ診断)
+    static FINISH_DYN: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_cut_impl(
     raw: RawCut,
     n: usize,
     lp_rows: &[Vec<(usize, f64)>],
@@ -8539,7 +8577,9 @@ fn finish_cut(
     // 係数の幅 (dynamism) が大きすぎるカットは数値的に危ないので捨てる (小さい係数を吸収した後で判定する)
     let cmax = coefs.iter().fold(0.0f64, |m, &(_, c)| m.max(c.abs()));
     let cmin = coefs.iter().fold(f64::INFINITY, |m, &(_, c)| m.min(c.abs()));
+    FINISH_DYN.with(|c| c.set(cmax / cmin));
     if cmax / cmin > 1e6 {
+        FINISH_DYN_REJ.with(|c| c.set(true));
         return None;
     }
     // 最大係数 1 にスケール
