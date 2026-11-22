@@ -232,9 +232,9 @@ fn gen_type() -> bool {
     env_str!("ENOMOTO_MIP_GEN_TYPE").is_some()
 }
 
-/// 試作 `ENOMOTO_MIP_GEN_TOP3` (既定では使わない。analysis/gentop3_20261121): [`keep_best`] で、集約行 1 本 (の向き 1 つ) から作った候補を
+/// `ENOMOTO_MIP_GEN_TOP3` (2026-11-22 に既定化、`=0` で切る。analysis/gentop3_20261121): [`keep_best`] で、集約行 1 本 (の向き 1 つ) から作った候補を
 /// 最良 1 本だけでなく、その中で最良の質の `ENOMOTO_T_CUTSEL_MIN_REL` (既定 0.5、全体の選択 `select_cuts_hybrid` の質の下限と同じ値) 倍以上の
-/// ものから良い順に最大 `ENOMOTO_T_MIP_GEN_TOP3_N` (既定 3) 本残す。平行度・本数は全体の選択に任せる。`ENOMOTO_MIP_GEN_TYPE` より優先。
+/// ものから良い順に最大 `ENOMOTO_T_MIP_GEN_TOP3_N` (既定 3) 本残す (倍率は `ENOMOTO_T_MIP_GEN_TOP3_REL` で GEN_TOP3 だけ変えられる)。平行度・本数は全体の選択に任せる。`ENOMOTO_MIP_GEN_TYPE` より優先。
 /// `ENOMOTO_MIP_GEN_TOP3_LOG` で集約行ごとの候補の数と下限以上の数を `GENTOP3 n above` と出す (診断)
 /// 試作 `ENOMOTO_MIP_AGGRSEL` ([`Solver::path_aggregation_highs`] の相手の行を SCIP の点数で選ぶ、analysis/aggrsel_20261121)
 fn aggrsel() -> bool {
@@ -242,7 +242,7 @@ fn aggrsel() -> bool {
 }
 
 fn gen_top3() -> bool {
-    env_str!("ENOMOTO_MIP_GEN_TOP3").is_some()
+    env_str!("ENOMOTO_MIP_GEN_TOP3").is_none_or(|v| v != "0")
 }
 
 /// `cands[n0..]` のうち質 ([`cut_quality`]、`ENOMOTO_MIP_KEEP_BEST_EFF` なら効き目だけ) の最も大きい 1 本だけ残す
@@ -272,7 +272,11 @@ fn keep_best(cands: &mut Vec<Candidate>, n0: usize, p: &MipProblem) {
         let mut sc: Vec<(f64, usize)> = (n0..cands.len()).map(|i| (q(&cands[i]), i)).collect();
         // 質の高い順、同じなら前の位置 (決定的)
         sc.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
-        let lim = tunable!("ENOMOTO_T_CUTSEL_MIN_REL", 0.5, f64) * sc[0].0;
+        // `ENOMOTO_T_MIP_GEN_TOP3_REL` (GEN_TOP3 専用の倍率、analysis/gentop3_20261121 の 6 節): 未指定なら全体の選択と共用の
+        // `ENOMOTO_T_CUTSEL_MIN_REL` (0.5) と同じ
+        let rel = tunable!("ENOMOTO_T_MIP_GEN_TOP3_REL", f64::NAN, f64);
+        let rel = if rel.is_nan() { tunable!("ENOMOTO_T_CUTSEL_MIN_REL", 0.5, f64) } else { rel };
+        let lim = rel * sc[0].0;
         let above = sc.iter().take_while(|s| s.0 >= lim).count();
         if env_str!("ENOMOTO_MIP_GEN_TOP3_LOG").is_some() {
             eprintln!("GENTOP3 {} {above}", sc.len());
