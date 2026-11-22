@@ -232,7 +232,7 @@ fn gen_type() -> bool {
     env_str!("ENOMOTO_MIP_GEN_TYPE").is_some()
 }
 
-/// 試作 `ENOMOTO_MIP_GEN_TOP3` (既定では使わない。analysis/gentop3_20261121): [`keep_best`] で、集約行 1 本 (の向き 1 つ) から作った候補を
+/// `ENOMOTO_MIP_GEN_TOP3` (2026-11-22 に既定化、`=0` で切る。analysis/gentop3_20261121): [`keep_best`] で、集約行 1 本 (の向き 1 つ) から作った候補を
 /// 最良 1 本だけでなく、その中で最良の質の `ENOMOTO_T_CUTSEL_MIN_REL` (既定 0.5、全体の選択 `select_cuts_hybrid` の質の下限と同じ値) 倍以上の
 /// ものから良い順に最大 `ENOMOTO_T_MIP_GEN_TOP3_N` (既定 3) 本残す (倍率は `ENOMOTO_T_MIP_GEN_TOP3_REL` で GEN_TOP3 だけ変えられる)。平行度・本数は全体の選択に任せる。`ENOMOTO_MIP_GEN_TYPE` より優先。
 /// `ENOMOTO_MIP_GEN_TOP3_LOG` で集約行ごとの候補の数と下限以上の数を `GENTOP3 n above` と出す (診断)
@@ -242,7 +242,7 @@ fn aggrsel() -> bool {
 }
 
 fn gen_top3() -> bool {
-    env_str!("ENOMOTO_MIP_GEN_TOP3").is_some()
+    env_str!("ENOMOTO_MIP_GEN_TOP3").is_none_or(|v| v != "0")
 }
 
 /// `cands[n0..]` のうち質 ([`cut_quality`]、`ENOMOTO_MIP_KEEP_BEST_EFF` なら効き目だけ) の最も大きい 1 本だけ残す
@@ -1604,6 +1604,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 試作 `ENOMOTO_MIP_FRACCUT` (analysis/fraccut_20261118): 非整数の度合い Σ min(f, 1−f) と前のラウンドの LP 解
         let fc_mode = fraccut_env().filter(|_| !self.params.submip);
         let mut prev_fsum = frac_sum(&self.fractional(&self.lp.col_values()));
+        // 試作 `ENOMOTO_MIP_CUT_STALL_FRAC` ([`sf_stall`]): このループでのこれまでの最小の距離の総和 F (外側の求解だけ。サブ MIP は既定のまま)
+        let sf_mode = cut_stall_frac().filter(|_| !self.params.submip);
+        let mut sf_min = prev_fsum;
         let mut prev_rows: Vec<(Vec<(usize, f64)>, f64, f64)> = if fc_mode.is_some_and(|v| v.contains('d')) {
             (self.p.m..self.lp.num_rows()).map(|i| { let (lo, up) = self.lp.row_bounds(i); (self.lp.row(i).to_vec(), lo, up) }).collect()
         } else {
@@ -4294,9 +4297,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 break;
                             }
                         }
-                    } else if reldiff <= 1e-4 && (fc_only_obj || nfrac as f64 >= (0.9 - 0.1 * stall as f64) * prev_nfrac as f64) && !fc_frac_ok && !saturated && !widen_now {
+                    } else if reldiff <= 1e-4 && sf_stall(sf_mode, fsum, sf_min, stall) && (fc_only_obj || sf_mode.is_some_and(|m| m.contains('s')) || nfrac as f64 >= (0.9 - 0.1 * stall as f64) * prev_nfrac as f64) && !fc_frac_ok && !saturated && !widen_now {
                         let cr_one = cutrnd_main && cutrnd('f') && super::cap_clock() - t_loop0 < cr_budget;
-                        stall += if nfrac >= prev_nfrac && env_str!("ENOMOTO_MIP_CUT_STALL_ONE").is_none() && !widened && !cr_one { 2 } else { 1 };
+                        // 試作 `ENOMOTO_MIP_CUT_STALL_FRAC` ([`sf_stall`]): +2 は「進んでいない」(`s` は F がこれまでの最小を更新しない、`c` は本数も F も)
+                        let no_progress = match sf_mode {
+                            Some(m) if m.contains('s') => fsum >= sf_min,
+                            Some(m) if m.contains('c') => nfrac >= prev_nfrac && fsum >= sf_min,
+                            _ => nfrac >= prev_nfrac,
+                        };
+                        stall += if no_progress && env_str!("ENOMOTO_MIP_CUT_STALL_ONE").is_none() && !widened && !cr_one { 2 } else { 1 };
                         if stall >= if fc_sub { tunable!("ENOMOTO_T_MIP_FC_SUBMIP_CUT_STALL", 10usize, usize) } else if self.params.submip && !sub_hc { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_STALL", 3usize, usize) } else if heavy { tunable!("ENOMOTO_T_MIP_BG_CUTS_STALL", 20usize, usize) } else { tunable!("ENOMOTO_T_MIP_CUT_STALL", 10usize, usize) } {
                             if !phase2_on && robust_ext && ext_used < tunable!("ENOMOTO_T_MIP_ROBUST_EXT_MAX", 3usize, usize) {
                                 ext_used += 1;
@@ -4340,6 +4349,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         stall = 0;
                     }
                 }
+                // 診断 `ENOMOTO_MIP_CUTSTOP_LOG` (analysis/fracstall_20261122): ラウンドごとの非整数の本数・距離の総和 F・これまでの最小 F・停滞の数
+                if !self.params.submip && job.is_none() && env_str!("ENOMOTO_MIP_CUTSTOP_LOG").is_some_and(|v| v != "0") {
+                    eprintln!("CUTFRAC round {round} obj {:.10e} nfrac {nfrac} F {fsum:.6e} Fmin {sf_min:.6e} stall {stall}", obj + p.offset);
+                }
+                sf_min = sf_min.min(fsum);
                 prev_nfrac = nfrac;
             }
             self.sep_last_gain = (obj - prev_obj) / obj.abs().max(prev_obj.abs()).max(1.0);
@@ -9220,6 +9234,23 @@ mod mushagg_tests {
 pub(super) fn fraccut_env() -> Option<&'static str> {
     static V: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     V.get_or_init(|| std::env::var("ENOMOTO_MIP_FRACCUT").ok().filter(|v| !v.is_empty() && v != "0")).as_deref()
+}
+
+/// 試作 `ENOMOTO_MIP_CUT_STALL_FRAC` (既定では使わない、analysis/fracstall_20261122): 根のカットのループの停滞の判定で、分数の整数列の本数の代わりに
+/// LP 解の整数列の、最も近い整数からの距離の総和 F = Σ min(f, 1−f) を使う。比べる相手は直前の回でなく、このループでのこれまでの最小 F
+/// (F は単調でないので、揺れを進歩と見ない)。係数 (0.9 − 0.1·stall) と +2/+1・10 はそのまま。
+/// - `s`: 本数の条件を F の条件 (F ≥ (0.9 − 0.1·stall)·Fmin なら停滞) に置き換える。+2 は F が最小を更新しないとき。
+/// - `c`: 本数と F の両方の条件で停滞のときだけ数える (どちらかが十分減れば数えない)。+2 は本数も F も減らないとき。
+pub(super) fn cut_stall_frac() -> Option<&'static str> {
+    env_str!("ENOMOTO_MIP_CUT_STALL_FRAC").filter(|v| !v.is_empty() && *v != "0")
+}
+
+/// [`cut_stall_frac`] の F の条件 (試作なしなら常に真)
+fn sf_stall(mode: Option<&str>, fsum: f64, fmin: f64, stall: usize) -> bool {
+    match mode {
+        Some(m) if m.contains('s') || m.contains('c') => fsum >= (0.9 - 0.1 * stall as f64) * fmin,
+        _ => true,
+    }
 }
 
 /// 非整数の度合い Σ min(f, 1−f) (f は値の小数部)
