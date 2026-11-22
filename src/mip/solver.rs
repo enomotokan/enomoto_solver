@@ -20425,7 +20425,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut n = 0;
         // 既定ではリテラルの衝突プールに入れる (行にして証明のプールに入れると、数が多いので双対証明を追い出す)
         let rows = env_str!("ENOMOTO_MIP_MULTI_CONFLICT_ROWS").is_some();
-        for c in &confs {
+        let metas: Vec<super::conflict_pool::DeepMeta> = if super::conflict_pool::confdeep_diag() {
+            super::domain::CONF_META.with(|m| std::mem::take(&mut *m.borrow_mut()))
+        } else {
+            Vec::new()
+        };
+        for (ci, c) in confs.iter().enumerate() {
+            self.lit_conflicts.pending_meta = metas.get(ci).copied();
             let ok = if rows {
                 self.add_conflict_lits(c)
             } else {
@@ -20434,6 +20440,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 self.add_lit_conflict(c)
             };
+            self.lit_conflicts.pending_meta = None;
             if ok {
                 n += 1;
             }
@@ -27191,6 +27198,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if super::cutconf::mode().is_some() {
                 let c = super::cutconf::stats();
                 eprintln!("MIP: cutconf (ENOMOTO_MIP_CUTCONF): calls {}, no start {}, steps plain {} reduced {} (by remembered external rows {}), stop fail {} (general integer {}, continuous {}) decision {} uip {} budget {}, no step {}, dropped {}, out {} (non-binary {}, mean length {:.1}), used: pruned {} tightened {}, {:.2}s", c[0], c[1], c[2], c[3], c[13], c[4], c[14], c[15], c[5], c[6], c[7], c[11], c[10], c[8], c[12], c[9] as f64 / c[8].max(1) as f64, c[16], c[17], super::cutconf::total_secs());
+            }
+            if super::conflict_pool::confdeep_diag() && !self.params.submip {
+                for l in super::conflict_pool::DEEP.lock().unwrap().report() {
+                    eprintln!("{l}");
+                }
             }
             eprintln!("MIP: conflict analysis (HiGHS style): calls {}, conflicts {}, added {}, mean length {:.1}, max length {}, {:.2}s", self.multi_stats[0], self.multi_stats[1], self.multi_stats[2], self.multi_stats[3] as f64 / self.multi_stats[1].max(1) as f64, self.conflict_max_len_multi(), self.multi_secs);
             eprintln!("MIP: conflict score diag: analyses {}, bumped columns per analysis {:.2}, analyses without conflict {:.3}, lit reasons asked per analysis {:.2} (max {}), used {:.2}, analyses cut by the budget {:.3}", self.hcs_diag[0], self.hcs_diag[1] as f64 / self.hcs_diag[0].max(1) as f64, self.hcs_diag[2] as f64 / self.hcs_diag[0].max(1) as f64, self.hcs_diag[3] as f64 / self.hcs_diag[0].max(1) as f64, self.hcs_diag[5], self.hcs_diag[4] as f64 / self.hcs_diag[0].max(1) as f64, self.hcs_diag[6] as f64 / self.hcs_diag[0].max(1) as f64);
