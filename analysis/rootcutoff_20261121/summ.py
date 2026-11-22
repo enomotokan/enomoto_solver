@@ -2,7 +2,7 @@
 import json, math
 from collections import defaultdict
 R = defaultdict(dict)
-for l in open("res.jsonl"):
+for l in open(__import__("pathlib").Path(__file__).parent / "res.jsonl"):
     r = json.loads(l)
     if not r["tag"].startswith("b_"): continue
     x = r["result"]; c = r["tag"][2:]
