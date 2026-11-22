@@ -194,6 +194,19 @@ pub(super) fn stall_scale(obj: f64, prev: f64, off: f64, submip: bool) -> f64 {
     }
 }
 
+/// 試作 `ENOMOTO_MIP_STALL_GAIN=x[s][w]` (既定では使わない、analysis/gainstall_20261122): 根のカットのループの停滞の尺度を始めからの伸びにする閾値 x、
+/// サブ MIP にも効かせるか (`s`)、窓で見る形か (`w`、外側の求解だけ。analysis/gainstall_20261122 の 3 節)
+pub(super) fn stall_gain() -> Option<(f64, bool, bool)> {
+    static V: std::sync::OnceLock<Option<(f64, bool, bool)>> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        env_str!("ENOMOTO_MIP_STALL_GAIN").and_then(|v| {
+            let sub = v.contains('s');
+            let win = v.contains('w');
+            v.trim_end_matches(|c: char| c == 's' || c == 'w').parse::<f64>().ok().filter(|x| *x > 0.0).map(|x| (x, sub, win))
+        })
+    })
+}
+
 pub(super) fn ho6_stall_frac() -> Option<f64> {
     env_str!("ENOMOTO_MIP_HO6_STALL").map(|v| v.parse::<f64>().ok().filter(|t| *t > 0.0 && *t < 1.0).unwrap_or(1e-3))
 }
@@ -1601,6 +1614,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             .flatten();
         let mut prev_obj = self.lp.objective();
         let mut prev_nfrac = self.fractional(&self.lp.col_values()).len();
+        // 試作 `ENOMOTO_MIP_STALL_GAIN` の `w` (窓で見る停滞): ラウンドごとの目的値と分数の列の数 (始めの値から)
+        let mut gw_obj: Vec<f64> = vec![prev_obj];
+        let mut gw_nf: Vec<usize> = vec![prev_nfrac];
         // 試作 `ENOMOTO_MIP_FRACCUT` (analysis/fraccut_20261118): 非整数の度合い Σ min(f, 1−f) と前のラウンドの LP 解
         let fc_mode = fraccut_env().filter(|_| !self.params.submip);
         let mut prev_fsum = frac_sum(&self.fractional(&self.lp.col_values()));
@@ -4186,6 +4202,49 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 「下界の伸びが今までの伸びの 0.1% 以下」と同じ尺度)。unitcal_7 は目的値 1.96e7 に対して根のギャップが 0.35% しかなく、
                 // 1 ラウンド 300〜1000 (今までの伸びの 0.3〜1%) 伸びていても相対変化 1e-4 未満で停滞と数えられ、17 ラウンド前後で止まる
                 // (HiGHS は 47 ラウンド)。この割合以下の伸びのラウンドを停滞とする (分数の列の数の条件は今までどおり)
+                // 試作 `ENOMOTO_MIP_STALL_GAIN=x` (既定では使わない、analysis/gainstall_20261122): 下界の伸びの尺度をループの始めからの伸び
+                // G = obj − first_obj にする。G > 0 なら Δ / G を相対変化の代わりに使い、x 以下で停滞と数える。G = 0 (始めから動かない) なら今の判定のまま。
+                // 外側の求解だけ (値の末尾に `s` でサブ MIP にも)。`ENOMOTO_MIP_CUTSTOP_LOG` で各ラウンドの Δ・G・Δ/G・今の相対変化を出す
+                let reldiff = {
+                    let gain_g = obj - first_obj;
+                    let d = obj - prev_obj;
+                    let sg = stall_gain();
+                    if !self.params.submip && job.is_none() && env_str!("ENOMOTO_MIP_CUTSTOP_LOG").is_some_and(|v| v != "0") {
+                        eprintln!("MIP: STALLGAIN round {round}: d {d:.6e} G {gain_g:.6e} d/G {:.3e} reldiff {reldiff:.3e}", if gain_g > 0.0 { d / gain_g } else { f64::NAN });
+                    }
+                    match sg {
+                        Some((x, sub, false)) if (sub || !self.params.submip) && gain_g > 1e-9 * obj.abs().max(1.0) => {
+                            if d / gain_g <= x { 0.0 } else { 1.0 }
+                        }
+                        _ => reldiff,
+                    }
+                };
+                // `w`: 窓で見る停滞。直近 w ラウンドの伸びの和 / G (G = 0 なら今の尺度) が x 以下で「伸びが停滞」、分数の列の数の直近 w ラウンドの
+                // 平均がその前の w ラウンドの平均の 0.9 倍未満に減っていなければ「整数度が停滞」。両方なら停滞 (Some(true))、窓が埋まるまで (2w ラウンド
+                // 未満) は今の判定のまま (None)。w は裏のカットのスレッドの窓 (`ENOMOTO_T_MIP_BG_DETERM_WIN`、既定 5) と同じ値
+                gw_obj.push(obj);
+                gw_nf.push(nfrac);
+                let win_dec: Option<bool> = match stall_gain() {
+                    Some((x, _, true)) if !self.params.submip && job.is_none() => {
+                        let w = tunable!("ENOMOTO_T_MIP_BG_DETERM_WIN", 5usize, usize).max(1);
+                        let k = gw_nf.len() - 1;
+                        if k >= 2 * w {
+                            let sum_d = obj - gw_obj[k - w];
+                            let gg = obj - first_obj;
+                            let gain_stall = if gg > 1e-9 * obj.abs().max(1.0) { sum_d / gg <= x } else { sum_d / stall_scale(obj, gw_obj[k - w], p.offset, false) <= 1e-4 };
+                            let m1 = gw_nf[k + 1 - w..=k].iter().sum::<usize>() as f64 / w as f64;
+                            let m0 = gw_nf[k + 1 - 2 * w..=k - w].iter().sum::<usize>() as f64 / w as f64;
+                            let frac_stall = m1 >= 0.9 * m0;
+                            if env_str!("ENOMOTO_MIP_CUTSTOP_LOG").is_some_and(|v| v != "0") {
+                                eprintln!("MIP: STALLWIN round {round}: sum_d {sum_d:.6e} G {gg:.6e} gain_stall {gain_stall} nfrac mean {m0:.1} -> {m1:.1} frac_stall {frac_stall}");
+                            }
+                            Some(gain_stall && frac_stall)
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
                 let reldiff = match ho6_stall_frac() {
                     Some(t) if !self.params.submip => {
                         let tot = (obj - first_obj).max(1e-9 * obj.abs().max(1.0));
@@ -4221,7 +4280,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     break;
                 }
                 let reldiff = if rs == Some(super::rootstop::Rate::Continue) { 1.0 } else { reldiff };
-                if phase2 {
+                if phase2 && win_dec.is_some() {
+                    // `w`: 第 2 段階も窓で見る (両方停滞なら止める)
+                    if win_dec == Some(true) {
+                        cutstop = "phase2_stall_win";
+                        break;
+                    }
+                    stall = 0;
+                } else if phase2 {
                     // 第 2 段階: 目的値だけで停滞を数える
                     if reldiff <= 1e-4 {
                         stall += 1;
@@ -4297,7 +4363,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 break;
                             }
                         }
-                    } else if reldiff <= 1e-4 && sf_stall(sf_mode, fsum, sf_min, stall) && (fc_only_obj || sf_mode.is_some_and(|m| m.contains('s')) || nfrac as f64 >= (0.9 - 0.1 * stall as f64) * prev_nfrac as f64) && !fc_frac_ok && !saturated && !widen_now {
+                    } else if win_dec == Some(false) {
+                        // `w`: 窓で見て停滞でない
+                        stall = 0;
+                    } else if win_dec == Some(true) || reldiff <= 1e-4 && sf_stall(sf_mode, fsum, sf_min, stall) && (fc_only_obj || sf_mode.is_some_and(|m| m.contains('s')) || nfrac as f64 >= (0.9 - 0.1 * stall as f64) * prev_nfrac as f64) && !fc_frac_ok && !saturated && !widen_now {
                         let cr_one = cutrnd_main && cutrnd('f') && super::cap_clock() - t_loop0 < cr_budget;
                         // 試作 `ENOMOTO_MIP_CUT_STALL_FRAC` ([`sf_stall`]): +2 は「進んでいない」(`s` は F がこれまでの最小を更新しない、`c` は本数も F も)
                         let no_progress = match sf_mode {
@@ -4306,6 +4375,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             _ => nfrac >= prev_nfrac,
                         };
                         stall += if no_progress && env_str!("ENOMOTO_MIP_CUT_STALL_ONE").is_none() && !widened && !cr_one { 2 } else { 1 };
+                        // `w`: 窓で見て両方停滞なら、すぐに上限に届いたと扱う (第 1 段階なら第 2 段階へ、でなければ止める)
+                        if win_dec == Some(true) {
+                            stall = usize::MAX / 2;
+                        }
                         if stall >= if fc_sub { tunable!("ENOMOTO_T_MIP_FC_SUBMIP_CUT_STALL", 10usize, usize) } else if self.params.submip && !sub_hc { tunable!("ENOMOTO_T_MIP_SUBMIP_CUT_STALL", 3usize, usize) } else if heavy { tunable!("ENOMOTO_T_MIP_BG_CUTS_STALL", 20usize, usize) } else { tunable!("ENOMOTO_T_MIP_CUT_STALL", 10usize, usize) } {
                             if !phase2_on && robust_ext && ext_used < tunable!("ENOMOTO_T_MIP_ROBUST_EXT_MAX", 3usize, usize) {
                                 ext_used += 1;
