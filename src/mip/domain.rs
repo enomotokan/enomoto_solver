@@ -130,6 +130,9 @@ pub struct Domain {
 }
 
 thread_local! {
+    /// 診断 `ENOMOTO_MIP_CONFDEEP_DIAG` ([`super::conflict_pool::confdeep_diag`]): [`Domain::analyze_multi_bumps`] が返した衝突ごとの形
+    /// (返した順)。呼ぶ側が取り出す
+    pub static CONF_META: std::cell::RefCell<Vec<super::conflict_pool::DeepMeta>> = const { std::cell::RefCell::new(Vec::new()) };
     static DEBUG_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// 境界を変える・戻すときに更新した行の活動の数 (列の長さの合計、スレッドごと)。`ENOMOTO_MIP_PRESOLVE_WORK` のプロービングの
     /// 手間に足す (行の走査だけでは、長い列の固定が連鎖する問題 (neos-860300) の時間を数えきれない)
@@ -1238,6 +1241,14 @@ impl Domain {
         let cap = 4 * max_len + 100;
         let mut set: std::collections::BTreeSet<usize> = init.into_iter().collect();
         let mut out: Vec<Vec<(usize, bool, f64)>> = Vec::new();
+        // 診断 `ENOMOTO_MIP_CONFDEEP_DIAG`: 遡った変更の数 (行, 双対証明, 写しの表) と、返す衝突ごとの形
+        let deep = super::conflict_pool::confdeep_diag();
+        let mut nres = [0u32; 3];
+        let rkind = |k: usize| -> usize {
+            let r = self.stack[k].reason;
+            if r >= 0 { 0 } else if r > CUT_REASON_BASE { 1 } else { 2 }
+        };
+        let mut meta: Vec<super::conflict_pool::DeepMeta> = Vec::new();
         let mut lev = dec.len();
         let mut done = 0usize;
         let ld = conflict_lev_diag();
@@ -1263,6 +1274,9 @@ impl Domain {
                 }
                 set.remove(&k);
                 cnt -= 1;
+                if deep {
+                    nres[rkind(k)] += 1;
+                }
                 for e in ex {
                     let new = set.insert(e);
                     if new {
@@ -1310,6 +1324,9 @@ impl Domain {
                 let lits = to_lits(&set);
                 if !lits.is_empty() && lits.len() <= max_len {
                     out.push(lits);
+                    if deep {
+                        meta.push([done as u32, 0, nres[0], nres[1], nres[2]]);
+                    }
                 }
                 stop_k = 1;
                 break;
@@ -1317,6 +1334,9 @@ impl Domain {
             let lits = to_lits(&set);
             if resolved > 0 && !lits.is_empty() && lits.len() <= max_len {
                 out.push(lits);
+                if deep {
+                    meta.push([done as u32, 1, nres[0], nres[1], nres[2]]);
+                }
             } else if ld && resolved > 0 && lits.len() > max_len {
                 CONFLICT_STOP[7].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
@@ -1337,6 +1357,9 @@ impl Domain {
                     };
                     r.remove(&k);
                     r.extend(ex);
+                    if deep {
+                        nres[rkind(k)] += 1;
+                    }
                 }
                 if ok && !r.contains(&u) && !r.is_empty() {
                     let mut lits = to_lits(&r);
@@ -1355,6 +1378,9 @@ impl Domain {
                     }
                     if lits.len() <= max_len {
                         out.push(lits);
+                        if deep {
+                            meta.push([done as u32, 2, nres[0], nres[1], nres[2]]);
+                        }
                     }
                 }
             }
@@ -1373,6 +1399,9 @@ impl Domain {
             CONFLICT_STOP[stop_k].fetch_add(1, Relaxed);
             CONFLICT_STOP[8].fetch_add(out.len() as u64, Relaxed);
             CONFLICT_STOP[9].fetch_add(done as u64, Relaxed);
+        }
+        if deep {
+            CONF_META.with(|m| *m.borrow_mut() = meta);
         }
         if let Some(x) = &self.dbg_sol {
             for (n, c) in out.iter().enumerate() {
