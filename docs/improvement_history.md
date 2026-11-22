@@ -11251,7 +11251,7 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
   - 当時の超過 (radiationm40 の 4.7 秒など) は、その後の期限の直しで今の既定ではほぼ出ない。ov は保険として入れる。
   - 解けた数の −1 と全種の遅れ (neos-1171737・gmu-35-40・peg-solitaire-a3 など) は揺れ。1 スレッド・決定的には、11 問すべてで
     期限の前の道が既定と同じだった (analysis/shelved_20261122/det/)。
-- 確かめ: cargo test・fuzz (analysis/shelved_20261122/adopt2/)。
+- 確かめ: cargo test 419 通過。fuzz 7 本は bad 0・mismatches 0 (analysis/shelved_20261122/adopt2/、ipmxm と同じ回)。
 
 ## 2026-11-22: 根の LP の内点法 + クロスオーバーの失敗の直し一式 (ipmxm) を既定にする (採用、利用者の判断)
 
@@ -11278,5 +11278,9 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
     - 損: neos5 は種 1〜3 とも 1.2〜1.5 倍遅い (63 × 63 の小さな LP で、勝ち手が単体法から内点法に入れ替わる)。
       mzzv11 も種 1〜3 とも 1.3〜1.6 倍遅い (勝ち手が内点法から warm に替わる)。
     - ほかの遅れ・解けた数の −1 (peg-solitaire-a3) は、根の LP が単体法・warm で計算が変わらない問題の揺れ。
-- 確かめ: cargo test・fuzz 7 本と LP の fuzz (lp_fuzz_vs_highs の ipm_crossover・auto・simplex)・Netlib の内点法 + クロスオーバー
-  (以前の形と比べる) (analysis/shelved_20261122/adopt2/)。
+- 確かめ (analysis/shelved_20261122/adopt2/):
+  - cargo test 419 通過。
+  - fuzz 7 本は bad 0・mismatches 0。mip_fuzz_symmetric 300 も bad 0。
+  - LP: lp_fuzz_vs_highs 300 は ipm_crossover・auto・simplex とも bad 0。
+  - Netlib 93 問の内点法 + クロスオーバー (以前の形と交互に 3 回ずつ): 正しく解けた 92 / 92、状態の違いなし、SGM (shift 1 秒) 0.999 [0.995, 1.003]。
+    解けない 1 問は forplan の crash で、以前の形でも同じ。

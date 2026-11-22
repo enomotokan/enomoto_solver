@@ -82,6 +82,10 @@ analysis/ の 2026-11-12〜22 の記録 (182 件)。4 つの補助のエージ�
   - **ipmxm は既定にしない**。働く問題が少なく、そろった遅れ (neos5・mzzv11) が、得 (csched007 の種 2) より多い。
   - → **利用者の判断で ov・ipmxm とも既定にした** (2026-11-22)。ov は保険として、ipmxm は内点法の失敗の直しとして入れる。
     戻し方は `ENOMOTO_MIP_OVERRUN3=0`、ipmxm は 4 つの環境変数を `=0`。確かめは `adopt2/`、docs/improvement_history.md に 2 つの節。
+    確かめ (`adopt2/`): cargo test 419 通過 (`cargo_test.txt`)。fuzz は全部 bad 0・mismatches 0 (`fuzz.out`):
+    fuzz 7 本、lp_fuzz_vs_highs 300 × 3 (ipm_crossover・auto・simplex)、mip_fuzz_symmetric 300。
+    Netlib 93 問の内点法 + クロスオーバー (`netlib_xo.jsonl`・`netlib_summ.txt`、以前の形 old と交互に 3 回ずつ): 正しく解けた 92 / 92、
+    状態の違いなし、SGM 0.999 [0.995, 1.003]。forplan は old・new とも crash (以前から)。
 
 ## M で悪化した問題の切り分け (利用者の指示「ぶれが大きいので、既定より悪くなっている問題は調べるべき」、`det/`)
 
