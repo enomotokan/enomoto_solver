@@ -17383,7 +17383,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 解いて葉を閉じてみる (analysis/notsolved_20261122)。閉じられなければ未解決 (最後に NotSolved)
             LEAF_NOLP[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if !(leaf_fresh_on() && self.leaf_fresh_close()) {
-                if self.params.verbose && !self.params.submip {
+                // 既定でも出す (スレッドごとに最初の 1 回。計測の台本は not_solved の回だけ stderr の最後を残す: analysis/notsolved_20261122)
+                if !self.params.submip && !self.unresolved {
                     eprintln!("MIP: a leaf with all integer columns fixed has no LP result (thread {}, node {}); marking the search unresolved", self.pool_tid, self.nodes);
                 }
                 LEAF_NOLP[4].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -26748,7 +26749,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
                 Err(_) => {
-                    // 従が異常終了した: 探索し残した部分があるかもしれない
+                    // 従が異常終了した: 探索し残した部分があるかもしれない (既定でも 1 行出す。analysis/notsolved_20261122)
+                    eprintln!("MIP: a tree search worker thread ended abnormally (panic); marking the search unresolved");
                     self.unresolved = true;
                     lb = f64::NEG_INFINITY;
                 }
