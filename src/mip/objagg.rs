@@ -9,6 +9,7 @@
 //! - `c1`: `ab` に、目的関数の行 1 本だけから作ったカット (cmir・被覆、`generate_cuts`) を足した伝播
 //! - `c2`: `ab` に、目的関数の行から連続列を消しながら LP の行を足していった各段 (分離の経路の集約と同じ選び方、最大 6 段) から作ったカットを足した伝播
 //!
+//! `=t` は目的関数の行の余裕を 0 とみなした点でカットを作る (既定の `=1` は LP 解で作るので、目的の行が効いていなければカットは出ない)。
 //! あわせて、根の LP (元の行 + カットの行) に c1・c2 のカットを足した LP の値を出す。カットは「打ち切り値より良い解」でだけ成り立つ
 //! (被約費用による固定と同じ種類の推論)。
 use super::cuts::{generate_cuts, CutVars, RawCut};
@@ -141,6 +142,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         is_int.push(false);
         xv.push(obj.iter().map(|&(j, c)| c * x[j]).sum());
         let vb = self.vbounds.clone();
+        // `ENOMOTO_MIP_DIAG_OBJAGG=t`: 目的関数の行の余裕を 0 とみなした点で作る (LP 解では c x = z_LP < U で、目的の行は効いていないので
+        // 違反するカットが出ない。カットの妥当性は点によらない)
+        if env_str!("ENOMOTO_MIP_DIAG_OBJAGG") == Some("t") {
+            *xv.last_mut().unwrap() = u;
+        }
         let vars = CutVars { lo: &vlo, up: &vup, is_int: &is_int, x: &xv, vb: vb.as_deref(), imp: None };
         let gen = |agg: &[f64], weights: &[(usize, f64)], out: &mut Vec<RawCut>| {
             let mut b: Vec<(usize, f64)> = (0..n).filter(|&j| agg[j].abs() > 1e-9).map(|j| (j, agg[j])).collect();
