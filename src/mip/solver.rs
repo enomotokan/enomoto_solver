@@ -1108,6 +1108,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     nodecnt_stats: [u64; 7],
     /// `ENOMOTO_MIP_TREE4_RCUNION` (試作): 根のカットの各ラウンドの LP の被約費用 ([`Self::tree4_rc_add`])
     pub(super) t4_rc_extra: Vec<(f64, Vec<(usize, bool, f64, f64)>)>,
+    /// 診断 `ENOMOTO_MIP_DIAG_PROPCUT` 用: 根のカットの各ラウンドの LP の被約費用 (`t4_rc_extra` と同じ形。締めには使わない)
+    pub(super) propcut_rc: Vec<(f64, Vec<(usize, bool, f64, f64)>)>,
     /// `ENOMOTO_MIP_TREE4_PROOFCUT` (試作) の数: [ラウンド, 加えた行, 加えた後に刈ったノード]
     t4_pc: [u64; 3],
     /// 利用者向けのログ ([`crate::log`]) の探索の経過の見出しを出したか。
@@ -5671,6 +5673,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         t4_rc: [0; 2],
         nodecnt_stats: [0; 7],
         t4_rc_extra: Vec::new(),
+        propcut_rc: Vec::new(),
         t4_pc: [0; 3],
         user_log_header: false,
         cur_lb: f64::NEG_INFINITY,
@@ -10871,6 +10874,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if super::objagg::on() {
                     self.diag_objagg();
                 }
+                // 診断 `ENOMOTO_MIP_DIAG_PROPCUT` (src/mip/propcut.rs、振る舞いは変えない): 丸めた不等式が伝播で固定を増やすか
+                if super::propcut::on() {
+                    self.diag_propcut();
+                }
                 // 診断 `ENOMOTO_MIP_DIAG_OBBT=U` (analysis/slowm_20261119 §15、振る舞いは変えない): 暫定解の値 U (元の目的の向き) で、根の LP (カットの後) + c x ≤ U の
                 // OBBT の天井と、被約費用・目的の伝播で今固定できる列の数を比べる。固定の前に数える
                 if let Some(u) = env_str!("ENOMOTO_MIP_DIAG_OBBT").and_then(|v| v.parse::<f64>().ok()) {
@@ -15482,8 +15489,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// [`Self::t4_rc_extra`] に足す (最大 `ENOMOTO_T_MIP_TREE4_RCUNION_MAX` (既定 50) 個、古いものから捨てる)。カットは大域的に
     /// 成り立つので、どのラウンドの LP の弱双対の不等式も全ての解で成り立つ
     pub(super) fn tree4_rc_add(&mut self, z: f64) {
-        // `ENOMOTO_MIP_TREEFIX` の `r` ([`treefix`]) でも集める
-        if self.params.submip || self.snap.is_some() || (env_str!("ENOMOTO_MIP_TREE4_RCUNION").is_none() && !treefix::on('r')) {
+        // `ENOMOTO_MIP_TREEFIX` の `r` ([`treefix`]) でも集める。診断 `ENOMOTO_MIP_DIAG_PROPCUT` は別の表 (`propcut_rc`) に集める
+        let diag = super::propcut::on();
+        if self.params.submip || self.snap.is_some() || (env_str!("ENOMOTO_MIP_TREE4_RCUNION").is_none() && !treefix::on('r') && !diag) {
             return;
         }
         let b = self.lp.basis_ref();
@@ -15500,6 +15508,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         let cap = tunable!("ENOMOTO_T_MIP_TREE4_RCUNION_MAX", 50usize, usize);
+        if diag {
+            if self.propcut_rc.len() >= cap {
+                self.propcut_rc.remove(0);
+            }
+            self.propcut_rc.push((z, v.clone()));
+            if env_str!("ENOMOTO_MIP_TREE4_RCUNION").is_none() && !treefix::on('r') {
+                return;
+            }
+        }
         if self.t4_rc_extra.len() >= cap {
             self.t4_rc_extra.remove(0);
         }

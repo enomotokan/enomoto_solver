@@ -4277,6 +4277,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 if self.params.verbose {
                                     eprintln!("MIP: cut round {round}: ROBUST s: stall stop deferred, extension {ext_used} of up to {ext_left} rounds (obj {obj:.10e})");
                                 }
+                            } else if !phase2_on && job.is_none() && !self.params.submip && self.params.restarts > 0 && rstloop_hold(round_ctr) {
+                                // 試作 `ENOMOTO_MIP_RSTLOOP` の `n` ([`rstloop_hold`]): 再スタートの後の根では、前の根が回したラウンド数に届くまで停滞で止めない
+                                if self.params.verbose {
+                                    eprintln!("MIP: cut round {round}: RSTLOOP n: stall stop held (round {round_ctr} of the previous root's {} rounds, obj {:.10e})", RSTLOOP_PREV_ROUNDS.with(|c| c.get()), obj + p.offset);
+                                }
                             } else if !phase2_on {
                                 if cs_gap.is_some() && self.params.verbose {
                                     eprintln!("MIP: cut round {round}: stall stop (ENOMOTO_MIP_CUTSTALL_GAP, obj {obj:.10e})");
@@ -4415,6 +4420,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if !self.params.submip && st == LpStatus::Optimal && job.is_none() {
             super::record_root_bound(self.lp.objective() + p.offset);
+        }
+        if !self.params.submip && job.is_none() && self.snap.is_none() {
+            RSTLOOP_PREV_ROUNDS.with(|c| c.set(round_ctr));
         }
         self.cutstop_log(cutstop, round_ctr, max_rounds, phase2, stall, intobj_stall, first_obj, t_loop_wall, job.is_some(), Some(st == LpStatus::Optimal));
         user_log!(
@@ -9131,4 +9139,17 @@ pub(super) fn fraccut_env() -> Option<&'static str> {
 /// 非整数の度合い Σ min(f, 1−f) (f は値の小数部)
 fn frac_sum(fr: &[(usize, f64)]) -> f64 {
     fr.iter().map(|&(_, v)| { let f = v - v.floor(); f.min(1.0 - f) }).sum()
+}
+
+thread_local! {
+    /// 試作 `ENOMOTO_MIP_RSTLOOP` ([`rstloop_hold`]): 外側の主の直前の根のカットのループが回したラウンド数
+    static RSTLOOP_PREV_ROUNDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// 試作 `ENOMOTO_MIP_RSTLOOP` の `n` (既定では使わない。analysis/rootcutoff_20261121 の 7 節): 再スタートの後の根のカットのループで、
+/// 前の根のループが回したラウンド数に届くまでは停滞 (`ENOMOTO_T_MIP_CUT_STALL`) で止めない。新しい閾値は置かず、前の根と同じだけは回す。
+/// swath1 は再スタートの後の根が 5 ラウンド (1 ラウンドの伸びが相対 1e-4 以下のラウンドが 5 回続く) で止まり 340.58 のまま、
+/// 停滞の上限を 30 にすると同じ根が 25 ラウンドで 342.90 まで上がる (SCIP 342.51)
+pub(super) fn rstloop_hold(round_ctr: usize) -> bool {
+    env_str!("ENOMOTO_MIP_RSTLOOP").is_some_and(|v| v.contains('n')) && round_ctr < RSTLOOP_PREV_ROUNDS.with(|c| c.get())
 }
