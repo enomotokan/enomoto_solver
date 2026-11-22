@@ -9673,6 +9673,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 時間の上限は Local-MIP と同じ。実行可能性問題 (目的が全部 0) では今までどおり
                 let mix = fj_lmip_mix_on() && !fjl;
                 let fjl_cap = if ftl.is_finite() { (tunable!("ENOMOTO_T_MIP_LOCALMIP_TIME_FRAC", 0.1, f64) * ftl).min(10.0) } else { 10.0 };
+                // 試作 `ENOMOTO_MIP_LPBOX` の `s`: 箱の問題と予算を分ける (FJ のスレッドの上限を半分に)
+                let fjl_cap = if super::lpbox::on('s') { 0.5 * fjl_cap } else { fjl_cap };
                 let fjl_box: std::sync::Arc<std::sync::Mutex<Vec<Vec<f64>>>> = Default::default();
                 if fjl || mix {
                     self.lmip_mailbox = Some(fjl_box.clone());
@@ -10612,6 +10614,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // (並列なら FJ のスレッドを止める所) で本体が同じ組を回す ([`Self::t1_fj_lmip_mix`])
         if t1mix_on() && mip_threads() == 1 && !self.params.submip && self.snap.is_none() && self.params.restarts == 0 && !proof_only() && self.fj_thread.is_none() && !self.root_gap_closed() {
             self.t1_fj_lmip_mix();
+        }
+        // 試作 `ENOMOTO_MIP_LPBOX` (analysis/lpbox_20261122): 根のカットのループの後の LP 解のまわりに整数列を狭めて伝播した問題で
+        // FJ・Local-MIP を回す ([`Self::lpbox_heur`])。FJ のスレッドはまだ止めない
+        if super::lpbox::enabled() && !self.params.submip && self.snap.is_none() && self.params.restarts == 0 && !proof_only() && !self.root_gap_closed() && !self.fractional(&self.lp.col_values()).is_empty() {
+            self.lpbox_heur();
         }
         if fjkeep_on() && !self.params.submip && self.snap.is_none() && self.fj_thread.is_some() && (self.incumbent.is_none() || self.inc_only_fj) && !self.root_gap_closed() {
             self.poll_lmip_thread();
