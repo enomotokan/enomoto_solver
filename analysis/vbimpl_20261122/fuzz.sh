@@ -3,7 +3,7 @@
 # リポジトリの根から: bash analysis/vbimpl_20261122/fuzz.sh
 # ログは analysis/vbimpl_20261122/fuzz_logs/ (コミットしない)。
 set -u
-cd "$(dirname "$0")/../../.."
+cd "$(dirname "$0")/../.."
 L=analysis/vbimpl_20261122/fuzz_logs; mkdir -p $L
 export ENOMOTO_MIP_VB_IMPL="${VBI:-t}"
 run() { name=$1; shift; echo "== $name: $*"; "$@" > $L/$name.log 2>&1; echo "rc=$?"; tail -5 $L/$name.log; }

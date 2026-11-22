@@ -241,6 +241,107 @@ fn vb_tie_old() -> bool {
 }
 
 const MIN_FRAC: f64 = 0.005;
+
+/// 試作 `ENOMOTO_MIP_CMIRGEN` (既定では使わない。analysis/cmirgen_20261122): CMIR の δ の選び方を SCIP 10.0 の
+/// `SCIPcutGenerationHeuristicCMIR` (cuts.c) 寄りにする。値の文字で選ぶ:
+/// - `f`: f0 (右辺 / δ の小数部) の上限を 1 − 0.005 から SCIP の maxfrac 0.999 にする (下限は今の 0.005 のまま)。係数 212・右辺 −1 の行 (mc11) は
+///   δ = 212 で f0 = 0.9953 になり、今は捨てているが、δ = 106 のカット (効き目 0.240) より強い (0.445)
+/// - `d`: δ の候補を SCIP と同じにする: 境界の内側にある整数の項の係数をすべて (境界からの距離の大きい順)、係数を全部整数にする倍率 s からの
+///   1/s と 1/(s ⌊maxfrac / f⌋)、係数の最大 + 1、1。1/2・1/4・1/8 は最良の δ だけ
+fn cmirgen(c: char) -> bool {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| env_str!("ENOMOTO_MIP_CMIRGEN").unwrap_or("").to_string()).contains(c)
+}
+
+/// f0 の上限 (試作 `ENOMOTO_MIP_CMIRGEN` の `f` で 0.999)
+fn max_frac() -> f64 {
+    if cmirgen('f') { 0.999 } else { 1.0 - MIN_FRAC }
+}
+
+/// 小さい分母 (`maxden` まで) の有理数で `v` を近似したときの分母 (連分数)。近似が `tol` に届かなければ `None`
+fn small_denom(v: f64, maxden: u64, tol: f64) -> Option<u64> {
+    let (mut h0, mut h1, mut k0, mut k1) = (0f64, 1f64, 1f64, 0f64);
+    let mut x = v.abs();
+    for _ in 0..64 {
+        let a = x.floor();
+        let (h2, k2) = (a * h1 + h0, a * k1 + k0);
+        if k2 > maxden as f64 {
+            return None;
+        }
+        (h0, h1, k0, k1) = (h1, h2, k1, k2);
+        if (h1 / k1 - v.abs()).abs() <= tol * v.abs().max(1.0) {
+            return Some(k1 as u64);
+        }
+        let f = x - a;
+        if f < 1e-15 {
+            return None;
+        }
+        x = 1.0 / f;
+    }
+    None
+}
+
+/// SCIP の `SCIPcalcIntegralScalar` (分母 10000・倍率 10000 まで) の近似: `vals` を全部整数にする最小の正の倍率
+fn int_scalar(vals: &[f64]) -> Option<f64> {
+    fn gcd(a: u64, b: u64) -> u64 {
+        if b == 0 { a } else { gcd(b, a % b) }
+    }
+    let mut den = 1u64;
+    for &v in vals {
+        let d = small_denom(v, 10000, 1e-9)?;
+        den = den / gcd(den, d) * d;
+        if den > 10000 {
+            return None;
+        }
+    }
+    let mut g = 0u64;
+    for &v in vals {
+        g = gcd(g, (v.abs() * den as f64).round() as u64);
+    }
+    (g > 0).then(|| den as f64 / g as f64)
+}
+
+/// 試作 `ENOMOTO_MIP_CMIRGEN` の `d`: SCIP と同じ δ の候補 (§ [`cmirgen`])
+fn scip_deltas(terms: &[Term], beta: f64) -> Vec<f64> {
+    let (fmin, fmax) = (MIN_FRAC, max_frac());
+    let mut ins: Vec<(f64, f64)> = terms.iter().filter(|t| t.int && t.yv > 1e-9 && t.yv < t.yu - 1e-9 && t.a != 0.0).map(|t| (t.yv.min(t.yu - t.yv), t.a)).collect();
+    if ins.is_empty() {
+        return Vec::new();
+    }
+    ins.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let mut ds: Vec<f64> = ins.iter().map(|&(_, a)| a).collect();
+    if let Some(mut s) = int_scalar(&ds) {
+        let mut r = beta * s;
+        let mut f = r - r.floor();
+        if (f - f.round()).abs() > 1e-6 {
+            if f < fmin || f > fmax {
+                s *= (fmin.max(1.0 - fmax) / f.min(1.0 - f)).ceil();
+                r = beta * s;
+                f = r - r.floor();
+            }
+            if (fmin..=fmax).contains(&f) {
+                let d = 1.0 / s;
+                if (d - 1.0).abs() > 1e-9 {
+                    ds.push(d);
+                }
+                if f < fmax {
+                    let d2 = 1.0 / (s * (fmax / f).floor());
+                    if (d - d2).abs() > 1e-9 && (d2 - 1.0).abs() > 1e-9 {
+                        ds.push(d2);
+                    }
+                }
+            }
+        }
+    }
+    let mx = ins.iter().fold(0.0f64, |m, &(_, a)| m.max(a.abs()));
+    let mut out: Vec<f64> = Vec::with_capacity(ds.len() + 2);
+    for d in ds.into_iter().map(f64::abs).chain([mx + 1.0, 1.0]) {
+        if d > 0.0 && !out.iter().any(|&e| (e - d).abs() <= 1e-9 * d.max(1.0)) {
+            out.push(d);
+        }
+    }
+    out
+}
 const MAX_SCALE: f64 = 1e6;
 
 /// 置き換え後の項 (変数, 係数 (y について), 補変数化したか (v = u - y))。
@@ -683,7 +784,7 @@ impl MirEval {
     fn efficacy(&self, beta: f64, delta: f64) -> Option<f64> {
         let b = beta / delta;
         let f0 = b - b.floor();
-        if !(MIN_FRAC..=1.0 - MIN_FRAC).contains(&f0) || b.abs() > MAX_SCALE {
+        if !(MIN_FRAC..=max_frac()).contains(&f0) || b.abs() > MAX_SCALE {
             return None;
         }
         let rb = b.floor();
@@ -709,28 +810,31 @@ impl MirEval {
 fn cmir_terms_fast(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<RawCut> {
     // 手間の単位 ([`crate::ticks`]): 項の数
     crate::ticks::add(crate::ticks::SEP, terms.len() as u64);
-    let mut deltas: Vec<f64> = Vec::new();
-    for t in &terms {
-        if t.int && t.yv > 1e-6 && t.yv < t.yu - 1e-6 && t.a.abs() > 1e-6 {
-            let d = t.a.abs();
-            if !deltas.iter().any(|&e| (e - d).abs() <= 1e-9 * d) {
-                deltas.push(d);
+    let scipd = cmirgen('d');
+    let mut deltas: Vec<f64> = if scipd { scip_deltas(&terms, beta) } else { Vec::new() };
+    if !scipd {
+        for t in &terms {
+            if t.int && t.yv > 1e-6 && t.yv < t.yu - 1e-6 && t.a.abs() > 1e-6 {
+                let d = t.a.abs();
+                if !deltas.iter().any(|&e| (e - d).abs() <= 1e-9 * d) {
+                    deltas.push(d);
+                }
+            }
+            if deltas.len() >= 8 {
+                break;
             }
         }
-        if deltas.len() >= 8 {
-            break;
+        if deltas.is_empty() {
+            let m = terms.iter().filter(|t| t.int).map(|t| t.a.abs()).fold(0.0, f64::max);
+            if m > 0.0 {
+                deltas.push(m);
+            }
         }
-    }
-    if deltas.is_empty() {
-        let m = terms.iter().filter(|t| t.int).map(|t| t.a.abs()).fold(0.0, f64::max);
-        if m > 0.0 {
-            deltas.push(m);
-        }
-    }
-    let base_deltas = deltas.clone();
-    for d in base_deltas {
-        for div in [2.0, 4.0, 8.0] {
-            deltas.push(d / div);
+        let base_deltas = deltas.clone();
+        for d in base_deltas {
+            for div in [2.0, 4.0, 8.0] {
+                deltas.push(d / div);
+            }
         }
     }
     let n_old = deltas.len();
@@ -754,6 +858,18 @@ fn cmir_terms_fast(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<RawCut
         i += 1;
         if i == n_old {
             kinds = cmirdelta_extend(&terms, &mut deltas, best.map(|b| b.0));
+        }
+    }
+    // `CMIRGEN` の `d`: 最良の δ だけ 1/2・1/4・1/8 を試す (SCIP と同じ)
+    if scipd {
+        if let Some((d0, _)) = best {
+            for q in [2.0, 4.0, 8.0] {
+                if let Some(e) = ev.efficacy(beta, d0 / q) {
+                    if best.is_none_or(|(_, b)| e > b) {
+                        best = Some((d0 / q, e));
+                    }
+                }
+            }
         }
     }
     let (delta, mut eff) = best?;
@@ -917,10 +1033,20 @@ fn cmir_terms(vars: &CutVars, terms: Vec<Term>, beta: f64) -> Option<RawCut> {
     if !terms.iter().any(|t| t.int) {
         return None;
     }
+    // 診断 `ENOMOTO_MIP_CMIRDUMP=N` (analysis/cmirgen_20261122): 置き換えた後の項 (係数, LP 値, 上限, 整数か) と右辺を最初の N 回だけ
+    // `CMIRDUMP {..}` と出す (同じ項で当方と SCIP の δ の選び方・補数の反転・f0 の範囲を Python で比べるため)
+    if let Some(nmax) = env_str!("ENOMOTO_MIP_CMIRDUMP").and_then(|v| v.parse::<u64>().ok()) {
+        static CNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        if CNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < nmax {
+            let ts: Vec<String> = terms.iter().map(|t| format!("[{:e},{:e},{:e},{}]", t.a, t.yv, if t.yu.is_finite() { t.yu } else { 1e300 }, t.int as u8)).collect();
+            eprintln!("CMIRDUMP {{\"beta\":{:e},\"t\":[{}]}}", beta, ts.join(","));
+        }
+    }
     if sep_fast() {
         return cmir_terms_fast(vars, terms, beta);
     }
     // 2. delta の候補: LP 値が境界の内側にある整数変数の係数
+    // (試作 `ENOMOTO_MIP_CMIRGEN` の `d` は速い版 [`cmir_terms_fast`] でだけ使う)
     let mut deltas: Vec<f64> = Vec::new();
     for t in &terms {
         if t.int && t.yv > 1e-6 && t.yv < t.yu - 1e-6 && t.a.abs() > 1e-6 {
@@ -1053,7 +1179,7 @@ fn cmir_build(vars: &CutVars, terms: Vec<Term>, beta: f64, delta: f64, eff: f64)
 fn mir_coefs(terms: &[Term], beta: f64, delta: f64) -> Option<(Vec<f64>, f64)> {
     let b = beta / delta;
     let f0 = b - b.floor();
-    if !(MIN_FRAC..=1.0 - MIN_FRAC).contains(&f0) || b.abs() > MAX_SCALE {
+    if !(MIN_FRAC..=max_frac()).contains(&f0) || b.abs() > MAX_SCALE {
         return None;
     }
     let mut c = Vec::with_capacity(terms.len());
@@ -1075,7 +1201,7 @@ fn mir_efficacy(terms: &[Term], beta: f64, delta: f64) -> Option<f64> {
     // mir_coefs と同じ計算を、係数の配列を作らずに行う (呼び出しが多いので。結果は同じ)
     let b = beta / delta;
     let f0 = b - b.floor();
-    if !(MIN_FRAC..=1.0 - MIN_FRAC).contains(&f0) || b.abs() > MAX_SCALE {
+    if !(MIN_FRAC..=max_frac()).contains(&f0) || b.abs() > MAX_SCALE {
         return None;
     }
     let rb = b.floor();
