@@ -27,8 +27,14 @@ rootonly = collections.Counter(c for (p, c, s), r in R.items() if not r["split"]
 print("根で終わった回 (木に入らず解けた):", dict(rootonly))
 # 最適値との食い違い
 bad = [(p, c, s, r["result"]["objective"], r["opt"]) for (p, c, s), r in R.items()
-       if str(r["result"].get("status")) == "optimal" and r["result"]["objective"] is not None and abs(r["result"]["objective"] - r["opt"]) > 1e-6 * max(1, abs(r["opt"]))]
-print("optimal で最適値 (solu) と 1e-6 を超えて違う回:", bad or "なし")
+       if c in ("t1", "t4") and str(r["result"].get("status")) == "optimal" and r["result"]["objective"] is not None and abs(r["result"]["objective"] - r["opt"]) > 1e-6 * max(1, abs(r["opt"]))]
+print("t1・t4 が optimal で最適値 (solu) と 1e-6 を超えて違う回:", bad or "なし")
+# 打ち切り値つきの回は、打ち切り値より良い解がないことを示して終わる (見つけた解が最適値より悪くても optimal、解がなければ infeasible)
+better = [(p, c, s, r["result"]["objective"], r["opt"]) for (p, c, s), r in R.items()
+          if c in ("t1c", "t4c") and r["result"].get("objective") is not None and r["result"]["objective"] < r["opt"] - 1e-6 * max(1, abs(r["opt"]))]
+worse = collections.Counter(c for (p, c, s), r in R.items() if c in ("t1c", "t4c") and str(r["result"].get("status")) == "optimal" and r["result"]["objective"] is not None
+                            and r["result"]["objective"] > r["opt"] + 1e-6 * max(1, abs(r["opt"])))
+print("打ち切り値つき: 最適値より良い値の回", better or "なし", "、最適値より悪い値で optimal の回", dict(worse))
 def sgm_ratio(num, den, sel, shift=1.0):
     """組 (p, s) のうち sel が真のものについて、問題ごとに種の平均の log 比 -> 問題の平均 -> exp。CI は問題単位のブートストラップ"""
     byp = collections.defaultdict(list)
