@@ -178,4 +178,8 @@ src/mip/objagg.rs。外側の主の根の、カットのループの後 (早め�
 
 ## 6. 確かめ
 
-(fuzz と cargo test の結果をここに書く)
+`bash analysis/rootcutoff_20261121/fuzz.sh` で確かめた。analysis/rootgap_20261121/fuzz.sh と同じ 7 本を `ENOMOTO_MIP_RCLOOP=fr` で回し、cargo test は既定で回した。ログは `fuzz_logs/` (コミットしない)。
+
+- fuzz: tiny 0/400、highs 0/300、objint 0/1000、slack の食い違い 0、tiny2 0/400、objint2 0/1000、slack2 の食い違い 0。
+- cargo test (`--release --lib`): 419 passed、0 failed、19 ignored。
+- 既定の振る舞いは変えていない。RCLOOP・DIAG_OBJAGG はどちらも環境変数を置いたときだけ動く。
