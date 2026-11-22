@@ -247,6 +247,20 @@ fn gen_top3() -> bool {
 
 /// `cands[n0..]` のうち質 ([`cut_quality`]、`ENOMOTO_MIP_KEEP_BEST_EFF` なら効き目だけ) の最も大きい 1 本だけ残す
 /// (`ENOMOTO_MIP_GEN_TYPE` では種類ごとに 1 本、[`gen_type`])。
+/// 試作 `ENOMOTO_MIP_OBJSTEPCUT` (既定では使わない。analysis/objstepcut_20261122): 目的値に刻み g があるとき (費用のある列が全て整数か整数値に
+/// 固定され、費用が g の整数倍。[`MipProblem::objective_step_bounds`])、外側の根で LP の値 z を刻みに切り上げた L = ⌈z/g⌉ g から
+/// 行 Σ (c_j/g) x_j ≥ ⌈z/g⌉ (係数・右辺が整数の妥当な不等式。整数解の目的値は g の倍数で z 以上なので L 以上) を作る。
+/// `a`: LP の行 (カット) として入れる (⌈z/g⌉ が前に入れた値より上がったときだけ、LP 解を切るときだけ)。
+/// `b`: LP には入れず、分離の材料 (経路集約・tableau 以外の集約の相手、行の活動量を変数に持つ CutVars) にだけ足す。新しい閾値はない
+pub(super) fn objstepcut_mode() -> Option<char> {
+    env_str!("ENOMOTO_MIP_OBJSTEPCUT").and_then(|v| v.chars().next()).filter(|c| *c == 'a' || *c == 'b')
+}
+
+thread_local! {
+    /// `ENOMOTO_MIP_OBJSTEPCUT=a`: この根のカットのループで LP に入れた右辺 ⌈z/g⌉ (ループの始めに消す)
+    pub(super) static OBJSTEP_LAST: std::cell::Cell<f64> = const { std::cell::Cell::new(f64::NEG_INFINITY) };
+}
+
 fn keep_best(cands: &mut Vec<Candidate>, n0: usize, p: &MipProblem) {
     if cands.len() <= n0 + 1 {
         return;
@@ -1568,6 +1582,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let n = p.n;
         let mut stall = 0;
         let mut intobj_stall = 0usize;
+        OBJSTEP_LAST.with(|c| c.set(f64::NEG_INFINITY));
         // 診断 `ENOMOTO_MIP_CUTSTOP_LOG` (振る舞いは変えない、analysis/disj_20261119.md): ループを抜けた理由 (break の直前で入れる)
         #[allow(unused_assignments)]
         let mut cutstop: &'static str = "none";
@@ -6509,6 +6524,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_SEP_NO_ROWCLONE`: 行の写しと整数の行の印を使い回す ([`SepRowsCache`])
         let (lp_rows_rc, row_integral) = self.sep_lp_rows();
         let lp_rows: &[Vec<(usize, f64)>] = &lp_rows_rc;
+        // 試作 `ENOMOTO_MIP_OBJSTEPCUT` ([`objstepcut_mode`]): 外側の根 (裏のカット・サブ MIP・ノードを除く) で、目的の刻みの行 Σ k_j x_j ≥ lk
+        let objstep = objstepcut_mode().filter(|_| !light && !self.params.submip && self.snap.is_none() && self.nodes <= 1).and_then(|m| self.objstep_row().map(|r| (m, r)));
+        let lp_rows_ext: Vec<Vec<(usize, f64)>>;
+        let lp_rows: &[Vec<(usize, f64)>] = match &objstep {
+            Some(('b', (row, _, _))) => {
+                lp_rows_ext = lp_rows.iter().cloned().chain(std::iter::once(row.clone())).collect();
+                &lp_rows_ext
+            }
+            _ => lp_rows,
+        };
         // 診断 `ENOMOTO_MIP_LC_DEBUG` (analysis/rootgap_20261121/wrong_roci): デバッグ解に LP の行の活動量を足して大域の置き場に置く
         if self.dbg_on && env_str!("ENOMOTO_MIP_LC_DEBUG").is_some() {
             if let Some(xd) = super::solver::DEBUG_SOL.with(|d| d.borrow().clone()) {
@@ -6554,6 +6579,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             up.push(u);
             is_int.push(integral);
             xv.push(act[i]);
+        }
+        // `ENOMOTO_MIP_OBJSTEPCUT=b`: 足した行 (添字 mr) の活動量の変数 n + mr (整数、下限 lk・上限なし)。LP の点では下限を割る
+        if let Some(('b', (_, lk, zk))) = &objstep {
+            lo.push(*lk);
+            up.push(f64::INFINITY);
+            is_int.push(true);
+            xv.push(*zk);
         }
         if self.vbounds.is_none() {
             let mut vbs = VarBounds::from_rows(n, &p.is_int, &p.rows, &p.row_lo, &p.row_up);
@@ -6659,7 +6691,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let vars = CutVars { lo: &lo, up: &up, is_int: &is_int, x: &xv, vb: if env_str!("ENOMOTO_MIP_NO_VB").is_some() { None } else { vb.as_deref() }, imp };
         // 試作 `ENOMOTO_MIP_HNFCUT` の `l`: 論理変数 (LP の行の活動量) の合同式を表に足す ([`super::hnfcut::extend_logicals`])
         if super::hnfcut::on() {
-            super::hnfcut::extend_logicals(lp_rows, &is_int, &lo, &up, n);
+            super::hnfcut::extend_logicals(&lp_rows[..mr], &is_int, &lo, &up, n);
         }
         // 診断用 (`ENOMOTO_MIP_DEBUG_XFILE`): HiGHS の書き出し (`HIGHS_CUT_DUMP`) の LP 解で経路集約だけを試し、カットの数と
         // 効き目を表示する (前処理なし `ENOMOTO_MIP_NO_PRESOLVE` で、列の並びを HiGHS と揃えて使う)
@@ -7173,7 +7205,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let duals = self.lp.row_duals();
                 let max_aggs = tunable!("ENOMOTO_T_MIP_MCF_MAX_AGGS", 400usize, usize);
                 let single = env_str!("ENOMOTO_MIP_MCF_NO_SINGLE").is_none();
-                let aggs = super::mcf::aggregations(&nets, lp_rows, &act, rlo, rup, &duals, tunable!("ENOMOTO_T_MIP_MCF_CLUSTERS", 5usize, usize), max_aggs, single);
+                let aggs = super::mcf::aggregations(&nets, &lp_rows[..mr], &act, rlo, rup, &duals, tunable!("ENOMOTO_T_MIP_MCF_CLUSTERS", 5usize, usize), max_aggs, single);
                 let max_cuts = tunable!("ENOMOTO_T_MIP_MCF_MAX_CUTS", 200usize, usize);
                 let mut agg = vec![0.0f64; n];
                 let mut in_agg = vec![false; n];
@@ -7853,7 +7885,48 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 pp.fin[fidx] += n_fin.get();
             });
         }
+        // `ENOMOTO_MIP_OBJSTEPCUT=a`: 刻みの行をカットとして入れる (Σ (−k_j) x_j ≤ −lk の形。右辺が前に入れた値より上がり、LP 解を切るときだけ)
+        if let Some(('a', (row, lk, zk))) = objstep {
+            let last = OBJSTEP_LAST.with(|c| c.get());
+            if lk > last && lk > zk + FEASTOL {
+                let norm = row.iter().map(|&(_, a)| a * a).sum::<f64>().sqrt().max(1e-12);
+                let coefs: Vec<(usize, f64)> = row.iter().map(|&(j, a)| (j, -a)).collect();
+                cands.push(Candidate { coefs, rhs: -lk, efficacy: (lk - zk) / norm, forced: true, src: sepprof::SRC_POOL, sub: 0, kind: 0 });
+                OBJSTEP_LAST.with(|c| c.set(lk));
+            }
+        }
         cands
+    }
+
+    /// `ENOMOTO_MIP_OBJSTEPCUT` ([`objstepcut_mode`]): 刻み g・行 Σ k_j x_j (k_j = c_j / g、費用のある列)・右辺 lk = ⌈z/g⌉・LP の値 zk = z/g。
+    /// z は LP の解の目的値 (根の LP の下界)。刻みがない・k_j が整数でない・LP の値が有限でないなら None
+    fn objstep_row(&self) -> Option<(Vec<(usize, f64)>, f64, f64)> {
+        let p = self.p;
+        let g = p.objective_step_bounds(Some((&self.dom.global_lo, &self.dom.global_up)))?;
+        if !(g > 0.0) {
+            return None;
+        }
+        let xl = self.lp.col_values();
+        let mut row = Vec::new();
+        let mut zk = 0.0;
+        for j in 0..p.n {
+            if p.cost[j] != 0.0 {
+                let k = p.cost[j] / g;
+                if (k - k.round()).abs() > 1e-9 * k.abs().max(1.0) {
+                    return None;
+                }
+                row.push((j, k.round()));
+                zk += k.round() * xl[j];
+            }
+        }
+        if row.is_empty() || !zk.is_finite() {
+            return None;
+        }
+        let lk = (zk - 1e-6 * zk.abs().max(1.0)).ceil();
+        if env_str!("ENOMOTO_MIP_OBJSTEPCUT_LOG").is_some() {
+            eprintln!("OBJSTEP g {g} nnz {} zk {zk:.9} lk {lk} restarts {}", row.len(), self.params.restarts);
+        }
+        Some((row, lk, zk))
     }
 }
 
