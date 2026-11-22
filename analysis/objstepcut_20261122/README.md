@@ -69,6 +69,14 @@
   neos-1582420 1.69、pg5_34 1.44、beasleyC3 1.43、neos-933966 1.41、traininstance6 1.34、neos5 1.28、p200x1188c、neos-787933。
   - b が働く問題かは `acts.py` → `acts_M.txt` で確かめた (下に追記)。
   - 働かない問題 (目的に刻みがない) の差は、既定と同じ計算の揺れ。
+  - 確かめの結果 (`acts_M.txt`、1 スレッドで最初の分離まで):
+    - b が働く (刻みの行を作る): mzzv11・neos-1582420・p200x1188c・30n20b8・beasleyC3・traininstance6・peg-solitaire-a3・mzzv42z。
+      このうち遅れ・落としは mzzv11 (2.22)・neos-1582420 (1.69)・30n20b8 (1.54)・beasleyC3 (1.43)・traininstance6 (1.34)・peg-solitaire-a3 (落とし)。
+      traininstance6 は zk 0・lk 0 で行が LP 解を切らない (材料が 1 本増えるだけ)。
+    - 働かない (既定と同じ計算、揺れ): fiball (5.75)・tbfp-network (落とし)・gen-ip054・mas74・pg5_34・neos5・neos-933966・supportcase40 (落とし)・
+      csched007・graphdraw-domain (得た 2 問)。neos-787933 は 0.3 秒で解けて分離に届かない。
+    - つまり、大きな遅れのうち fiball・tbfp-network は揺れ。b が働く問題では、遅れ (mzzv11・neos-1582420・30n20b8・beasleyC3) と
+      速まり (mzzv42z) が混じる。
 - 速くなった側: chromaticindex512-7 462 → 228 秒、fast0507 353 → 218 秒、CMS750_4 167 → 100 秒、physiciansched6-2 104 → 25 秒。
 
 ## 表 (根だけ、1 スレッド・種 1・`ENOMOTO_MIP_NODE_LIMIT=1`、`summ.py` → `root.txt`)
