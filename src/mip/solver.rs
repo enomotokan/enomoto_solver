@@ -3633,6 +3633,9 @@ pub(super) static LPINF_HIST: [std::sync::atomic::AtomicU64; LPINF_HIST_N] = [co
 
 /// ノードの整数に見える LP 解が定義域の境界から外れていて、LP の境界を合わせて解き直した数 (全スレッド、診断)
 pub(super) static STALE_LP_BOUNDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// 整数列がすべて固定された葉で LP が解けなかった (LP なしの分枝で分けられない) 回数 (全スレッド): [葉の数, 一から作った LP で
+/// 実行不能と確かめて閉じた, 打ち切り値以上で閉じた, 暫定解にして閉じた, 閉じられず未解決]。[1..4] は `ENOMOTO_MIP_LEAF_FRESH` のときだけ
+pub(super) static LEAF_NOLP: [std::sync::atomic::AtomicU64; 5] = [const { std::sync::atomic::AtomicU64::new(0) }; 5];
 
 pub(super) fn lpinf_count(k: usize) {
     LPINF_RETRY[k].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3715,6 +3718,11 @@ fn lpinf_rowtiny() -> bool {
 
 /// LP の際どい実行不能の確かめ ([`lp_farkas_marginal`]) を使うか (既定で使う。`ENOMOTO_MIP_NO_LPINF_CHECK` で全部まとめて止める:
 /// ノードの LP・根の LP・強分枝の子・LP のプロービング)
+/// 試作 `ENOMOTO_MIP_LEAF_FRESH`: 整数列がすべて固定された葉で LP が解けないとき、一から作った LP で葉を閉じてみる ([`Solver::leaf_fresh_close`])
+pub(super) fn leaf_fresh_on() -> bool {
+    env_str!("ENOMOTO_MIP_LEAF_FRESH").is_some()
+}
+
 pub(super) fn lpinf_check_on() -> bool {
     env_str!("ENOMOTO_MIP_NO_LPINF_CHECK").is_none()
 }
@@ -6387,6 +6395,41 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 lpinf_count(1);
                 LpStatus::Error
             }
+        }
+    }
+
+    /// 試作 `ENOMOTO_MIP_LEAF_FRESH`: 整数列がすべて固定された葉で LP が解けなかったとき、定義域の境界・LP の行 (カットを含む) で
+    /// 一から作った LP を解いて葉を閉じる。実行不能 (証明が際どくない) なら閉じる。最適なら、値が打ち切り値以上か、解を暫定解に
+    /// できれば閉じる (整数列はすべて固定なので、この LP の最適値が葉の最良値)。閉じたら真
+    fn leaf_fresh_close(&mut self) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        let n = self.p.n;
+        let m = self.lp.num_rows();
+        let rows: Vec<Vec<(usize, f64)>> = (0..m).map(|i| self.lp.row_ref(i).to_vec()).collect();
+        let (rlo, rup): (Vec<f64>, Vec<f64>) = (0..m).map(|i| self.lp.row_bounds(i)).unzip();
+        let mut fresh = L::new(&self.dom.lo, &self.dom.up, &self.lp.costs(), &rows, &rlo, &rup);
+        let it0 = fresh.total_iterations();
+        let st = fresh.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
+        self.node_iters += fresh.total_iterations() - it0;
+        match st {
+            LpStatus::Infeasible if !lp_farkas_marginal(&fresh, n) => {
+                LEAF_NOLP[1].fetch_add(1, Relaxed);
+                true
+            }
+            LpStatus::Optimal => {
+                let v = fresh.objective() + self.p.offset;
+                if v >= self.prune_limit() {
+                    LEAF_NOLP[2].fetch_add(1, Relaxed);
+                    return true;
+                }
+                let x = fresh.col_values();
+                if self.try_incumbent(x) {
+                    LEAF_NOLP[3].fetch_add(1, Relaxed);
+                    return true;
+                }
+                false
+            }
+            _ => false,
         }
     }
 
@@ -17336,7 +17379,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         let Some((j, _)) = best else {
-            self.unresolved = true;
+            // 整数列がすべて固定された葉: 分けられない。`ENOMOTO_MIP_LEAF_FRESH` (試作) なら、定義域の境界と同じ行で一から作った LP を
+            // 解いて葉を閉じてみる (analysis/notsolved_20261122)。閉じられなければ未解決 (最後に NotSolved)
+            LEAF_NOLP[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if !(leaf_fresh_on() && self.leaf_fresh_close()) {
+                // 既定でも出す (スレッドごとに最初の 1 回。計測の台本は not_solved の回だけ stderr の最後を残す: analysis/notsolved_20261122)
+                if !self.params.submip && !self.unresolved {
+                    eprintln!("MIP: a leaf with all integer columns fixed has no LP result (thread {}, node {}); marking the search unresolved", self.pool_tid, self.nodes);
+                }
+                LEAF_NOLP[4].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.unresolved = true;
+            }
             return None;
         };
         let (lo, up) = (self.dom.lo[j], self.dom.up[j]);
@@ -26696,7 +26749,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
                 Err(_) => {
-                    // 従が異常終了した: 探索し残した部分があるかもしれない
+                    // 従が異常終了した: 探索し残した部分があるかもしれない (既定でも 1 行出す。analysis/notsolved_20261122)
+                    eprintln!("MIP: a tree search worker thread ended abnormally (panic); marking the search unresolved");
                     self.unresolved = true;
                     lb = f64::NEG_INFINITY;
                 }
@@ -27276,6 +27330,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 LPINF_RETRY[2].load(std::sync::atomic::Ordering::Relaxed),
                 LPINF_RETRY[3].load(std::sync::atomic::Ordering::Relaxed),
                 LPINF_RETRY[4].load(std::sync::atomic::Ordering::Relaxed)
+            );
+            eprintln!(
+                "MIP: leaves with all integer columns fixed and no LP result (all threads, cumulative): {}; closed by a fresh LP: infeasible {} at the prune limit {} new incumbent {}; left unresolved {}",
+                LEAF_NOLP[0].load(std::sync::atomic::Ordering::Relaxed),
+                LEAF_NOLP[1].load(std::sync::atomic::Ordering::Relaxed),
+                LEAF_NOLP[2].load(std::sync::atomic::Ordering::Relaxed),
+                LEAF_NOLP[3].load(std::sync::atomic::Ordering::Relaxed),
+                LEAF_NOLP[4].load(std::sync::atomic::Ordering::Relaxed)
             );
             eprintln!("MIP: integral-looking node LP solutions outside the domain (LP bounds behind the domain), re-solved: {}", STALE_LP_BOUNDS.load(std::sync::atomic::Ordering::Relaxed));
             eprintln!(
