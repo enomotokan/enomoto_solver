@@ -34,6 +34,12 @@ PyPI からインストールできます(上の「対応環境」なら，ビ�
 pip install enomoto-solver
 ```
 
+PyPI の wheel は，リンク時最適化(LTO)とプロファイルに基づく最適化(PGO)をかけてビルドしています．
+x86-64 の wheel(Linux，Windows，Intel の macOS)には，Rust の本体が 2 つ入っています．どの x86-64 の CPU でも動くものと，x86-64-v3 の CPU(AVX2，FMA，BMI2 などを持つもの．おおむね 2015 年ごろ以降の CPU)向けのものです．
+読み込むときに CPU を調べ，x86-64-v3 に対応していればそちらを使います．
+環境変数 `ENOMOTO_CORE` に `base`(どの x86-64 の CPU でも動くもの)，`v3`，`auto`(既定)を与えると，どちらを使うかを決められます．
+arm64 の wheel(Linux の aarch64，Apple シリコンの macOS)には本体が 1 つだけ入っています．
+
 ### ソースからビルドする場合
 
 開発やベンチマークの実行には，リポジトリを取得してビルドします．次のものが必要です．
@@ -53,6 +59,35 @@ maturin develop --release
 ```
 
 必ず `--release` を付けてビルドしてください．デバッグビルドは何倍も遅くなります．
+
+ソースからビルドすると，Rust の本体は 1 つで，LTO・PGO はかかりません．その CPU の種類のどの機種でも動く形になります．
+手元の CPU に合わせてビルドするには，`RUSTFLAGS` を与えます(できたものは，ほかの機械では動かないことがあります)．
+
+```sh
+RUSTFLAGS="-C target-cpu=native" maturin develop --release
+```
+
+PyPI の wheel と同じ形(LTO，PGO，x86-64 では x86-64-v3 向けの本体も)の wheel を手元で作るには，`scripts/build_dist_wheel.sh`(bash．Windows では Git Bash)を使います．
+Rust の `llvm-tools`(`rustup component add llvm-tools`)が必要です．
+この台本は次のことを順に行います．
+
+1. 計測用の wheel をビルドする．
+2. それを一時的な仮想環境に入れ，`scripts/pgo_train.py` が作る問題を解いてプロファイルを取る．
+3. プロファイルを使ってもう一度ビルドする．x86-64 では，1〜3 を x86-64-v3 向けにも行う(プロファイルは同じ命令の版で取ったものでないと合わないため)．
+4. `scripts/make_dual_wheel.py` で 2 つの wheel を 1 つにまとめる．
+
+```sh
+pip install maturin
+rustup component add llvm-tools
+bash scripts/build_dist_wheel.sh      # wheel は dist/ にできる
+pip install dist/enomoto_solver-*.whl
+```
+
+`maturin develop --release` の数倍の時間がかかります(4 コアで約 35 分)．
+`PGO=0` で PGO を，`DUAL=0` で x86-64-v3 向けのビルドを省けます．
+`maturin build` に渡す引数は `MATURIN_ARGS` で足せます(PyPI と同じにするなら `MATURIN_ARGS="--features pyo3/abi3-py39"`)．
+自分でビルドした 2 つの wheel をまとめるには `python scripts/make_dual_wheel.py BASE_WHEEL V3_WHEEL OUT_DIR` を使います．
+2 つの wheel は版とタグが同じで，2 つ目は `-C target-cpu=x86-64-v3` を付けてビルドしたものにします．
 
 ## 使い方
 
