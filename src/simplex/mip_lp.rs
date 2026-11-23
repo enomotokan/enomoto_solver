@@ -1363,7 +1363,16 @@ impl TwoStageLp {
             let s = y.iter().fold(0.0f64, |a, v| a.max(v.abs()));
             (s > 0.0 && s.is_finite()).then(|| y.iter().map(|v| v / s).collect::<Vec<f64>>())
         });
-        let acdual = acdual.and_then(|y| lagrange_std_c(&self.std, n, &y, true));
+        // 内点法の双対の向き (`c + A^T y` か `c - A^T y`) によらないよう、両方の符号で作って `-L` の小さい方を使う (どちらも正しい)
+        let acdual = acdual.and_then(|y| {
+            let neg: Vec<f64> = y.iter().map(|v| -v).collect();
+            let a = lagrange_std_c(&self.std, n, &y, true);
+            let b = lagrange_std_c(&self.std, n, &neg, true);
+            match (a, b) {
+                (Some(a), Some(b)) => Some(if a.0 >= b.0 { a } else { b }),
+                (a, b) => a.or(b),
+            }
+        });
         Some(InteriorPoint { x, vertex, lag, acdual })
     }
 
