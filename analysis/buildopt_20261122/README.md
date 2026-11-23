@@ -114,7 +114,7 @@ floor の呼び出しは、glibc の floor が SSE4.1 の ifunc で roundsd 1 �
 - `ENOMOTO_CORE=base|v3|auto` で強制できる (既定は auto)。
 - 他のモジュールが `_core` を import するより前に動かす必要がある (`from .constraint import` の前に置く)。
 
-wheel の試作は `make_dual_wheel.py BASE_WHEEL V3_WHEEL INIT_PY OUT_DIR`。maturin で 2 回作った wheel から、1 本目に 2 本目の .so と新しい `__init__.py` を入れ、RECORD (sha256・大きさ) を作り直す。
+wheel の試作は `make_dual_wheel.py BASE_WHEEL V3_WHEEL INIT_PY OUT_DIR` (このときの形。今は 7 節の scripts/make_dual_wheel.py に移した)。maturin で 2 回作った wheel から、1 本目に 2 本目の .so と新しい `__init__.py` を入れ、RECORD (sha256・大きさ) を作り直す。
 
 - pgo + pgo_v3 で作った wheel は 13,521,436 バイト (pgo だけの wheel 6,859,456 の約 2 倍)。展開後は .so 2 本で約 42 MB。
 - `pip install` で入った。ENOMOTO_CORE が auto → `_core_v3`、base → `_core`、v3 → `_core_v3` を読み、`__version__` も読めた。
@@ -197,11 +197,98 @@ pgo の fuzz は回していない。pgo は pgo_v3 と同じ profile・同じ L
   1 回あたりの計算は v3・PGO で 7〜8% 速いが、探索の揺れがそれより大きい。
 - 答えの食い違いは無く、解けた数も同じ水準 (差は mzzv42z の上限の際の 1 回だけ)。
 
-## 7. ファイル
+## 7. 案 C (LTO + PGO + dual) を配るための作り方 (2026-11-23、利用者の判断で案 C に決めた)
+
+手元のビルド (`maturin develop --release`) と Cargo.toml の既定は今のまま。main・develop・PyPI には触らない。
+
+### 7.1 CPU の見分けを Rust 側へ
+
+- src/lib.rs: `_core` に `cpu_x86_64_v3()` と `build_cpu_level()` を出す。
+  - `cpu_x86_64_v3()` は、`is_x86_feature_detected!` で x86-64-v3 の全部 (v2 の sse3・ssse3・sse4.1・sse4.2・popcnt・cmpxchg16b と、avx・avx2・bmi1・bmi2・fma・f16c・lzcnt・movbe) を見る。
+    avx は OS がレジスタを保存するか (OSXSAVE・XCR0) も含めて見る。x86_64 以外では false。
+  - `build_cpu_level()` は、その .so を作ったときの水準 ("x86-64-v3" か "base") を返す。読み分けの確かめ用。
+- python/enomoto_solver/__init__.py: `_enomoto_load_core()` を、ほかのモジュールが `_core` を import するより前に動かす。
+  - `_core_v3.*` (.so・.pyd) が同梱されていれば、まず基本の `_core` を読み、その `cpu_x86_64_v3()` が真なら `_core_v3` を `enomoto_solver._core` として読み替える。
+  - 判定は Rust 側でするので、/proc/cpuinfo の無い Windows・macOS でも同じに動く。
+  - `ENOMOTO_CORE=auto|base|v3` で強制できる。v3 を指定して同梱が無ければ、警告して base を使う。ほかの値は警告して auto とみなす。
+  - `_core_v3` の無い wheel (arm64、手元の maturin develop) では何もしない。
+- 基本の .so も読み込むので、auto で v3 を使うときは .so が 2 つ読まれる。基本の方は判定に使うだけで、そのあとは使わない。
+- 確かめ (手元の 2 本入り wheel を pip で入れたもの):
+  - auto・空・不正な値 → `_core_v3` (x86-64-v3)。base → `_core`。v3 → `_core_v3`。
+  - model.py が使う `_core` も読み替えた方になっている。
+  - 同梱の無い wheel で ENOMOTO_CORE=v3 → 警告して base。
+
+### 7.2 PGO の学習に使う問題
+
+前回の学習に使った 10 問 (1 節) は、調べると全部が P の 58 問に入っていた (m1 の 15 問とは重なっていない)。
+6 節の 4 スレッドの P は、学習した問題を含んでいたことになる。差は小さい (0.984) ので結論は変わらないが、ここに記しておく。
+手元の .miplib_cache の 147 問も、全部が P・M・m1 のどれかに入っている。
+
+そこで、scripts/pgo_train.py で、決まった種から作る問題を学習に使う (repo に入るのは台本だけで、問題のファイルは要らない)。
+- 種類: 多次元ナップサック・集合被覆・容量つき施設配置・一般化割当・段取りつきロットサイズ・一般整数・輸送 (LP)・実行不能 (偶奇)。
+- 種類ごとに 2 問、1 スレッドと 4 スレッドで、上限 10 秒。手元では 114 秒。
+- 木の探索・切除平面・ヒューリスティック・前処理 (HNF を含む)・LP・並列の探索を通す。
+
+### 7.3 台本
+
+- scripts/build_dist_wheel.sh は bash (Linux・macOS・Windows の Git Bash) で、次を順に行う。
+  1. LTO fat・codegen-units 1 に `-Cprofile-generate` を付けて作る。
+  2. venv に入れて pgo_train.py を解く。
+  3. rustup の llvm-profdata で profile をまとめる。
+  4. `-Cprofile-use` で base を作る。
+  5. x86_64 なら、さらに `-Ctarget-cpu=x86-64-v3` を付けて v3 を作る。
+  6. scripts/make_dual_wheel.py で 1 本にする。
+- 環境変数: `PGO=0` で LTO だけ。`DUAL=0` で 1 本 (x86_64 以外の既定)。`MATURIN_ARGS`・`PY`・`OUT`・`TRAIN_ARGS` も渡せる。
+- scripts/make_dual_wheel.py は、base の wheel に v3 の wheel の `_core.*` を `_core_v3.*` として足し、RECORD を作り直す。
+  - 2 本の wheel の名前 (版・タグ) が同じことを確かめる。
+  - abi3 の `_core.abi3.so` と Windows の `_core.pyd` にも対応した。
+
+手元 (Linux x86_64、4 コア) で作った時間 (build_c.out):
+
+| 段 | 秒 |
+|---|---:|
+| 計測用の wheel (LTO + profile-generate) | 573 |
+| 学習 (pgo_train.py) | 114 |
+| base (LTO + PGO) | 468 |
+| v3 (LTO + PGO + x86-64-v3) | 479 |
+| 合わせて | 1641 (27 分) |
+
+今の作り方は 128 秒。できた 2 本入りの wheel は 13,735,281 バイト。
+
+v3 を作るときに、`function control flow change detected (hash mismatch)` の警告が std の OnceLock の初期化の 3 関数で出る。
+profile は base の命令で取ったので、target-cpu を変えると形が変わる関数がある。その関数の profile が捨てられるだけで、害は無い。
+
+### 7.4 release の CI の設計 (変更案は release_proposed.yml、まだ .github には入れない)
+
+| 対象 | 機械 | PGO | dual | 見込みの時間 |
+|---|---|---|---|---|
+| Linux x86_64 | ubuntu-latest の上で manylinux_2_28 のコンテナ | する | する | 約 30 分 (手元と同じ 4 コア) |
+| Linux aarch64 | ubuntu-24.04-arm (arm の機械で直に。今はクロス) + manylinux_2_28_aarch64 のコンテナ | する | しない | 約 20 分 (v3 の作りが無い) |
+| Windows x64 | windows-latest (Git Bash で台本) | する | する | 約 35〜45 分 (MSVC の LTO のリンクは遅め) |
+| macOS arm64 | macos-15 | する | しない | 約 15〜20 分 |
+| macOS x86_64 | macos-15-intel (Intel の機械で直に。今は arm からクロス) | する | する | 約 35〜45 分 |
+
+- 学習は作った wheel を動かすので、その機械で動く対象でしか PGO はできない。そのため今のクロスの 2 つ (Linux aarch64・macOS x86_64) は、ネイティブの機械に移す。
+  - 移せない場合は、その job だけ `PGO=0` (LTO だけ) にする。macOS x86_64 なら、arm の機械でクロスで作り、v3 も作って dual にすることはできる。
+- profile は OS・対象ごとに取り直す (profraw は対象ごとのもの)。どの job も自分で学習する。
+- job は並んで動くので、全体の待ち時間は今の約 10 分から約 45 分になる見込み (一番遅い Windows・macOS Intel で決まる)。
+- Linux は、maturin の `--compatibility manylinux_2_28` が名札付けと確かめをする。2 本入りにしたあとで `auditwheel show` で両方の .so を見る。
+- test の job: 今の pytest を `ENOMOTO_CORE=auto` と `ENOMOTO_CORE=base` の 2 回流す。auto では `build_cpu_level()` を表示する。GitHub の x86 の機械は v3 があるので、2 本の両方が試される。
+- sdist は今のまま (ソースからの build は 1 本、LTO・PGO なし)。
+- 確かめていないこと:
+  - Windows (MSVC) と macOS で `-Cprofile-generate` が通ること。rustc は対応しているが、ここでは動かしていない。最初の CI の実行で見る。
+  - `macos-15-intel` と `ubuntu-24.04-arm` のラベルが、このリポジトリで使えること。
+  - abi3 の wheel での 2 本入り。手元では cp313 で作った。CI では `--features pyo3/abi3-py39` を付けて作るので、`_core.abi3.so` の形になる。
+
+### 7.5 手元での確かめ (Linux x86_64)
+
+<!-- C_CHECK -->
+
+## 8. ファイル
 
 - `build_var.sh`、`build_all.sh` (1 回目、作業木を固める前で使わない)、`build_all2.sh` (今回の全部)、`build_all.out`・`build_all2.out`
 - `pgo_train.sh`、`res_pgotrain.jsonl` (学習の回)
-- `apply_ffloor.py` ((a) の当て方)、`make_dual.py`・`make_dual_wheel.py` ((c))
+- `apply_ffloor.py` ((a) の当て方)、`make_dual.py` ((c))。make_dual_wheel.py は scripts/ へ移した (7 節)
 - `run_var.py` (1 スレッドの比べ)、`res_m1.jsonl`・`run_m1.out`、`ana_m1.py`・`ana_m1.txt`
 - `fuzz_var.sh` (版ごとの fuzz 7 本)、`fuzz_lto.out`・`fuzz_pgo_v3.out`、`cargo_lto.log`・`cargo_pgo_v3.log`
 - `plan_P.py`・`run_P.py`・`shards_P.json`・`res_P_s0.jsonl`・`run_P0.out`、`ci.py`・`ana_P.py` (6 節)
