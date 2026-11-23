@@ -27,7 +27,8 @@
 //!   HiGHS は下限 0 のまま)。
 //!
 //! 半連続 (`SC`)・半整数 (`SI`)・二次の項 (`QUADOBJ` など)・`SOS` は扱えないので、
-//! 見つけたらエラーにする。
+//! 見つけたらエラーにする。`ROWS` の節が無いファイル (空・注釈だけ・`NAME` だけなど) もエラーにする
+//! (変数 0 個の問題として黙って読まない)。
 
 use std::collections::HashMap;
 
@@ -139,6 +140,8 @@ fn parse_mps_with(text: &str, fixed: bool) -> Result<MpsData, String> {
     let mut row_of: HashMap<String, RowRef> = HashMap::new();
     let mut col_of: HashMap<String, usize> = HashMap::new();
     let mut objective_name: Option<String> = None;
+    // `ROWS` の節が一度でも現れたか (読めるデータが無いファイルを見分けるため)
+    let mut saw_rows = false;
     let mut in_int = false;
     // 列ごとの「BOUNDS で下限・上限が書かれたか」と「MARKER の整数列で、まだ既定の二値のままか」
     let mut has_lb: Vec<bool> = Vec::new();
@@ -179,6 +182,9 @@ fn parse_mps_with(text: &str, fixed: bool) -> Result<MpsData, String> {
             };
             if let Some(s) = next {
                 sec = s;
+                if s == Section::Rows {
+                    saw_rows = true;
+                }
                 match s {
                     Section::Name => d.name = toks.get(1).map(|s| s.to_string()).unwrap_or_default(),
                     // `OBJSENSE MAX` を同じ行に書く形 (Gurobi など)
@@ -326,6 +332,11 @@ fn parse_mps_with(text: &str, fixed: bool) -> Result<MpsData, String> {
         }
     }
 
+    // 読めるデータが無いファイル (空・注釈だけ・NAME だけなど) はエラーにする。`ENDATA` が無いだけのファイルは
+    // ここまでに ROWS と中身を読めているので、今までどおり読める
+    if !saw_rows || (objective_name.is_none() && d.row_names.is_empty() && d.col_names.is_empty()) {
+        return Err("no MPS data found (the file is empty or has no ROWS section)".to_string());
+    }
     // MARKER の整数列で BOUNDS に何も書かれなかったものは二値
     for j in 0..d.col_names.len() {
         if binary_default[j] {
@@ -515,6 +526,18 @@ BOUNDS
  LO BND       Z            -3
 ENDATA
 ";
+
+    /// 読めるデータが無いファイル (空・注釈だけ・`NAME` だけ) はエラー: 変数 0 個の問題として黙って読まない
+    #[test]
+    fn rejects_files_without_rows() {
+        for t in ["", "\n\n", "* comment\n\n", "NAME x\n", "NAME x\nENDATA\n"] {
+            let e = parse_mps(t).unwrap_err();
+            assert!(e.contains("no MPS data found"), "{t:?} -> {e}");
+        }
+        // `ENDATA` が無いだけのファイルは今までどおり読める
+        let d = parse_mps("NAME x\nROWS\n N obj\n L c\nCOLUMNS\n a obj 1 c 1\nRHS\n rhs c 2\n").unwrap();
+        assert_eq!((d.row_names.clone(), d.col_names.clone()), (vec!["c".to_string()], vec!["a".to_string()]));
+    }
 
     #[test]
     fn reads_small_problem() {

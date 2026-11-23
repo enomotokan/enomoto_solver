@@ -1,0 +1,27 @@
+== build gen-base: RUSTFLAGS= -Cprofile-generate=/home/user/bo_wt_c/target/dist-work2/raw-base 
+📦 Built wheel for CPython 3.13 to /home/user/bo_wt_c/target/dist-work2/gen-base/enomoto_solver-0.1.10-cp313-cp313-manylinux_2_39_x86_64.whl
+== build gen-base: 525 秒、hash mismatch 0
+== train base: scripts/pgo_train.py --time-limit 10 --threads 1,4
+total 110.0s
+== train base: 110 秒
+== build base: RUSTFLAGS= -Cprofile-use=/home/user/bo_wt_c/target/dist-work2/base.profdata
+📦 Built wheel for CPython 3.13 to /home/user/bo_wt_c/target/dist-work2/base/enomoto_solver-0.1.10-cp313-cp313-manylinux_2_39_x86_64.whl
+== build base: 445 秒、hash mismatch 0
+== build gen-v3: RUSTFLAGS= -Cprofile-generate=/home/user/bo_wt_c/target/dist-work2/raw-v3 -Ctarget-cpu=x86-64-v3
+📦 Built wheel for CPython 3.13 to /home/user/bo_wt_c/target/dist-work2/gen-v3/enomoto_solver-0.1.10-cp313-cp313-manylinux_2_39_x86_64.whl
+== build gen-v3: 502 秒、hash mismatch 0
+== train v3: scripts/pgo_train.py --time-limit 10 --threads 1,4
+total 109.1s
+== train v3: 109 秒
+== build v3: RUSTFLAGS= -Cprofile-use=/home/user/bo_wt_c/target/dist-work2/v3.profdata -Ctarget-cpu=x86-64-v3
+📦 Built wheel for CPython 3.13 to /home/user/bo_wt_c/target/dist-work2/v3/enomoto_solver-0.1.10-cp313-cp313-manylinux_2_39_x86_64.whl
+== build v3: 450 秒、hash mismatch 0
+/home/user/bo_wt_c/target/dist-c2/enomoto_solver-0.1.10-cp313-cp313-manylinux_2_39_x86_64.whl (13672554 バイト、enomoto_solver/_core.cpython-313-x86_64-linux-gnu.so と enomoto_solver/_core_v3.cpython-313-x86_64-linux-gnu.so)
+total 13356
+-rw-r--r-- 1 root root 13672554 Nov 23 10:42 enomoto_solver-0.1.10-cp313-cp313-manylinux_2_39_x86_64.whl
+== 全体: 2152 秒
+rc=0
+## target/dist-work2/base.log: hash mismatch 0
+## target/dist-work2/gen-base.log: hash mismatch 0
+## target/dist-work2/gen-v3.log: hash mismatch 0
+## target/dist-work2/v3.log: hash mismatch 0
