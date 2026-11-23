@@ -14,6 +14,8 @@ run fuzz_slack python3 analysis/wrongans_20261112/seed14/fuzz_slack.py 1000 0
 run fuzz_tiny2 env ENOMOTO_MIP_REL_GAP=1e-9 python3 benchmarks/equiv2_bug_20261022/fuzz_tiny.py 400 1000
 run fuzz_objint2 python3 analysis/objint_20261112/fuzz_objint.py 1000 5000
 run fuzz_slack2 python3 analysis/wrongans_20261112/seed14/fuzz_slack.py 1000 5000
+echo "== fuzz_acfix (固定できる列を埋め込んだ fuzz、5000 問 x 2)"
+for st in 0 100000; do python3 analysis/highsonly_20261123/fuzz_acfix.py 5000 $st > $L/fuzz_acfix_$st.log 2>&1; echo "rc=$?"; grep "^bad\|^seed" $L/fuzz_acfix_$st.log; echo "働いた $(grep -c ACFIXD_TRACE $L/fuzz_acfix_$st.log) 回、固定・締めあり $(grep ACFIXD_TRACE $L/fuzz_acfix_$st.log | grep -vc 'fixed 0 tightened 0')"; done
 CT="cargo test --release --lib"
 export CARGO_TARGET_DIR=target/test-py RUSTFLAGS="-L /usr/local/lib -C link-arg=-lpython3.13" LD_LIBRARY_PATH=/usr/local/lib
 echo "== cargo test (ACFIX=d)"; $CT > $L/cargo_acd.log 2>&1; echo "rc=$?"; grep "test result" $L/cargo_acd.log

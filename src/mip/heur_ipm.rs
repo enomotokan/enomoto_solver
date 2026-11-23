@@ -68,7 +68,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // `t` (確かめ用): 詳しいログなしでも 1 行出す (fuzz で働いた回数を数える)
         if !self.params.verbose && env_str!("ENOMOTO_MIP_HO4_ACFIX").is_some_and(|v| v.contains('t')) {
-            eprintln!("ACFIXD_TRACE same {same} gap {gap:.3e} fixed {} tightened {}", nlo + nup, nlt + nut);
+            let (dmax, dpos) = ip.acdual.as_ref().map_or((0.0, 0), |(_, d)| {
+                let ints = (0..p.n).filter(|&j| p.is_int[j]);
+                (ints.clone().map(|j| d[j].abs()).fold(0.0f64, f64::max), ints.filter(|&j| d[j].abs() > 1e-6).count())
+            });
+            eprintln!("ACFIXD_TRACE same {same} gap {gap:.3e} fixed {} tightened {} int |d|max {dmax:.3e} |d|>1e-6 {dpos}", nlo + nup, nlt + nut);
         }
         if self.params.verbose {
             eprintln!(
