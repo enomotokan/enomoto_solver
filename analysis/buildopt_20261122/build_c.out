@@ -1,0 +1,67 @@
+== build gen: RUSTFLAGS= -Cprofile-generate=/home/user/bo_wt_c/target/dist-work/pgo-raw
+📦 Including license file `LICENSE`
+🍹 Building a mixed python/rust project
+🐍 Found CPython 3.13 at /usr/local/bin/python3
+🔗 Found pyo3 bindings
+📡 Using build options features from pyproject.toml
+warning: unused doc comment
+    --> src/mip/mod.rs:1262:1
+     |
+1262 | / /// `p` を (`use_presolve` なら MIP 前処理をかけてから) 分枝限定法で解き、解を `p` の空間に戻す。
+1263 | | /// 戻した解が `p` で実行可能でなければ (前処理の誤りの安全網)、前処理なしで解き直す。
+1264 | | /// サブ MIP (RENS/RINS) もこれで解く。
+     | |_--------------------------------------^
+     |   |
+     |   rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+     = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused doc comment
+    --> src/mip/mod.rs:2702:1
+     |
+2702 | / /// `ENOMOTO_MIP_FEAS_FJ_EARLY` (既定 `fl`、`=0` で使わない。flbgx として既定にした: analysis/flbgx_default_20261102.md): 実行...
+2703 | | /// ([`lp_probe`]) の前に、種を変えた FJ2 をスレッドの数だけ並べて回す ([`feas_fj_early`])。見つかればどの実行可能解も最適なので、
+2704 | | /// 残りの前処理 (LP による固定・プロービング・クリーク行の拡張・対称性) も根の LP も飛ばして最適で終える。
+2705 | | /// ns1116954 (4 スレッド・60 秒) は既定で 27〜33 秒のうち、前処理の LP による固定が 11〜13 秒 (固定 0)、根の LP の解き直しが 12...
+2706 | | /// FJ のスレッドは根の LP の途中で解を見つけているのに主が根の LP の終わりまで受け取らない (analysis/ns1116954_20261101.md)
+     | |_---------------------------------------------------------------------------------------------------------------------------^
+     |   |
+     |   rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+  --> src/mip/zerohalf.rs:37:1
+   |
+37 | / /// zerohalf カットを作る。`rows`/`row_lo`/`row_up` は元の行、`lo`/`up` は大域的な境界、`x` は LP 解。
+38 | | /// 戻り値のカットは構造変数だけの式。
+39 | | ///
+40 | | /// (Cgl012cut の前処理に寄せた試作 `ENOMOTO_MIP_ZH_PRE` は 2026-11-18 に削除。analysis/cleanup_20261118/)
+   | |_---------------------------------------------------------------------------------------------------------^
+   |   |
+   |   rustdoc does not generate documentation for macro invocations
+   |
+   = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused import: `tu_shape`
+  --> src/mip/implint_tu.rs:59:31
+   |
+59 | pub use super::tu::{is_tu_er, tu_shape};
+   |                               ^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused doc comment
+  --> src/presolve.rs:58:1
+   |
+58 | / /// 前処理の実行不能判定に使う許容誤差: `base * (1 + |scale|)` (相対形、既定) または `base` (従来の絶対形)。
+59 | | ///
+60 | | /// `scale` は判定に関わる量の大きさ (固定値、行の活動度の項の絶対値の和、境界の絶対値など)。
+61 | | /// 丸め誤差はその大きさに比例するため (`params::presolve::PRESOLVE_REL_TOL` 参照)。
+62 | | /// `ENOMOTO_T_PRESOLVE_REL_TOL=0` で従来の絶対判定に戻る。`scale` が有限でなければ `base`。
+   | |_-------------------------------------------------------------------------------------------^
+   |   |
+   |   rustdoc does not generate documentation for macro invocations
+   |
+   = help: to document an item produced by a macro, the
