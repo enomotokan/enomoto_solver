@@ -191,6 +191,46 @@ fn default_threads() -> usize {
     mip::default_threads()
 }
 
+/// この CPU が x86-64-v3 (AVX2・FMA・BMI1/2・LZCNT・MOVBE・F16C と、v2 の SSE3〜SSE4.2・POPCNT・CMPXCHG16B) を
+/// 実行時に使えるか。`is_x86_feature_detected!` は OS が AVX のレジスタを保存するか (OSXSAVE・XCR0) も見る。
+/// x86-64 以外では常に false。`__init__.py` がこれを見て、wheel に v3 向けの `_core_v3` があればそちらを読む
+/// (analysis/buildopt_20261122)。この関数のある .so 自体は基本の命令だけで作るので、どの CPU でも呼べる。
+#[pyfunction]
+fn cpu_x86_64_v3() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("sse3")
+            && std::arch::is_x86_feature_detected!("ssse3")
+            && std::arch::is_x86_feature_detected!("sse4.1")
+            && std::arch::is_x86_feature_detected!("sse4.2")
+            && std::arch::is_x86_feature_detected!("popcnt")
+            && std::arch::is_x86_feature_detected!("cmpxchg16b")
+            && std::arch::is_x86_feature_detected!("avx")
+            && std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("bmi1")
+            && std::arch::is_x86_feature_detected!("bmi2")
+            && std::arch::is_x86_feature_detected!("fma")
+            && std::arch::is_x86_feature_detected!("f16c")
+            && std::arch::is_x86_feature_detected!("lzcnt")
+            && std::arch::is_x86_feature_detected!("movbe")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// この .so を作ったときの命令の水準: AVX2・FMA・BMI2 を前提に作っていれば "x86-64-v3"、そうでなければ "base"
+/// (読み分けの確かめ用)。
+#[pyfunction]
+fn build_cpu_level() -> &'static str {
+    if cfg!(all(target_feature = "avx2", target_feature = "fma", target_feature = "bmi2")) {
+        "x86-64-v3"
+    } else {
+        "base"
+    }
+}
+
 /// Python 拡張モジュール `enomoto_solver._core` の初期化。`PyModel` クラスと
 /// `last_solve_events` を登録し、`__version__` に Cargo.toml の版 (ビルドしたときの値) を入れる。
 #[pymodule]
@@ -200,5 +240,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(last_solve_events, m)?)?;
     m.add_function(wrap_pyfunction!(max_threads, m)?)?;
     m.add_function(wrap_pyfunction!(default_threads, m)?)?;
+    m.add_function(wrap_pyfunction!(cpu_x86_64_v3, m)?)?;
+    m.add_function(wrap_pyfunction!(build_cpu_level, m)?)?;
     Ok(())
 }
