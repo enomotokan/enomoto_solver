@@ -457,6 +457,11 @@ pub(super) struct XoOptions<'a> {
     /// 内点法を飛ばして使う点 `(x (全列), y, 内点法の時間)`。境界にある列を固定した小さな問題で、元の問題の内点法の
     /// 点からクロスオーバーを続けるときに使う ([`fix_and_resolve`])。
     pub given_point: Option<(&'a [f64], &'a [f64], f64)>,
+    /// 基底の足りない列を、スラックで埋める前に被約費用 |s_j| の小さい列から試して埋める (足りない数のこの倍まで試す。
+    /// `ENOMOTO_T_XO_FILL_BY_S` と同じで、大きい方を使う。0 で使わない)。試作 `ENOMOTO_MIP_ROOTLP_PRESOLVE=d` が使う: 主双対の
+    /// 最適な点は退化していて境界の内側の列が少なく (neos-873061 で 184 本 / 93292 行)、スラックで埋めると双対実行不能が残り
+    /// 仕上げの単体法に 95 秒以上かかった (埋めると 0.24 秒)
+    pub fill_by_s: usize,
     /// 真なら押し出し (主の押し出し・基底の選択・Megiddo 式の押し出し) で作った基底と、その基底解 (頂点) を
     /// [`XO_VERTEX`] に残して、仕上げの単体法を走らせずに `None` を返す (分枝限定法のヒューリスティクス用)。
     /// この基底は主実行可能な頂点を与えるが、**双対実行可能とは限らない** (最適基底ではない)。
@@ -2105,7 +2110,7 @@ pub(super) fn solve_ipm_crossover_with(std: &StdForm, xo: &XoOptions) -> Option<
     // 試験用 (`ENOMOTO_T_XO_FILL_BY_S=K`): 足りない列を、スラックで埋める前に、内点法の被約費用 |s_j| の小さい列
     // (スラックを含む) から試して埋める (足りない数の K 倍まで試す)。スラックを基底に入れるとその行の双対が 0 に
     // 固定され、内点法の y から離れて双対実行不能が増える (ken-18・pds-20)。
-    let fill_k = tunable!("ENOMOTO_T_XO_FILL_BY_S", 0usize, usize);
+    let fill_k = tunable!("ENOMOTO_T_XO_FILL_BY_S", 0usize, usize).max(xo.fill_by_s);
     if fill_k > 0 && !sel.full() {
         let missing = m - sel.chosen.len();
         let mut cand_s: Vec<usize> = (0..n).filter(|&j| !sel.is_chosen[j] && std.lb[j] < std.ub[j]).collect();

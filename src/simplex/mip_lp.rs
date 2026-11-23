@@ -2732,7 +2732,7 @@ impl TwoStageLp {
         let y: Vec<f64> = (0..m).map(|i| sgn * self.sigma[i] * pi[i]).collect();
         sid::request_duals(true);
         let r = crate::cancel::with_deadline(lim.deadline, || {
-            super::crossover::solve_ipm_crossover_with(&self.std, &super::crossover::XoOptions { given_point: Some((&xs, &y, 0.0)), ..Default::default() })
+            super::crossover::solve_ipm_crossover_with(&self.std, &super::crossover::XoOptions { given_point: Some((&xs, &y, 0.0)), fill_by_s: 4, ..Default::default() })
         });
         let duals = sid::take_duals();
         sid::request_duals(false);
