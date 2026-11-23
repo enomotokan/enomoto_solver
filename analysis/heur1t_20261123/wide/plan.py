@@ -1,4 +1,4 @@
-"""heur1t_20261123/wide (proofcost_20261123/wide の写し、設定は def_t1 と f_t1、1 スレッド): biglp の直す案の広い計測の分担表 (def と fix の対、どれも 4 スレッド。analysis/rootgap_20261121/plan.py の写し)。
+"""heur1t_20261123/wide (proofcost_20261123/wide の写し、設定は def_t1 と fl_t1、1 スレッド): biglp の直す案の広い計測の分担表 (def と fix の対、どれも 4 スレッド。analysis/rootgap_20261121/plan.py の写し)。
 python plan.py P 6  → shards_P.json (MIPLIB の 58 問 × 種 1〜3 × {def, fix}、60 秒)。見積りは analysis/final_20261118 の P の def の時間 + 8 秒。
 python plan.py M 20 → shards_M.json (Mittelmann 186 問 × 種 1 × {def, fix}、600 秒)。見積りは analysis/vsscip_20261120 の M の def の時間
 (解けなかった回は上限) + 30 秒。設定の順は問題・種で入れ替える。slowm_20261119/plan.py の CP・CM の写し。"""
@@ -8,7 +8,7 @@ D = Path(__file__).resolve().parent
 sys.path.insert(0, str(D.parents[1] / "cbcimpl_20261029"))
 from probs import PROBS  # noqa: E402
 SET, NS = sys.argv[1], int(sys.argv[2])
-CF = ["def_t1", "f_t1"]
+CF = ["def_t1", "fl_t1"]
 def solved(r): return str(r["result"].get("status", "")).lower() in ("optimal", "infeasible")
 def times(pat, cap):
     T = {}
