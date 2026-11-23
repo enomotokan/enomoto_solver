@@ -131,11 +131,49 @@ wheel の試作は `make_dual_wheel.py BASE_WHEEL V3_WHEEL INIT_PY OUT_DIR`。ma
 
 ## 4. 誤答の確かめ (lto・pgo_v3)
 
-<!-- FUZZ -->
+`bash fuzz_var.sh 版` で確かめた。中身は gainstall_20261122/fuzz_w.sh と同じ 7 本で、環境変数は既定のまま。PYTHONPATH=var/版 にして、`_core` がその版から来ることを始めに確かめる。
+cargo test は作業木 /home/user/bo_wt で回した。その版と同じ環境変数 (LTO fat・CGU 1、pgo_v3 はさらに v3 と profile-use) を付けて `cargo test --release --lib`。
+
+| 確かめ | lto | pgo_v3 |
+|---|---|---|
+| fuzz_tiny 400 0 | bad 0 | bad 0 |
+| mip_fuzz_vs_highs 300 | bad 0 | bad 0 |
+| fuzz_objint 1000 0 | bad 0 | bad 0 |
+| fuzz_slack 1000 0 | mismatches 0 | mismatches 0 |
+| fuzz_tiny 400 1000 | bad 0 | bad 0 |
+| fuzz_objint 1000 5000 | bad 0 | bad 0 |
+| fuzz_slack 1000 5000 | mismatches 0 | mismatches 0 |
+| cargo test --release --lib | 419 通過・0 失敗 (19 は ignored) | 419 通過・0 失敗 (19 は ignored) |
+
+誤答・失敗は無い。fuzz_objint の「nodes>0」の数は版によって 1〜5 違う。fuzz は既定のスレッド数 (複数) で回るためで、答えはどれも合っている。
+pgo の fuzz は回していない。pgo は pgo_v3 と同じ profile・同じ LTO で、v3 を付けないだけだから。m1 でノード数・目的値が同じことは見た。
 
 ## 5. 案
 
-<!-- PROPOSAL -->
+1. **配る wheel は LTO (fat、codegen-units 1) + PGO にする**。
+   - 1 スレッドで 7% 減 (pgo 0.926)。道筋は同じで、.so は 24% 小さい。
+   - 代わりに、作る時間が 128 秒から約 15 分 (pgogen の作り + 学習 + pgo の作り) になる。
+   - LTO だけなら、Cargo.toml に `[profile.release] lto = "fat"`、`codegen-units = 1` を足すだけで済む。ただし LTO だけの効きは 1.6% と小さい。
+     手元の `maturin develop` も遅くなるので、Cargo.toml の既定は変えず、配る CI でだけ `CARGO_PROFILE_RELEASE_*` を付ける形を勧める。
+   - PGO は、学習の問題と手順 (`pgo_train.sh`) を CI に持ち込む必要がある。ソースが変わると profile に合わない所が出るので、作るたびに学習し直す。
+2. **x86-64 では、base と v3 の 2 本入り wheel (dual) にする**。
+   - v3 を重ねると、pgo_v3 で 12% 減 (0.877)。読み分けの損は無い (dual 0.955 ≈ v3 0.953)。
+   - wheel は約 2 倍になる (pgo + pgo_v3 で 13.5 MB)。作る時間も .so 2 本分かかる。PGO の学習は 1 回で両方に使える。
+   - v3 だけの wheel は、v3 の無い CPU で落ちるので出せない。
+   - 手間を減らすなら、v3 をやめて v2 (target-cpu=x86-64-v2、2009 年ごろ以降の CPU) を既定にする手もある。この 15 問では v2 が 0.943 で、v3 と同じ。
+     ただし、v2 の無い古い CPU では動かなくなる。
+3. **floor の (a) は入れない** (速くならない)。(b) の関数ごとの切り替えも、効きが広く散っているので見送る。
+4. 次の確かめとして、4 スレッドの P (58 問 × 種 1〜3、60 秒) で base と pgo_v3 を比べる用意をした。
+
+   ```
+   python plan_P.py 1 base pgo_v3
+   python run_P.py 0
+   ```
+
+   - 348 回で、見積りは 2.8 時間。lto_v3 も入れると 522 回、4.2 時間。
+   - 4 スレッドではメモリ帯域や待ちの割合が増えるので、1 スレッドの 12% より縮むかもしれない。
+   - 4 スレッドは決定的でないので、解けた数と時間の比を見る。
+   - 回すかどうかは指示を待つ。
 
 ## 6. ファイル
 
@@ -144,5 +182,5 @@ wheel の試作は `make_dual_wheel.py BASE_WHEEL V3_WHEEL INIT_PY OUT_DIR`。ma
 - `apply_ffloor.py` ((a) の当て方)、`make_dual.py`・`make_dual_wheel.py` ((c))
 - `run_var.py` (1 スレッドの比べ)、`res_m1.jsonl`・`run_m1.out`、`ana_m1.py`・`ana_m1.txt`
 - `fuzz_var.sh` (版ごとの fuzz 7 本)、`fuzz_lto.out`・`fuzz_pgo_v3.out`、`cargo_lto.log`・`cargo_pgo_v3.log`
-- `plan_P.py`・`run_P.py` (4 スレッド P の比べ、まだ回していない。4 節の後)
+- `plan_P.py`・`run_P.py` (4 スレッド P の比べ、まだ回していない。5 節の 4)
 - var/・target_var/・pgo/ はコミットしない (.gitignore)
