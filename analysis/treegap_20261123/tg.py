@@ -89,6 +89,8 @@ def one(solver, prob, seed, tag, args):
     t0 = time.time()
     pr = subprocess.run([sys.executable, __file__, "_w" + solver, str(mps), str(seed), json.dumps(params)], cwd=WT, env=env,
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=TL + 300)
+    if solver == "ours" and "ENOMOTO_MIP_LOG" in env:  # 当方の記録 (標準エラー) を logs/ に残す
+        (D / "logs").mkdir(exist_ok=True); (D / "logs" / f"{prob}_s{seed}_{tag}.ourslog").write_text(pr.stderr)
     try: res = json.loads([l for l in pr.stdout.splitlines() if l.startswith("{")][-1])
     except Exception: res = {"status": "crash", "returncode": pr.returncode, "err": pr.stderr[-500:]}  # noqa: BLE001
     row = {"solver": solver, "problem": prob, "seed": seed, "tag": tag, "args": args, "tl": TL, "result": res,

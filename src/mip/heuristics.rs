@@ -1066,6 +1066,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut alpha = if cnorm > 0.0 { 1.0f64 } else { 0.0 };
         // 近さの指標 ([`Solver::heur_close`]): LP 解と丸めた点の距離の、最初の回に対する最小の割合
         let (mut d0, mut dmin) = (0.0f64, f64::INFINITY);
+        // 試作 `ENOMOTO_MIP_FP_STAGE3` の点: LP 解にいちばん近かった丸めの点
+        let mut best_r: Option<Vec<f64>> = None;
         self.heur_close = 0.0;
         for _pass in 0..100 {
             if self.time_up() || self.lp.total_iterations() - it_start > budget || self.poll_found_solution() {
@@ -1087,6 +1089,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let d: f64 = ints.iter().map(|&j| (x[j] - r[j]).abs()).sum();
             if d0 == 0.0 {
                 d0 = d;
+            }
+            if d <= dmin {
+                best_r = Some(r.clone());
             }
             dmin = dmin.min(d);
             if d0 > 0.0 {
@@ -1180,7 +1185,91 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         self.lp.set_costs(&p.cost);
         self.lp.restore_state(&saved);
+        if !found && !self.time_up() && env_str!("ENOMOTO_MIP_FP_STAGE3").is_some_and(|v| v != "0") {
+            if let Some(r) = best_r {
+                found = self.fp_stage3(&r);
+            }
+        }
         found
+    }
+
+    /// 試作 `ENOMOTO_MIP_FP_STAGE3=1` (既定では使わない。analysis/presym_20261123): Feasibility Pump が解を出さずに終わったら、
+    /// LP 解にいちばん近かった丸めの点 `r` の周りをサブ MIP で探す (SCIP の heur_feaspump の stage 3)。元の行をそのまま持ち、目的は `r` からの
+    /// 0-1 列の距離 (r = 下限の列は x、r = 上限の列は 上限 − x)。暫定解があれば「元の目的値が暫定解より良い」行を足す。ノードは 500 まで
+    /// (他のサブ MIP と同じ)、時間は残りの 0.1 倍・10 秒まで (min relaxation と同じ)。得た解は元の問題の解なので暫定解の候補にする。
+    /// 当方の FP は、連続列のある問題 (CMS750_4) で「整数列を全部固定すると連続列の LP が実行不能」で 179 回とも解を出さなかった
+    fn fp_stage3(&mut self, r: &[f64]) -> bool {
+        let p = self.p;
+        let n = p.n;
+        let (lo, up) = (self.dom.lo.clone(), self.dom.up.clone());
+        let mut cost = vec![0.0; n];
+        let mut offset = 0.0;
+        let mut nd = 0usize;
+        for j in 0..n {
+            if !p.is_int[j] || lo[j] >= up[j] || !(lo[j] == 0.0 && up[j] == 1.0) {
+                continue;
+            }
+            if r[j] <= 0.5 {
+                cost[j] = 1.0;
+            } else {
+                cost[j] = -1.0;
+                offset += 1.0;
+            }
+            nd += 1;
+        }
+        if nd == 0 {
+            return false;
+        }
+        let mut rows = p.rows.clone();
+        let mut row_lo = p.row_lo.clone();
+        let mut row_up = p.row_up.clone();
+        if let Some((z, _)) = self.incumbent.as_ref() {
+            // 目的値 (定数項込み・最小化形) が暫定解より良い: c x + offset <= z - 刻み (刻みは目的の整数性が分かればそれ、なければ相対 1e-6)
+            let step = self.p.objective_step().unwrap_or(0.0);
+            let delta = if step > 0.0 { step } else { 1e-6 * z.abs().max(1.0) };
+            let row: Vec<(usize, f64)> = (0..n).filter(|&j| p.cost[j] != 0.0).map(|j| (j, p.cost[j])).collect();
+            if !row.is_empty() {
+                rows.push(row);
+                row_lo.push(f64::NEG_INFINITY);
+                row_up.push(z - p.offset - delta);
+            }
+        }
+        let sub = super::problem::MipProblem::from_rows(lo, up, cost, offset, 1.0, p.is_int.clone(), rows, row_lo, row_up);
+        let remaining = match self.deadline {
+            Some(d) => d.saturating_duration_since(std::time::Instant::now()).as_secs_f64(),
+            None => f64::INFINITY,
+        };
+        let params = super::solver::MipParams {
+            time_limit: (0.1 * remaining).min(10.0),
+            node_limit: 500,
+            rel_gap: 0.0,
+            abs_gap: 1e-9,
+            verbose: false,
+            submip: true,
+            cutoff: f64::INFINITY,
+            restarts: 0,
+            skip_heurs: 0,
+            threads: 1,
+            distinguish: false,
+            fc_submip: false,
+            tl_base: f64::NAN,
+        };
+        let res = super::solve_problem(&sub, params, true);
+        self.heur_iters += res.lp_iterations;
+        let ok = match res.x {
+            Some(x) => {
+                let keep = self.heur_label;
+                self.heur_label = "FP stage 3";
+                let ok = self.try_incumbent(x);
+                self.heur_label = keep;
+                ok
+            }
+            None => false,
+        };
+        if self.params.verbose {
+            eprintln!("MIP:   FP stage 3: {nd} binary distance terms, status {:?}, nodes {}, objective (distance) {:?}, accepted {ok}", res.status, res.nodes, res.objective);
+        }
+        ok
     }
 
     /// Feasibility Jump (重み付きの局所探索、LP 不要)。`effort` は列の評価回数の目安。

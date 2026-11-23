@@ -368,6 +368,10 @@ pub struct InteriorPoint {
     /// 試作 `ENOMOTO_MIP_FIXMORE` の `u`: 費用つきの点の双対 `y` のラグランジュ下界 `L(y)` (元の単位、MIP の定数項は含まない) と
     /// 構造列の被約費用 `c - A^T y` (`lagrange_std`)。どの `y` でも正しい下界。
     pub lag: Option<(f64, Vec<f64>)>,
+    /// 試作 `ENOMOTO_MIP_HO4_ACFIX` の `d`: 費用 0 の点の双対 `y` (最大の絶対値で 1 に揃えたもの) の、費用 0 のラグランジュ下界 `L(y)`
+    /// (0 以下) と構造列の被約費用 `-A^T y`。実行可能などの点でも `Σ_j d_j (x_j - 境界) = -L` なので、`d_j > 0` の列は
+    /// `x_j - 下限 <= -L / d_j` (`d_j < 0` なら上限の側) を満たす (費用 0・上界 0 の被約費用の固定)
+    pub acdual: Option<(f64, Vec<f64>)>,
 }
 
 /// 状態の保存 (強分岐用)。
@@ -487,6 +491,12 @@ fn xolazy_record(winner: &'static str, t0: std::time::Instant, stamp: Option<&su
 /// 標準形の行の双対 `y` (どの `y` でもよい) からラグランジュ緩和の下界 `L(y) = b·y + Σ_j min_{l_j <= x_j <= u_j} (c - A^T y)_j x_j`
 /// (標準形の目的の単位、浮動小数の誤差の余裕を引いた値) と構造列の被約費用を返す。無限の境界の向きに被約費用がある列があれば `L = -inf`。
 fn lagrange_std(std: &StdForm, n: usize, y: &[f64]) -> Option<(f64, Vec<f64>)> {
+    lagrange_std_c(std, n, y, false)
+}
+
+/// [`lagrange_std`] の費用を選べる形 (`zero_cost` なら費用 0 とみなす)
+fn lagrange_std_c(std: &StdForm, n: usize, y: &[f64], zero_cost: bool) -> Option<(f64, Vec<f64>)> {
+    let cj = |j: usize| if zero_cost { 0.0 } else { std.c[j] };
     if y.len() != std.n_rows || y.iter().any(|v| !v.is_finite()) {
         return None;
     }
@@ -499,9 +509,9 @@ fn lagrange_std(std: &StdForm, n: usize, y: &[f64]) -> Option<(f64, Vec<f64>)> {
             continue;
         }
         let (i, a) = col[0];
-        let d = std.c[j] - a * y[i];
+        let d = cj(j) - a * y[i];
         if (d > 0.0 && !std.lb[j].is_finite()) || (d < 0.0 && !std.ub[j].is_finite()) {
-            y[i] = std.c[j] / a;
+            y[i] = cj(j) / a;
         }
     }
     let y = &y[..];
@@ -510,7 +520,7 @@ fn lagrange_std(std: &StdForm, n: usize, y: &[f64]) -> Option<(f64, Vec<f64>)> {
     let mut abs: f64 = std.b.iter().zip(y).map(|(b, y)| (b * y).abs()).sum();
     let mut dn = vec![0.0; n];
     for j in 0..std.n_total {
-        let mut d = std.c[j];
+        let mut d = cj(j);
         for &(i, a) in std.cols.col(j) {
             d -= a * y[i];
         }
@@ -1349,7 +1359,21 @@ impl TwoStageLp {
         let vertex = r.vertex.map(|(b, xv)| (b, xv.map(|v| to_orig(&v))));
         // 標準形の目的は平行移動した列 `x' = x - shift` のもの: 元の単位は `c·shift` を足す (`xolazy_duals` と同じ)
         let lag = r.y.as_deref().and_then(|y| lagrange_std(&self.std, n, y)).map(|(l, d)| (l + (0..n).map(|j| self.std.c[j] * self.shift[j]).sum::<f64>(), d));
-        Some(InteriorPoint { x, vertex, lag })
+        let acdual = r.y0.as_deref().and_then(|y| {
+            let s = y.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+            (s > 0.0 && s.is_finite()).then(|| y.iter().map(|v| v / s).collect::<Vec<f64>>())
+        });
+        // 内点法の双対の向き (`c + A^T y` か `c - A^T y`) によらないよう、両方の符号で作って `-L` の小さい方を使う (どちらも正しい)
+        let acdual = acdual.and_then(|y| {
+            let neg: Vec<f64> = y.iter().map(|v| -v).collect();
+            let a = lagrange_std_c(&self.std, n, &y, true);
+            let b = lagrange_std_c(&self.std, n, &neg, true);
+            match (a, b) {
+                (Some(a), Some(b)) => Some(if a.0 >= b.0 { a } else { b }),
+                (a, b) => a.or(b),
+            }
+        });
+        Some(InteriorPoint { x, vertex, lag, acdual })
     }
 
     /// 基底を標準形の列番号 (長さ m) で直接与える (特異なら修復する)。`x` を渡すと、次の求解の非基底列の

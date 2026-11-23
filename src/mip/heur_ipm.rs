@@ -17,6 +17,69 @@ use super::solver::Solver;
 use std::time::{Duration, Instant};
 
 impl<'a, L: MipLp> Solver<'a, L> {
+    /// 試作 `ENOMOTO_MIP_HO4_ACFIX=d` (analysis/highsonly_20261123、既定では使わない): 費用 0 の根の LP (カット込み) を内点法で解き
+    /// (費用つきの内点法より先に、同じ予算で)、その双対 `y` で境界に張り付く整数列を固定する。どの `y` でも、LP の実行可能な点は
+    /// `Σ_j d_j (x_j - 境界) = -L(y)` (`d = -A^T y`、各項は 0 以上) を満たすので、`d_j > 0` の整数列は `x_j - 下限 <= -L / d_j`
+    /// (上限側も同じ) で、これが 1 未満なら固定してよい。費用 0・上界 0 の被約費用の固定で、LP を解かずに正しい
+    /// (中心の点の値で固定する `HO4_ACFIX` は確かめなしでは誤り、LP で確かめると satellites2 では間に合わない)
+    fn acfix_dual(&mut self, deadline: Instant) {
+        let p = self.p;
+        let t0 = Instant::now();
+        let Some(ip) = self.lp.interior_point(true, false, deadline) else {
+            if self.params.verbose {
+                eprintln!("MIP:   interior rounding: ENOMOTO_MIP_HO4_ACFIX=d: the zero-cost IPM failed ({:.2}s)", t0.elapsed().as_secs_f64());
+            }
+            return;
+        };
+        let (mut nlo, mut nup, mut nlt, mut nut) = (0usize, 0usize, 0usize, 0usize);
+        // LP の境界が大域の境界を含むときだけ (LP の境界が狭い列があれば、示せるのは今の LP の領域の中での固定)。証明は LP の境界で
+        // 書かれる (`x_j - LP の下限 <= -L / d_j`) ので、固定・締めも LP の境界から測る (大域の境界より広くても正しい)
+        let same = (0..p.n).all(|j| {
+            let (l, u) = self.lp.col_bounds(j);
+            l <= self.dom.global_lo[j] && u >= self.dom.global_up[j]
+        });
+        let mut gap = f64::NAN;
+        if let (true, Some((l, d))) = (same, ip.acdual.as_ref()) {
+            let g = -l;
+            gap = g;
+            if g.is_finite() && g >= 0.0 {
+                for j in 0..p.n {
+                    let (lo, up) = (self.dom.global_lo[j], self.dom.global_up[j]);
+                    if !p.is_int[j] || lo >= up {
+                        continue;
+                    }
+                    let (llo, lup) = self.lp.col_bounds(j);
+                    if d[j] > 0.0 && llo.is_finite() {
+                        // 整数の幅: x_j - llo <= g / d_j。丸めの余裕 1e-9 (相対) を足す
+                        let v = llo + (g / d[j] * (1.0 + 1e-9) + 1e-9).floor();
+                        if v < up {
+                            self.dom.tighten_global(p, j, true, v.max(lo));
+                            if self.dom.global_up[j] <= lo { nlo += 1 } else { nlt += 1 }
+                        }
+                    } else if d[j] < 0.0 && lup.is_finite() {
+                        let v = lup - (g / -d[j] * (1.0 + 1e-9) + 1e-9).floor();
+                        if v > lo {
+                            self.dom.tighten_global(p, j, false, v.min(up));
+                            if self.dom.global_lo[j] >= up { nup += 1 } else { nut += 1 }
+                        }
+                    }
+                }
+            }
+        }
+        // `t` (確かめ用): 詳しいログなしでも 1 行出す (fuzz で働いた回数を数える)
+        if !self.params.verbose && env_str!("ENOMOTO_MIP_HO4_ACFIX").is_some_and(|v| v.contains('t')) {
+            eprintln!("ACFIXD_TRACE same {same} gap {gap:.3e} fixed {} tightened {}", nlo + nup, nlt + nut);
+        }
+        if self.params.verbose {
+            eprintln!(
+                "MIP:   interior rounding: ENOMOTO_MIP_HO4_ACFIX=d: LP bounds global {same}, dual {}, -L {gap:.3e}; fixed {nlo} integer columns at the lower bound and {nup} at the upper bound, tightened {nlt}+{nut} (newly fixed {}, {:.2}s)",
+                ip.acdual.is_some(),
+                self.newly_fixed_ints(),
+                t0.elapsed().as_secs_f64()
+            );
+        }
+    }
+
     /// 内点法の解からの丸め。`xlp` は根の LP の (単体法の) 解。
     pub(super) fn interior_rounding(&mut self, xlp: &[f64]) -> bool {
         let p = self.p;
@@ -50,6 +113,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // `ENOMOTO_MIP_DET1T` (既定 `onil`) の `i` (analysis/det1t_20261120): 予算を手間 (ticks × 1e-9 秒) で数え、内点法の反復も KKT の分解の
         // 演算数を数えて手間の期限で止める (スレッドの手間の合計には足さない: [`crate::ticks::ipm_add`])。壁時計の期限は 10 倍の安全網にする
+        // 試作 `ENOMOTO_MIP_HO4_ACFIX=d` ([`Self::acfix_dual`]): 費用 0 の内点法を、丸めの内点法とは別に同じ予算 (壁時計) で先に回す
+        // (丸めの手間の予算 (`DET1T` の `i`) の中で回すと、satellites2-40 では 14 反復で手間の上限に当たり、双対が固定を示せなかった)
+        if !self.params.submip && self.snap.is_none() && acfix_d() {
+            self.acfix_dual(Instant::now() + Duration::from_secs_f64(budget));
+        }
         let det_i = super::solver::det1t('i');
         let deadline = Instant::now() + Duration::from_secs_f64(if det_i { 10.0 * budget } else { budget });
         let _det_budget = det_i.then(|| crate::ticks::budget_guard(budget * 1e9));
@@ -85,9 +153,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 相対的な内部の点なので、そこで境界にある列は LP の実行可能領域全体でその値。カットは整数解を切らないので整数解でも同じ)。
         // satellites2-60-fs では HiGHS が根で 11955 列をこれで固定し (40.3%)、再スタートで 12852 x 31721 -> 6047 x 12408 になる
         let acfix = !self.params.submip && self.snap.is_none() && env_str!("ENOMOTO_MIP_HO4_ACFIX").is_some();
-        if (mode != 0 || acfix) && !past() {
+        if (mode != 0 || (acfix && !acfix_d())) && !past() {
             if let Some(ip) = self.lp.interior_point(true, false, deadline) {
-                if acfix {
+                if acfix && acfix_d() {
+                    // 前で済ませた ([`Self::acfix_dual`])
+                } else if acfix {
                     let tol = tunable!("ENOMOTO_T_MIP_HO4_ACFIX_TOL", 1e-6, f64);
                     // 候補: 中心で大域の境界から tol 以内の整数列 (true = 下限側)
                     let mut cands: Vec<(usize, bool)> = Vec::new();
@@ -208,4 +278,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         found
     }
+}
+
+/// 試作 `ENOMOTO_MIP_HO4_ACFIX` の `d` ([`Solver::acfix_dual`])
+fn acfix_d() -> bool {
+    env_str!("ENOMOTO_MIP_HO4_ACFIX").is_some_and(|v| v.contains('d'))
 }

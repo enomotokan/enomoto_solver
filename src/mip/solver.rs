@@ -753,6 +753,18 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 診断 `ENOMOTO_MIP_NODELP_DUMP=<dir>`: 書き出したノードの LP の数。
     pub(super) nodelp_dumps: usize,
     pub(super) node_sep_stats: [u64; 2],
+    /// 試作 `ENOMOTO_MIP_NODE_CLEANUP` ([`Solver::node_cleanup_rows`]) の数: [片づけたノード, 外した行, 外さなかった (効いていた) 行]
+    pub(super) ncl_stats: [u64; 3],
+    /// 試作 `ENOMOTO_MIP_NODE_CLEANUP`: 木の始まりの `next_cut_id` (これ以降の番号のカットは木の中で LP に加えたもの)
+    pub(super) ncl_tree_id0: u64,
+    /// 試作 `ENOMOTO_MIP_NODE_CLEANUP` の `a`: 今のノードで行を外したか (外したならプールのラウンドで破られたカットを本数の制限なしに戻す)
+    pub(super) ncl_removed_now: bool,
+    /// 試作 `ENOMOTO_MIP_NODE_ROWSCOPE`: 道筋の外へ移るときに外した木の行の番号 (道筋に戻れば足し直す)
+    pub(super) rs_removed: std::collections::HashSet<u64>,
+    /// 試作 `ENOMOTO_MIP_NODE_ROWSCOPE` の数: [移った回, 外した行, 足し直した行, 行を持つ子の環, 印なしで消えていた道筋の行, 見た道筋の行]
+    pub(super) rs_stats: [u64; 6],
+    /// 試作 `ENOMOTO_MIP_POOL_SEL` の数: [ラウンド, 戻したカット, 破られていたカット, (`e`) 伸びた, 伸びなかった, 外したカット]
+    pub(super) poolsel_stats: [u64; 6],
     /// 診断用: 効き目で続けるノードの分離の結果の内訳 (打ち切り、伸び/差が 0.02 未満、0.1 未満、0.3 未満、0.3 以上)
     pub(super) nca_hist: [u64; 5],
     /// ノードで加えたカットの非零の数の指数移動平均 (`ENOMOTO_T_MIP_NODE_CUT_ADAPT_DENSITY`、[`Solver::nca_dense`])。
@@ -2631,7 +2643,7 @@ impl SnapNode {
             Some(w) => super::queue::unpack_changes(w),
             None => self.changes,
         };
-        OpenNode { changes, lower_bound: self.lower_bound, estimate: self.estimate, depth: self.depth, basis: None, basis_epoch: 0, dse: None, branch: self.branch, prot: None, tags: None, sb: None, inh: self.inh, cwm: self.cwm }
+        OpenNode { changes, lower_bound: self.lower_bound, estimate: self.estimate, depth: self.depth, basis: None, basis_epoch: 0, dse: None, branch: self.branch, prot: None, tags: None, sb: None, inh: self.inh, cwm: self.cwm, scope: None, nopool: false }
     }
 }
 
@@ -5542,6 +5554,12 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         nodelp_sib: false,
         nodelp_dumps: 0,
         node_sep_stats: [0; 2],
+        ncl_stats: [0; 3],
+        ncl_tree_id0: u64::MAX,
+        ncl_removed_now: false,
+        rs_removed: std::collections::HashSet::new(),
+        rs_stats: [0; 6],
+        poolsel_stats: [0; 6],
         nca_hist: [0; 5],
         tdd: if super::treedepth::on() && !params.submip { Some(Box::default()) } else { None },
         nca_cut_nnz: None,
@@ -6148,6 +6166,34 @@ fn gap1_proof_tol(rhs: f64) -> f64 {
 /// `g` = ノードの分離のラウンドで加えたカットが密 (平均が同じ倍率を超える) で、解き直しの LP の値の伸びが打ち切り値までの差の
 /// `ENOMOTO_T_MIP_DENSECUT_GAIN` 倍 (既定 0.02) に届かなければ (打ち切りは届いたと数える)、そのラウンドのカットを基底にあって年齢が
 /// `ENOMOTO_T_MIP_DENSECUT_WEAK_AGE` (既定 1) を超えたら外す。外したカットはプールに残り、違反すれば戻る
+/// 試作 `ENOMOTO_MIP_NODE_CLEANUP` (既定では使わない、analysis/nodespeed_20261123/README.md): [`Solver::node_cleanup_rows`]
+pub(super) fn ncl_has(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_NODE_CLEANUP").is_some_and(|v| v.contains(c))
+}
+
+/// 試作 `ENOMOTO_MIP_NODE_ROWSCOPE` (既定では使わない、analysis/nodespeed_20261123/README.md): [`Solver::rowscope_sync`]
+/// 試作 `ENOMOTO_MIP_POOL_SEL` (既定では使わない、analysis/nodespeed_20261123/README.md 5 節): [`Solver::pool_select_round`]
+/// 試作 `ENOMOTO_MIP_POOL_SEL` の文字 (`e`: 戻したカットを目的値の伸びで残すか外すか決める)
+pub(super) fn poolsel_has(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_POOL_SEL").is_some_and(|v| v.contains(c))
+}
+
+pub(super) fn poolsel_on() -> bool {
+    env_str!("ENOMOTO_MIP_POOL_SEL").is_some()
+}
+
+pub(super) fn rowscope_has(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_NODE_ROWSCOPE").is_some_and(|v| v.contains(c))
+}
+
+pub(super) fn rowscope_on() -> bool {
+    env_str!("ENOMOTO_MIP_NODE_ROWSCOPE").is_some()
+}
+
+pub(super) fn ncl_on() -> bool {
+    env_str!("ENOMOTO_MIP_NODE_CLEANUP").is_some()
+}
+
 pub(super) fn densecut_has(c: char) -> bool {
     env_str!("ENOMOTO_MIP_DENSECUT").is_some_and(|v| v.contains(c))
 }
@@ -9439,6 +9485,143 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// `ENOMOTO_MIP_TREE4_PROOFCUT` (試作): 双対証明 `a x <= rhs` (打ち切り値の証明は今の打ち切り値で右辺を取る。打ち切り値より良い
     /// 解では成り立つので、刈り込みに使う LP に加えてよい) のうち LP 解 `x` が破るものを、破れの大きさ (`(a x - rhs) / |a|`) の順に
     /// `ENOMOTO_T_MIP_TREE4_PROOFCUT_MAX` (既定 20) 本まで LP の行として加える。加えたら真
+    /// 試作 `ENOMOTO_MIP_NODE_CLEANUP` (既定では使わない、analysis/nodespeed_20261123/README.md): 別のノードへ移って保存した基底を置いた直後に、
+    /// 木の中で LP に加えたカット (番号が木の始まりの [`Self::ncl_tree_id0`] 以降。プールから戻したもの・ノードの分離で作ったもの) のうち、
+    /// 置いた基底で基底にある (そのノードの親の LP で効いていなかったか、保存の後に加わった) ものを LP から外す。SCIP では木の中で加えた行は
+    /// 加えたノードの部分木の LP にだけあり、別の部分木へ移るとき外れる (それに当たる)。外したカットはプールに残り、破られればまた戻る。
+    /// 基底の行だけを外すので、置いた基底はそのまま使える。年齢で外す仕組み ([`Self::remove_aged_cuts`]) は効いていない回数が年齢の上限
+    /// (元の行の数の半分、30〜300) に届くまで行を残すので、取り出したノードごとにプールから戻すカットが溜まり、fhnw-binpack4-4 ではノードの LP が
+    /// 平均 1759 行 (元 510 行) になっていた。`q`: 待ち行列から取り出したとき、`s`: 兄弟へ戻ったときも。`a`: 行を外したノードでは、
+    /// プールのラウンドで破られたカットを本数の制限なしに戻す (兄弟でも、潜りの途中でもプールのラウンドを回す)
+    fn node_cleanup_rows(&mut self) {
+        self.ncl_removed_now = false;
+        if self.params.submip {
+            return;
+        }
+        self.sync_cut_age();
+        let m0 = self.p.m;
+        let mr = self.lp.num_rows();
+        let id0 = self.ncl_tree_id0;
+        if mr <= m0 || self.cut_ids.iter().all(|&id| id < id0) {
+            return;
+        }
+        let prot = self.prot_aging_on();
+        let mut remove = vec![false; mr];
+        let (mut cnt, mut kept) = (0u64, 0u64);
+        {
+            let b = self.lp.basis_ref();
+            if b.row.len() != mr {
+                return;
+            }
+            for k in 0..self.cut_ids.len().min(mr - m0) {
+                let id = self.cut_ids[k];
+                if id < id0 || self.merged_cuts.contains(&id) || (prot && self.queue.is_protected(id)) {
+                    continue;
+                }
+                if b.row[m0 + k] == VarStatus::Basic {
+                    remove[m0 + k] = true;
+                    cnt += 1;
+                } else {
+                    kept += 1;
+                }
+            }
+        }
+        self.ncl_stats[0] += 1;
+        self.ncl_stats[1] += cnt;
+        self.ncl_stats[2] += kept;
+        if cnt > 0 {
+            self.delete_lp_rows(&remove);
+            self.ncl_removed_now = true;
+        }
+    }
+
+    /// 試作 `ENOMOTO_MIP_NODE_ROWSCOPE` (既定では使わない、analysis/nodespeed_20261123/README.md): 子に持たせる行の鎖。親の鎖 `parent` に、
+    /// このノードで加えて (番号が `id0` 以降) LP に残っている行の環を足す。足す行がなければ親の鎖をそのまま渡す
+    fn rowscope_child(&mut self, parent: &Option<Rc<super::queue::RowScope>>, id0: u64) -> Option<Rc<super::queue::RowScope>> {
+        if !rowscope_on() || self.params.submip {
+            return None;
+        }
+        self.sync_cut_age();
+        let m0 = self.p.m;
+        let mr = self.lp.num_rows();
+        let id0 = id0.max(self.ncl_tree_id0);
+        let mut rows = Vec::new();
+        for k in 0..self.cut_ids.len().min(mr.saturating_sub(m0)) {
+            let id = self.cut_ids[k];
+            if id >= id0 {
+                let (lo, up) = self.lp.row_bounds(m0 + k);
+                rows.push((id, Rc::new((self.lp.row(m0 + k), lo, up))));
+            }
+        }
+        if rows.is_empty() {
+            return parent.clone();
+        }
+        self.rs_stats[3] += 1;
+        Some(Rc::new(super::queue::RowScope { parent: parent.clone(), rows }))
+    }
+
+    /// 試作 `ENOMOTO_MIP_NODE_ROWSCOPE` (既定では使わない、analysis/nodespeed_20261123/README.md): 兄弟・待ち行列のノードへ移るとき
+    /// (保存した基底を置く前) に、LP の木の行 (番号が木の始まり以降) をそのノードの道筋の行 `scope` に合わせる。SCIP と同じく、木の中で
+    /// 加えた行は加えたノードの部分木の LP にだけ置く。道筋にない木の行は外し (プールには残る)、前に外した道筋の行は同じ番号で足し直す。
+    /// 根で加えた行は今までどおり全体に残し、年齢で外す仕組みもそのまま (年齢で外れた道筋の行は足し直さない)。行の追加・削除は
+    /// `row_log` に残るので、置く基底はそれに合わせて直される (足し直した行は基底になる)。値に `a` を含めると、行を外したノードでは
+    /// プールの破られたカットを本数の制限なしに戻す
+    fn rowscope_sync(&mut self, scope: &Option<Rc<super::queue::RowScope>>) {
+        if !rowscope_on() || self.params.submip {
+            return;
+        }
+        self.rs_stats[0] += 1;
+        let mut path: std::collections::HashMap<u64, &Rc<(Vec<(usize, f64)>, f64, f64)>> = std::collections::HashMap::new();
+        let mut c = scope.as_ref();
+        while let Some(sc) = c {
+            for (id, r) in &sc.rows {
+                path.insert(*id, r);
+            }
+            c = sc.parent.as_ref();
+        }
+        self.sync_cut_age();
+        let m0 = self.p.m;
+        let mr = self.lp.num_rows();
+        let id0 = self.ncl_tree_id0;
+        let prot = self.prot_aging_on();
+        let mut remove = vec![false; mr];
+        let mut cnt = 0u64;
+        let mut present = std::collections::HashSet::new();
+        for k in 0..self.cut_ids.len().min(mr.saturating_sub(m0)) {
+            let id = self.cut_ids[k];
+            present.insert(id);
+            if id < id0 || path.contains_key(&id) || self.merged_cuts.contains(&id) || (prot && self.queue.is_protected(id)) {
+                continue;
+            }
+            remove[m0 + k] = true;
+            self.rs_removed.insert(id);
+            cnt += 1;
+        }
+        // 足し直す道筋の行 (外したもので、今の LP にないもの)。番号の順に
+        let mut back: Vec<(u64, Rc<(Vec<(usize, f64)>, f64, f64)>)> =
+            path.iter().filter(|(id, _)| self.rs_removed.contains(id) && !present.contains(id)).map(|(id, r)| (*id, Rc::clone(r))).collect();
+        back.sort_by_key(|e| e.0);
+        // 道筋の行のうち LP になく、外した印もないもの (年齢などで外れた) の数と、道筋の行の数
+        self.rs_stats[4] += path.keys().filter(|id| !present.contains(id) && !self.rs_removed.contains(id)).count() as u64;
+        self.rs_stats[5] += path.len() as u64;
+        // `a`: 行を外したノードでは、プールのラウンドで破られたカットを本数の制限なしに戻す (`NODE_CLEANUP` の `a` と同じ)
+        self.ncl_removed_now = cnt > 0 && rowscope_has('a');
+        if cnt > 0 {
+            self.delete_lp_rows(&remove);
+            self.rs_stats[1] += cnt;
+        }
+        if !back.is_empty() {
+            let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = back.iter().map(|(_, r)| (**r).clone()).collect();
+            self.add_cut_rows(&rows);
+            let n = self.cut_ids.len();
+            for (k, (id, _)) in back.iter().enumerate() {
+                self.cut_ids[n - back.len() + k] = *id;
+                self.rs_removed.remove(id);
+            }
+            self.rs_stats[2] += back.len() as u64;
+        }
+    }
+
     fn tree4_proof_cuts(&mut self, x: &[f64]) -> bool {
         let mut cand: Vec<(f64, usize)> = Vec::new();
         for k in 0..self.dual_proofs.len() {
@@ -12387,7 +12570,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if let Some(snap) = self.snap.clone() {
             for (k, n) in snap.nodes.iter().enumerate() {
                 let tags = Some(Rc::new(vec![snap.serial << 32 | k as u64]));
-                self.queue.push(OpenNode { changes: n.changes.clone(), lower_bound: n.lower_bound.max(root_obj), estimate: n.estimate, depth: n.depth, basis: None, basis_epoch: 0, dse: None, branch: n.branch, prot: None, tags, sb: None, inh: n.inh.clone(), cwm: None });
+                self.queue.push(OpenNode { changes: n.changes.clone(), lower_bound: n.lower_bound.max(root_obj), estimate: n.estimate, depth: n.depth, basis: None, basis_epoch: 0, dse: None, branch: n.branch, prot: None, tags, sb: None, inh: n.inh.clone(), cwm: None, scope: None, nopool: false });
             }
             self.snap_alive = vec![true; snap.nodes.len()];
             first = false;
@@ -12395,7 +12578,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if super::cwm::mode().is_some() && !self.params.submip && self.pool_tid == 0 {
                 super::cwm::reset(self.params.verbose);
             }
-            self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), basis_epoch: self.row_log.len(), dse: if dse_all() { self.lp.dse_snapshot().map(|w| Rc::new(NodeDse::Pairs(w))) } else { None }, branch: None, prot, tags: None, sb: None, inh: None, cwm: None });
+            self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), basis_epoch: self.row_log.len(), dse: if dse_all() { self.lp.dse_snapshot().map(|w| Rc::new(NodeDse::Pairs(w))) } else { None }, branch: None, prot, tags: None, sb: None, inh: None, cwm: None, scope: None, nopool: false });
         }
         // 診断用 (`ENOMOTO_MIP_SUBMIP_VERBOSE`): 木の始まり (根の前処理・LP・カット・ヒューリスティクスの終わり) を道筋つきで出す
         // (サブ MIP の時間のうち根の割合を見る。analysis/rens_resume_20261101.md)
@@ -12493,6 +12676,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if gredundant_on() && !self.params.submip && self.watch.is_none() {
             self.gred_drop();
         }
+        // 試作 `ENOMOTO_MIP_NODE_CLEANUP`: これ以降の番号のカットは木の中で LP に加えたもの
+        self.ncl_tree_id0 = self.next_cut_id;
         if self.params.verbose && !self.params.submip && self.snap.is_none() && self.watch.is_none() && self.pool_tid == 0 {
             eprintln!("TRSTAT: tree start outer {:.2} solve {:.2} restarts {} lb {:.10e} ub {:.10e}", super::outer_elapsed().unwrap_or(f64::NAN), self.tr_t0, self.params.restarts, self.tr_root_lb, self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z));
         }
@@ -12968,8 +13153,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                         continue;
                     }
+                    self.rowscope_sync(&n.scope);
                     if let Some(b) = &n.basis {
                         self.restore_node_basis(b, n.basis_epoch, n.dse.as_ref().map(|d| d.pairs(b)).as_deref(), &full_changes(&n), n.prot.as_deref().map(|v| v.as_slice()));
+                        if ncl_has('s') {
+                            self.node_cleanup_rows();
+                        }
                         // 置いた基底が親の LP の最適基底のままなら、その LU を使う (行が変わっていれば使わない)
                         if let Some(s) = &sib_lu {
                             if n.basis_epoch == self.row_log.len() {
@@ -13101,8 +13290,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             ok = self.apply_inh_chain(&n.inh);
                         }
                         if ok {
+                            self.rowscope_sync(&n.scope);
                             if let Some(b) = &n.basis {
                                 self.restore_node_basis(b, n.basis_epoch, n.dse.as_ref().map(|d| d.pairs(b)).as_deref(), &full_changes(&n), n.prot.as_deref().map(|v| v.as_slice()));
+                                if ncl_has('q') {
+                                    self.node_cleanup_rows();
+                                }
                             }
                         }
                         if !ok {
@@ -13506,6 +13699,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // ノードの LP を解く (強分岐で境界が締まったら解き直す)。
             let mut node_obj;
             let mut resolves = 0;
+            // 試作 `ENOMOTO_MIP_NODE_ROWSCOPE`: このノードで LP に加えたカットは、この番号以降
+            let rs_id0 = self.next_cut_id;
+            // 試作 `ENOMOTO_MIP_POOL_SEL` の `e`: プールから戻したラウンドの前の目的値と、戻したカットの最初の番号 (解き直しで目的値が
+            // 伸びたかを見る)。伸びなかったら真にし、戻したカットを外して、このノードと子ではプールから戻さない
+            let mut pse_pending: Option<(f64, u64)> = None;
+            let mut pse_nopool = false;
             // ノードの分離でカットを加えた後の解き直しか (その LP の時間を `node_cut_secs` に足す)
             let mut node_cut_resolve: Option<Instant> = None;
             let mut nc_res_it = 0u64;
@@ -13963,6 +14162,32 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 xp("m_lpstat");
                 self.node_lp_opt = true;
                 node_obj = self.lp.objective() + self.p.offset;
+                // 試作 `ENOMOTO_MIP_POOL_SEL` の `e`: 直前にプールから戻したなら、目的値が伸びたかを見る (許容誤差は行の活動量の判定と同じ
+                // 相対 1e-6)。伸びなければ戻したカットを外して解き直し (外した後の LP の最適値は戻す前と同じ)、このノードと子では戻さない
+                if let Some((obj0, id0)) = pse_pending.take() {
+                    if node_obj > obj0 + 1e-6 * (1.0 + obj0.abs()) {
+                        self.poolsel_stats[3] += 1;
+                    } else {
+                        self.poolsel_stats[4] += 1;
+                        pse_nopool = true;
+                        self.sync_cut_age();
+                        let m0 = self.p.m;
+                        let mr = self.lp.num_rows();
+                        let mut remove = vec![false; mr];
+                        let mut cnt = 0u64;
+                        for k in 0..self.cut_ids.len().min(mr.saturating_sub(m0)) {
+                            if self.cut_ids[k] >= id0 {
+                                remove[m0 + k] = true;
+                                cnt += 1;
+                            }
+                        }
+                        if cnt > 0 {
+                            self.delete_lp_rows(&remove);
+                            self.poolsel_stats[5] += cnt;
+                            continue;
+                        }
+                    }
+                }
                 rp_obj = node_obj;
                 if resolves == 0 {
                     rp_obj0 = node_obj;
@@ -14595,9 +14820,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 40 問 (同時測定) 1 回目: 既定 10 本 18 問 27.75 に対し 100 本 18 問 26.86、2 回目: 19 問 27.19 に対し 18 問 27.63
                 // (neos-860300 が 58.7 秒 -> 時間切れ、nw04 17.7 -> 36.1 秒 (経路の揺れ)、misc07 11.3 -> 14.5 秒。mik-250・binkar10_1 は
                 // 2 回とも速い)。2 回の合計で解けた数が 37 -> 36 と減るので既定は 10 本のまま
-                } else if resolves < 2 && node.depth > 0 && plunge_depth == 0 && env_str!("ENOMOTO_MIP_NO_POOL_CUTS").is_none() && {
+                } else if resolves < 2 && node.depth > 0 && (plunge_depth == 0 || (self.ncl_removed_now && (ncl_has('a') || rowscope_has('a'))) || poolsel_on()) && !(poolsel_has('e') && (node.nopool || pse_nopool)) && env_str!("ENOMOTO_MIP_NO_POOL_CUTS").is_none() && {
                     let r0 = self.lp.num_rows();
-                    let added = self.pool_cut_round(&x, tunable!("ENOMOTO_T_MIP_POOL_CUTS_PER_NODE", 10usize, usize));
+                    // 試作 `ENOMOTO_MIP_NODE_CLEANUP` の `a`: このノードへ移るときに行を外したなら、破られたカットを本数の制限なしに戻す
+                    let max_cuts = if self.ncl_removed_now && (ncl_has('a') || rowscope_has('a')) { usize::MAX } else { tunable!("ENOMOTO_T_MIP_POOL_CUTS_PER_NODE", 10usize, usize) };
+                    // 試作 `ENOMOTO_MIP_POOL_SEL`: 毎ノード、本数を固定せずカット選びの物差しで選んで戻す
+                    let (obj_pre, id_pre) = (node_obj, self.next_cut_id);
+                    let added = if poolsel_on() { self.pool_select_round(&x) } else { self.pool_cut_round(&x, max_cuts) };
+                    if added && poolsel_has('e') {
+                        pse_pending = Some((obj_pre, id_pre));
+                    }
                     if added && tree_log() && !self.params.submip {
                         eprintln!("EPOOL d={} rows {} -> {} lp={node_obj}", node.depth, r0, self.lp.num_rows());
                     }
@@ -14837,6 +15069,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             };
             xp("m_endlp");
+            self.ncl_removed_now = false;
             if t4pc_added && matches!(action, None) {
                 self.t4_pc[2] += 1;
             }
@@ -15009,6 +15242,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.tc_len[3] += node.depth as u64 + 1;
             }
             let sb_child = self.sb_child_inherit(&node);
+            // 試作 `ENOMOTO_MIP_NODE_ROWSCOPE`: 子の行の鎖 = 親の鎖 + このノードで加えて LP に残っている行
+            let child_scope = self.rowscope_child(&node.scope, rs_id0);
             let child_inh = if tc_on('s') && tc_base_len != usize::MAX {
                 let tail = of_fixes.split_off(tc_base_len);
                 if tail.is_empty() { node.inh.clone() } else { Some(std::sync::Arc::new(InhChain { parent: node.inh.clone(), fixes: tail })) }
@@ -15037,6 +15272,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     sb: sb_child.clone(),
                     inh: child_inh.clone(),
                     cwm: None,
+                    scope: child_scope.clone(),
+                    nopool: pse_nopool,
                 }
             };
             // 試作 `ENOMOTO_MIP_CWM`: 子の札 (対を始めるなら 2 つの子に違う腕)。乱数はスレッドの種とノード番号から
@@ -27569,6 +27806,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if self.snap.is_none() && !self.params.submip {
                 print_basis_nb_diag();
+            }
+            if poolsel_on() {
+                eprintln!("MIP: pool selection (POOL_SEL): rounds {} cuts added {} violated {}; e: improved {} not improved {} cuts removed {}", self.poolsel_stats[0], self.poolsel_stats[1], self.poolsel_stats[2], self.poolsel_stats[3], self.poolsel_stats[4], self.poolsel_stats[5]);
+            }
+            if rowscope_on() {
+                eprintln!("MIP: node row scope (NODE_ROWSCOPE): moves {} rows removed {} re-added {} child links {}; path rows seen {} of which gone without the mark {}", self.rs_stats[0], self.rs_stats[1], self.rs_stats[2], self.rs_stats[3], self.rs_stats[5], self.rs_stats[4]);
+            }
+            if ncl_on() {
+                eprintln!("MIP: node cleanup (NODE_CLEANUP): nodes {} rows removed {} kept (nonbasic) {}", self.ncl_stats[0], self.ncl_stats[1], self.ncl_stats[2]);
             }
             eprintln!("MIP: node diag: nodes {} node LPs {} mean rows {:.1} iters {} ({:.1}/LP) LP secs {:.2} sep rounds {} added {} node cut secs {:.2} final rows {}", self.nodes, self.node_lps, self.node_lp_rows as f64 / self.node_lps.max(1) as f64, self.node_iters, self.node_iters as f64 / self.node_lps.max(1) as f64, self.node_lp_secs, self.node_sep_stats[0], self.node_sep_stats[1], self.node_cut_secs, self.lp.num_rows());
             if env_str!("ENOMOTO_MIP_DIAG_ROWTYPES").is_some() && self.pool_tid == 0 && self.snap.is_none() {
