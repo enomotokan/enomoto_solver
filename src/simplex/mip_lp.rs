@@ -2637,6 +2637,14 @@ impl TwoStageLp {
             }
         }
         // 仕上げの記録が使えない: 頂点で境界の内側にある列 (足りなければスラック) を基底にして warm start で解き直す
+        self.warm_from_point(xo, lim, debug, t0)
+    }
+
+    /// 元の空間の点 `xo` (長さ `n`) から基底を作って warm start で解き直す: 境界の内側にある列と行のスラックを基底にし
+    /// ([`Self::repair_basis`] で数をそろえる)、`xo` を出発の点にする。[`Self::adopt_ipm_vertex`] の仕上げの記録がないときと、
+    /// 試作 `ENOMOTO_MIP_ROOTLP_PRESOLVE` (LP の経路 (前処理つき) で解いた最適解からの根の LP、[`Self::solve_from_point`]) で使う。
+    fn warm_from_point(&mut self, xo: Vec<f64>, lim: &SolveLimits, debug: bool, t0: std::time::Instant) -> LpStatus {
+        let n = self.n;
         let m = self.rows.len();
         let inside = |v: f64, l: f64, u: f64| v > l + 1e-9 * (1.0 + l.abs()) && v < u - 1e-9 * (1.0 + u.abs());
         let mut b: Vec<usize> = (0..n).filter(|&j| inside(xo[j], self.lo[j], self.up[j])).collect();
@@ -2644,6 +2652,10 @@ impl TwoStageLp {
             if inside(self.slack_value(i, &xo), 0.0, self.std.ub[n + i]) {
                 b.push(n + i);
             }
+        }
+        if debug && env_str!("ENOMOTO_MIP_ROOTLP_PRESOLVE").is_some() {
+            let nc = b.iter().filter(|&&v| v < n).count();
+            eprintln!("MIP: ROOTLP_PRESOLVE: point inside its bounds: columns {nc}, slacks {} (rows {m})", b.len() - nc);
         }
         self.basis = Some(b);
         self.repair_basis();
@@ -2659,6 +2671,17 @@ impl TwoStageLp {
             eprintln!("MIP root race: ipm_crossover won at {:.3}s, no usable basis -> warm re-solve {st:?} in {} iters", t0.elapsed().as_secs_f64(), self.iters - it0);
         }
         st
+    }
+
+    /// 試作 `ENOMOTO_MIP_ROOTLP_PRESOLVE` (analysis/highsonly_20261123): 元の空間の点 `xo` (LP の経路で解いた最適解) から基底を作り、
+    /// warm start で解き直す ([`Self::warm_from_point`])。長さが合わなければ `None`。
+    pub fn solve_from_point(&mut self, xo: &[f64], lim: &SolveLimits) -> Option<LpStatus> {
+        if xo.len() != self.n {
+            return None;
+        }
+        let st = self.warm_from_point(xo.to_vec(), lim, true, std::time::Instant::now());
+        self.status = Some(st);
+        Some(st)
     }
 
     /// 直前の求解が非有界 (段階 A が `z^1 < 0`、段階 B で実行可能) だったときの切片問題 (論文の式 (8)) の境界を、元の
