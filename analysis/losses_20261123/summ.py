@@ -1,4 +1,4 @@
-"""負けている問題の測り直し (analysis/losses_20261123) の集計 (analysis/holdout_20261123/summ.py の写し): python summ.py [res_s*.jsonl ...] [--tl 600]
+"""負けている問題の測り直し (analysis/losses_20261123) の集計 (analysis/holdout_20261123/summ.py の写し): python summ.py [res_s*.jsonl ...] [--tl 600] [--so .so の sha1 の先頭]
 - 状態の内訳、解けた数 (optimal・infeasible)、最大 RSS (設定ごと)。
 - 食い違い: 同じ (問題, 種) の設定どうしの最適値の不一致・最適と実行不能の衝突、MIPLIB の既知の値 (solu.json) との不一致
   (=opt= と違う最適値、=inf= なのに解あり、既知の値より良い「最適」や実行可能解、=opt= の問題で「実行不能」)。
@@ -11,12 +11,17 @@ from pathlib import Path
 D = Path(__file__).resolve().parent
 args = [x for x in sys.argv[1:]]
 TL = None
+SO = None
+if "--so" in args:
+    i = args.index("--so"); SO = args[i + 1]; del args[i:i + 2]
 if "--tl" in args:
     i = args.index("--tl"); TL = float(args[i + 1]); del args[i:i + 2]
 files = args or [str(D / "res_s*.jsonl")]
 rows = [json.loads(l) for f in files for g in glob.glob(f) for l in open(g, encoding="utf-8") if l.strip()]
 if TL is not None:
     rows = [r for r in rows if r.get("tl") == TL]
+if SO is not None:
+    rows = [r for r in rows if not r["cfg"].startswith("ours") or ((r.get("versions") or {}).get("ours_so_sha1") or "").startswith(SO)]
 # 同じ (問題, 設定, 種, 上限) が何行もあれば最後の行を使う
 R = {}
 for r in rows:
@@ -46,6 +51,9 @@ probs = sorted({r["problem"] for r in rows}); seeds = sorted({r["seed"] for r in
 print(f"行数 {len(rows)}、問題 {len(probs)}、種 {seeds}、上限 {tls} 秒、設定 {cfgs}")
 vers = collections.Counter(json.dumps(r.get("versions"), sort_keys=True) for r in rows)
 print("版:", dict(vers))
+# 当方の .so の sha1 ごとの行の数 (.so は作るたびに変わる。README 3 節。同じ作り方なら動きは同じ)
+so_n = collections.Counter(((r.get("versions") or {}).get("ours_so_sha1") or "")[:8] for r in rows if r["cfg"].startswith("ours"))
+print("当方の .so の sha1 ごとの行の数:", dict(so_n), "(--so 先頭 8 文字 で当方の行をその .so だけにできる)")
 print("\n== 状態の内訳")
 for c in cfgs:
     print(f"  {c}: {dict(collections.Counter(st(r) for r in rows if r['cfg'] == c))}")
