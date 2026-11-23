@@ -1411,10 +1411,6 @@ pub(super) struct Solver<'a, L: MipLp> {
     proof_delta: Vec<(f64, i32)>,
     proof_touched: Vec<usize>,
     proof_in_touched: Vec<bool>,
-    /// 試作 `ENOMOTO_MIP_PROOFPROP` の `s` ([`proofprop`]): 証明ごとの「前回の評価から差分も右辺も変わらず、そのときに刈りも締めもしなかった」印と、
-    /// その印を付けたときの目的の証明の右辺の U
-    proof_clean: Vec<bool>,
-    proof_clean_lim: f64,
     /// 根の状態の境界でも締め付けが起こりうる (余裕が `max |a_j| (u_j - l_j)` 未満の) 証明の通し番号。
     /// 変えた列を含まなくても毎回調べる。
     proof_always: Vec<u64>,
@@ -3247,9 +3243,10 @@ pub(super) fn proofcost(c: char) -> bool {
 }
 
 /// 試作 `ENOMOTO_MIP_PROOFPROP=<文字の並び>` (既定では使わない、analysis/proofprop_20261123): 木の中の LP の外の伝播の手間を減らす。
-/// - `s`: 双対証明の走査 ([`Solver::apply_dual_proofs`]) で、前回の評価から差分 (列の境界) も右辺 (目的の証明は打ち切り値) も変わらず、そのときに刈りも
-///   締めもしなかった証明を、最初の回で飛ばす。評価の結果は前回と同じ (刈らない・締めない) なので答えも道筋も変わらない (走査の順は保つ)。
-///   同じ回の中でほかの証明が締めた列は、締めた側の差分は次の回で取り込むまで古いままで、古い余裕で締める値は前回より強くならない。
+/// - `i`: 木を分け合う (2 スレッド以上の) とき、自前と取り込みの証明の合計も、自前と同じ上限 max(200, `ENOMOTO_T_MIP_PROOF_POOL_PER_COL` × 列数)
+///   までにする (今は自前と取り込みが別々の上限で、4 スレッドでは証明の本数が 1 スレッドのほぼ倍になる)。取り込みの古いものから捨てる。
+/// (`s` (変わらない双対証明の評価を飛ばす) は試して取り下げた: 証明がほぼ全部の列にかかり飛ばせる証明が少なく速くならず、
+/// pk1 の 1 スレッドでは道筋も変わった。analysis/proofprop_20261123 の 3 節)
 /// - `l`: リテラルの衝突の伝播 ([`super::conflict_pool::LitConflictPool`]) で、境界の変更と同じ向きのリテラルを持つ衝突だけを調べる
 ///   (下限の変更で `x <= v` のリテラルは新たに成り立たない)。成り立つかの判定は変えないが、調べた回数で数える衝突の年齢が変わるので道筋は変わりうる。
 pub(crate) fn proofprop(c: char) -> bool {
@@ -5957,8 +5954,6 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         proof_delta: Vec::new(),
         proof_touched: Vec::new(),
         proof_in_touched: Vec::new(),
-        proof_clean: Vec::new(),
-        proof_clean_lim: f64::NAN,
         proof_always: Vec::new(),
         proof_val_lo: Vec::new(),
         proof_val_up: Vec::new(),
@@ -20794,6 +20789,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
         while self.proof_fifo[cat].len() >= cap {
             self.proof_evict(cat);
         }
+        // 試作 `ENOMOTO_MIP_PROOFPROP` の `i` ([`proofprop`]): 木を分け合うとき、自前と取り込みの合計も同じ上限 (列数による上限) までにする
+        // (取り込みから、なければ自前の古いものから捨てる)
+        if proofprop('i') && self.pool.is_some() && per_col > 0 && cat <= 1 {
+            let total_cap = (per_col * self.p.n).max(200);
+            while self.proof_fifo[0].len() + self.proof_fifo[1].len() >= total_cap {
+                let c = if !self.proof_fifo[1].is_empty() { 1 } else { 0 };
+                if self.proof_fifo[c].is_empty() {
+                    break;
+                }
+                self.proof_evict(c);
+            }
+        }
         // 非零の上限: 取り込みから、なければ自前の古いものから捨てる
         while self.dual_proof_nnz + coefs.len() > nnz_cap {
             let c = if !self.proof_fifo[1].is_empty() { 1 } else if !self.proof_fifo[2].is_empty() { 2 } else if !self.proof_fifo[0].is_empty() { 0 } else { break };
@@ -23071,7 +23078,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let cols: Vec<usize> = if self.proof_dirty || self.proof_delta.len() != npool {
             self.proof_delta.clear();
             self.proof_delta.resize(npool, (0.0, 0));
-            self.proof_clean.clear();
             for &k in &self.proof_touched {
                 if k < self.proof_in_touched.len() {
                     self.proof_in_touched[k] = false;
@@ -23116,25 +23122,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 目的の証明の右辺 `U - konst` の U (打ち切り値。調べる間は変わらないので 1 回だけ読む: 共有の最良値の読み込みを
         // 証明ごとにしない)
         let obj_lim = self.prune_limit() - self.p.offset;
-        // 試作 `ENOMOTO_MIP_PROOFPROP` の `s` ([`proofprop`]): 新しい証明は印なし、U が変われば全部の印を外す
-        let skip_clean = proofprop('s') && !full;
-        if skip_clean {
-            if self.proof_clean_lim.to_bits() != obj_lim.to_bits() {
-                self.proof_clean.clear();
-                self.proof_clean_lim = obj_lim;
-            }
-            self.proof_clean.resize(npool, false);
-        }
         for pass in 0..8 {
             let mut tightened_now = false;
             for &k in &scan {
-                if skip_clean {
-                    if pass == 0 && self.proof_clean[k] {
-                        continue;
-                    }
-                    // 評価の終わりに、刈らず締めなかったら印を付け直す (刈る・締めるところで外す)
-                    self.proof_clean[k] = true;
-                }
                 let rhs = {
                     let (_, konst, obj) = &self.dual_proofs[k];
                     if *obj {
@@ -23173,9 +23163,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.tprof.proof[org][0] += 1;
                 }
                 if slack < -gap1_proof_tol(rhs) {
-                    if skip_clean {
-                        self.proof_clean[k] = false;
-                    }
                     if self.dbg_on || proof_diag() {
                         self.proof_diag_prune(k, rhs, minact, full);
                     }
@@ -23237,9 +23224,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         if super::cutconf::mode().is_some() { let (c, kk, _) = &self.dual_proofs[k]; super::cutconf::note_use(c, *kk, false); }
                     }
                     if self.dom.infeasible {
-                        if skip_clean {
-                            self.proof_clean[k] = false;
-                        }
                         self.tprof.proof[org][1] += 1;
                         if super::cutconf::mode().is_some() { let (c, kk, _) = &self.dual_proofs[k]; super::cutconf::note_use(c, *kk, true); }
                         self.proof_used(k);
@@ -23250,9 +23234,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
                 if used {
-                    if skip_clean {
-                        self.proof_clean[k] = false;
-                    }
                     self.proof_used(k);
                 }
             }
@@ -23407,16 +23388,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 } else {
                     self.proof_val_lo[j] = new_v;
                 }
-                // 試作 `ENOMOTO_MIP_PROOFPROP` の `s`: 締め付けは反対側の境界 (幅) にもよるので、この側の境界が最小活動量に効かない証明も印を外す
-                if !self.proof_clean.is_empty() {
-                    for &(id, _) in &self.proof_col_index[!upper as usize][j] {
-                        if id >= self.proof_first_id {
-                            if let Some(c) = self.proof_clean.get_mut((id - self.proof_first_id) as usize) {
-                                *c = false;
-                            }
-                        }
-                    }
-                }
                 // この側の境界が最小活動量に効く証明だけをたどる (下限は係数が正、上限は係数が正でないもの)
                 for &(id, a) in &self.proof_col_index[upper as usize][j] {
                     if id < self.proof_first_id {
@@ -23435,10 +23406,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if self.proof_chg_mark[k] != stamp {
                         self.proof_chg_mark[k] = stamp;
                         changed.push(k);
-                        // 試作 `ENOMOTO_MIP_PROOFPROP` の `s`: 差分の変わった証明は印を外す
-                        if let Some(c) = self.proof_clean.get_mut(k) {
-                            *c = false;
-                        }
                     }
                     let e = &mut self.proof_delta[k];
                     if old.is_finite() {
