@@ -66,6 +66,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
+        // `t` (確かめ用): 詳しいログなしでも 1 行出す (fuzz で働いた回数を数える)
+        if !self.params.verbose && env_str!("ENOMOTO_MIP_HO4_ACFIX").is_some_and(|v| v.contains('t')) {
+            eprintln!("ACFIXD_TRACE same {same} gap {gap:.3e} fixed {} tightened {}", nlo + nup, nlt + nut);
+        }
         if self.params.verbose {
             eprintln!(
                 "MIP:   interior rounding: ENOMOTO_MIP_HO4_ACFIX=d: LP bounds global {same}, dual {}, -L {gap:.3e}; fixed {nlo} integer columns at the lower bound and {nup} at the upper bound, tightened {nlt}+{nut} (newly fixed {}, {:.2}s)",
