@@ -3212,13 +3212,17 @@ fn pool_dse_nan() -> bool {
     env_def!("ENOMOTO_MIP_POOL_DSE", "1").is_some_and(|v| v.contains('n'))
 }
 
-/// 試作 `ENOMOTO_MIP_PROOFCOST` (既定では使わない、analysis/proofcost_20261123): 双対証明のプールの差分の更新の手間を減らす。
+/// `ENOMOTO_MIP_PROOFCOST` (**既定で使う** (未設定は `pa`)、`=0` で切る。2026-11-23 採用、analysis/proofcost_20261123: 1 スレッドの P (58 問 × 種 1〜3、60 秒)
+/// で pa/既定 0.997 [0.988, 1.006]・解けた 118 → 120、mas76 0.67〜0.75 倍、pk1 は 3 種とも時間切れ → 解ける、timtab1 種 2 だけ 48.6 秒 → 時間切れ):
+/// 双対証明のプールの差分の更新の手間を減らす。
 /// 1 スレッドでは証明が上限の 2000 本まで溜まり、列の少ない問題ではどの証明もほぼ全部の列にかかるので、境界が 1 本動くたびに
 /// 約 2000 本の差分を足していた (mas76 で全体の 42%、analysis/hotspot_20261122)。木を分け合うときだけにかけていた既存の仕組みを 1 スレッドにも使う:
 /// - `p`: 本数の上限を max(200, `ENOMOTO_T_MIP_PROOF_POOL_PER_COL` (4) × 列数) 以下にする
 /// - `a`: 捨てるときに、前回から使われた (刈り込み・締め付けた) 印のある証明は印を消して後ろに回す (clock 法の年齢)
+/// 木を分け合う (2 スレッド以上) ときは、どちらも以前から既定で入っているので、4 スレッドの動きは変わらない。サブ MIP (4 スレッドの求解の中でも
+/// 1 スレッドで動く) と、2 スレッド以上の求解の根 (木を分け合う前) には使わない (`params.threads` が 1 のときだけ)。
 pub(super) fn proofcost(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_PROOFCOST").is_some_and(|v| v != "0" && v.contains(c))
+    env_def!("ENOMOTO_MIP_PROOFCOST", "pa").is_some_and(|v| v.contains(c))
 }
 
 fn prof_tree_par() -> bool {
@@ -20140,8 +20144,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 分類 `cat` の証明を 1 本捨てる: 古いものから。木を分け合うとき (`ENOMOTO_MIP_PROOF_NO_AGING` でなければ)、前回から使われた印のあるものは印を
     /// 消して後ろに回す (clock 法)。
     fn proof_evict(&mut self, cat: usize) {
-        // 試作 `ENOMOTO_MIP_PROOFCOST` の `a` ([`proofcost`]): 1 スレッドでも年齢 (clock 法) をかける
-        let aging = (self.pool.is_some() || proofcost('a')) && env_str!("ENOMOTO_MIP_PROOF_NO_AGING").is_none();
+        // `ENOMOTO_MIP_PROOFCOST` の `a` ([`proofcost`]、既定): 1 スレッドでも年齢 (clock 法) をかける
+        // 1 スレッドの外側の求解だけ (サブ MIP は 4 スレッドの求解の中でも 1 スレッドで、4 スレッドの根 (木を分け合う前) も `pool` がないので、
+        // そこを変えると 4 スレッドの動きが変わる)
+        let aging = (self.pool.is_some() || (proofcost('a') && !self.params.submip && self.params.threads <= 1)) && env_str!("ENOMOTO_MIP_PROOF_NO_AGING").is_none();
         let mut turns = self.proof_fifo[cat].len();
         while let Some(id) = self.proof_fifo[cat].pop_front() {
             let k = (id - self.proof_first_id) as usize;
@@ -20282,8 +20288,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 木を分け合うとき、`ENOMOTO_T_MIP_PROOF_POOL_PER_COL` = c (> 0、既定 4): 上限を max(200, c * 列数) 以下にする (小さい問題で証明のプールが問題より
         // ずっと大きくなり、ノードごとの伝播が重くなるのを避ける)
         let per_col = tunable!("ENOMOTO_T_MIP_PROOF_POOL_PER_COL", 4usize, usize);
-        // 試作 `ENOMOTO_MIP_PROOFCOST` の `p` ([`proofcost`]): 1 スレッドでも同じ上限にする
-        let cap = if per_col > 0 && (self.pool.is_some() || proofcost('p')) { cap.min((per_col * self.p.n).max(200)) } else { cap };
+        // `ENOMOTO_MIP_PROOFCOST` の `p` ([`proofcost`]、既定): 1 スレッドでも同じ上限にする
+        // (サブ MIP には使わない。`aging` と同じ)
+        let cap = if per_col > 0 && (self.pool.is_some() || (proofcost('p') && !self.params.submip && self.params.threads <= 1)) { cap.min((per_col * self.p.n).max(200)) } else { cap };
         if cap == 0 {
             return;
         }
