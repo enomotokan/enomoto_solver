@@ -109,6 +109,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // `ENOMOTO_MIP_DET1T` (既定 `onil`) の `i` (analysis/det1t_20261120): 予算を手間 (ticks × 1e-9 秒) で数え、内点法の反復も KKT の分解の
         // 演算数を数えて手間の期限で止める (スレッドの手間の合計には足さない: [`crate::ticks::ipm_add`])。壁時計の期限は 10 倍の安全網にする
+        // 試作 `ENOMOTO_MIP_HO4_ACFIX=d` ([`Self::acfix_dual`]): 費用 0 の内点法を、丸めの内点法とは別に同じ予算 (壁時計) で先に回す
+        // (丸めの手間の予算 (`DET1T` の `i`) の中で回すと、satellites2-40 では 14 反復で手間の上限に当たり、双対が固定を示せなかった)
+        if !self.params.submip && self.snap.is_none() && acfix_d() {
+            self.acfix_dual(Instant::now() + Duration::from_secs_f64(budget));
+        }
         let det_i = super::solver::det1t('i');
         let deadline = Instant::now() + Duration::from_secs_f64(if det_i { 10.0 * budget } else { budget });
         let _det_budget = det_i.then(|| crate::ticks::budget_guard(budget * 1e9));
@@ -119,11 +124,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut centers: Vec<(&str, Vec<f64>)> = Vec::new();
         let mut vertex: Option<(Vec<usize>, Vec<f64>)> = None;
         let t0 = Instant::now();
-        // 試作 `ENOMOTO_MIP_HO4_ACFIX=d` ([`Self::acfix_dual`]): 費用 0 の内点法を先に回す (後ろでは予算が尽きることがある: satellites2-40)
-        let acfix_on = !self.params.submip && self.snap.is_none() && env_str!("ENOMOTO_MIP_HO4_ACFIX").is_some();
-        if acfix_on && acfix_d() {
-            self.acfix_dual(deadline);
-        }
         if mode != 1 {
             match self.lp.interior_point(false, env_str!("ENOMOTO_MIP_IPM_NO_VERTEX").is_none(), deadline) {
                 Some(mut ip) => {
