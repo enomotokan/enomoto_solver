@@ -1356,6 +1356,7 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
         CLQPRB_STICKY.with(|f| f.set(false));
         CLQPRB_REVERTED.with(|f| f.set(false));
         PRBWORK_DRY.with(|f| f.set(false));
+        PROBREP_LAST.with(|c| *c.borrow_mut() = None);
         FEAS_EARLY_DRY.with(|f| f.set(false));
         cutmix::reset();
     }
@@ -7541,8 +7542,53 @@ fn prbwork_active(submip: bool) -> bool {
     prbwork_on() && !submip && !PRESOLVE_IN_SUBMIP.with(|f| f.get())
 }
 
+/// 試作 `ENOMOTO_MIP_PROBREP` (既定では使わない。analysis/probrep_20261123): 同じ求解の前のプロービングが何も得ず (固定・締め付け・同値な組が 0)、
+/// その後の変化が行だけ (列の数・境界・整数の印が前のプロービングに渡した問題と同じ) なら、次のプロービングを回さず、前の回の含意と
+/// 含意による境界をそのまま使う。行だけの変化 (冗長な行の削除・平行な行の併合・等式による疎化) は同じ実行可能集合の書き直しで、
+/// 列の定義域は同じなので、前の回が何も得なかったプロービングをやり直す理由がない (新しい閾値なし)。
+/// nursesched-sprint02 は根の前処理で、成果 0 の 1.3 秒のプロービングを疎化の後にもう一度回していた (固定 0・含意の数も同じ)。
+/// `ENOMOTO_MIP_PRBWORK` (再スタートの後、前の回が上限で打ち切られたら回さない) とは別で、再スタートの後は列が変わるのでここでは省かない
+pub(crate) fn probrep_on() -> bool {
+    env_str!("ENOMOTO_MIP_PROBREP").is_some_and(|v| v != "0")
+}
+
+/// [`probrep_on`]: 成果 0 だったプロービングに渡した問題の列の状態と、その回の含意・含意による境界
+struct ProbRepSnap {
+    n: usize,
+    col_lo: Vec<f64>,
+    col_up: Vec<f64>,
+    is_int: Vec<bool>,
+    edges: Vec<(u32, u32)>,
+    implied: Vec<(u32, bool, u32, bool, f64)>,
+}
+
+thread_local! {
+    /// [`probrep_on`]: この求解の最後のプロービングが成果 0 なら、その回の写し (成果があれば消す。最初の求解の始めに消す)
+    static PROBREP_LAST: std::cell::RefCell<Option<ProbRepSnap>> = const { std::cell::RefCell::new(None) };
+}
+
 fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     let _pt = pretime::guard("probe");
+    // `ENOMOTO_MIP_PROBREP` ([`probrep_on`]): 前の回が成果 0 で、列の状態が同じなら回さない
+    if probrep_on() && !submip && !PRESOLVE_IN_SUBMIP.with(|f| f.get()) {
+        let same = PROBREP_LAST.with(|c| {
+            c.borrow().as_ref().filter(|sn| sn.n == prob.n && sn.col_lo == prob.col_lo && sn.col_up == prob.col_up && sn.is_int == prob.is_int).map(|sn| (sn.edges.clone(), sn.implied.clone()))
+        });
+        if let Some((edges, implied)) = same {
+            if verbose {
+                eprintln!(
+                    "MIP: probing: skipped (PROBREP: the last probing found nothing and only rows changed since; {} implications and {} implied bounds kept)",
+                    edges.len(),
+                    implied.len()
+                );
+            }
+            prob.conflict_edges = edges;
+            prob.implied_bounds = implied;
+            PROBE_GAIN.with(|f| f.set((0, 0, 0)));
+            PROBE_FIXED.with(|f| f.set(0));
+            return None;
+        }
+    }
     use domain::Domain;
     // `ENOMOTO_MIP_PRBWORK` ([`prbwork_on`]): 再スタートの後で、前のプロービングが成果 0 のまま打ち切られていれば回さない (引き継いだ含意 `conflict_edges` はそのまま残す)
     if RESTART_PRESOLVE.with(|f| f.get()) && prbwork_skip_restart(submip) {
@@ -8594,6 +8640,19 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         }
     }
     PROBE_GAIN.with(|f| f.set((fixed, tightened, if want_equiv { PROBE_EQUIV.with(|e| e.borrow().len()) } else { 0 })));
+    // `ENOMOTO_MIP_PROBREP` ([`probrep_on`]): 成果 0 なら、この回に渡した問題の列の状態と含意を控える (成果があれば消す)
+    if probrep_on() && !submip && !PRESOLVE_IN_SUBMIP.with(|f| f.get()) {
+        let (gf, gt, ge) = PROBE_GAIN.with(|f| f.get());
+        let snap = (gf + gt + ge == 0).then(|| ProbRepSnap {
+            n: prob.n,
+            col_lo: prob.col_lo.clone(),
+            col_up: prob.col_up.clone(),
+            is_int: prob.is_int.clone(),
+            edges: prob.conflict_edges.clone(),
+            implied: prob.implied_bounds.clone(),
+        });
+        PROBREP_LAST.with(|c| *c.borrow_mut() = snap);
+    }
     if prbwork {
         let gain = fixed + tightened + PROBE_GAIN.with(|f| f.get().2);
         if gain > 0 {
