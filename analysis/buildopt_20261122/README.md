@@ -282,7 +282,38 @@ profile は base の命令で取ったので、target-cpu を変えると形が�
 
 ### 7.5 手元での確かめ (Linux x86_64)
 
-<!-- C_CHECK -->
+2 本入りの wheel を pip で入れて確かめた (`var/c_dual`。base だけ・v3 だけの wheel も `var/c_base`・`var/c_v3` に入れた)。
+
+- `pip install` は通り、`enomoto_solver/_core.cpython-313-x86_64-linux-gnu.so` と `_core_v3.cpython-313-x86_64-linux-gnu.so` が入った。
+- 読み分け: ENOMOTO_CORE が auto・空・不正な値 (警告を出して auto) では `_core_v3` (`build_cpu_level()` が "x86-64-v3")、base では `_core`、v3 では `_core_v3`。
+  `model.py` が使う `_core` も読み替えた方になっている。`_core_v3` の無い wheel で v3 を指定すると、警告して base を使う。
+- `tests/test_model.py` (43 件) は auto・base・v3 のどれでも全部通る。`test_version.py`・`test_select_problem.py` (9 件) も通る。
+
+<!-- C_FUZZ -->
+
+#### 1 スレッドの比べ (m2)
+
+`python run_var.py m2 base pgo pgo_v3 c_base c_v3 c_plain` (15 問 × 2 回、1 スレッド、決定的)。解析は `ana_m1.py res_m2.jsonl` → ana_m2.txt、`ana_m2b.txt`。
+
+- base・pgo・pgo_v3 は前のソース (e2b2f0677)、c_* は案 C を入れたソース (13aada96d)。
+  c_plain は案 C のソースを今の作り方 (LTO・PGO なし) で作ったもの。
+- 道筋: c_base・c_v3 は c_plain と、15 問 × 2 回すべてで状態・ノード数・目的値が同じ。
+  base と比べると 4 問 (mas76・rout・noswot・qiu) でノード数が違うが、c_plain も同じように違うので、作り方ではなくソースの差 (この間に入った PROBE_PAR・mps などの変更) による。目的値はどれも同じ。
+- 時間の比:
+
+| 版/基準 | 幾何平均 |
+|---|---:|
+| pgo/base (前のソース) | 0.918 |
+| pgo_v3/base (前のソース) | 0.879 |
+| c_base/c_plain (案 C のソース) | 0.884 |
+| c_v3/c_plain (案 C のソース) | 0.841 |
+| c_plain/base (ソースの差。4 問の道筋の違いを含む) | 1.044 |
+
+- 道筋が base と同じ 11 問だけで、学習の中身を比べると: c_base/pgo 1.017、c_v3/pgo_v3 1.003。
+  **生成問題で学習した PGO は、MIPLIB の 10 問で学習した PGO と同じだけ効く** (差は 2 回の揺れ 2.8〜4.7% の内)。
+  計測の問題を学習に使わなくてよいことが確かめられた。
+- 案 C の wheel (c_v3、auto で読まれる方) は、同じソースを今の作り方で作ったものより 16% 速い。
+
 
 ## 8. ファイル
 
