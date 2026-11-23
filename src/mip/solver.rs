@@ -1411,6 +1411,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     proof_delta: Vec<(f64, i32)>,
     proof_touched: Vec<usize>,
     proof_in_touched: Vec<bool>,
+    /// 試作 `ENOMOTO_MIP_PROOFPROP` の `s` ([`proofprop`]): 証明ごとの「前回の評価から差分も右辺も変わらず、そのときに刈りも締めもしなかった」印と、
+    /// その印を付けたときの目的の証明の右辺の U
+    proof_clean: Vec<bool>,
+    proof_clean_lim: f64,
     /// 根の状態の境界でも締め付けが起こりうる (余裕が `max |a_j| (u_j - l_j)` 未満の) 証明の通し番号。
     /// 変えた列を含まなくても毎回調べる。
     proof_always: Vec<u64>,
@@ -3240,6 +3244,15 @@ fn pool_dse_nan() -> bool {
 /// 1 スレッドで動く) と、2 スレッド以上の求解の根 (木を分け合う前) には使わない (`params.threads` が 1 のときだけ)。
 pub(super) fn proofcost(c: char) -> bool {
     env_def!("ENOMOTO_MIP_PROOFCOST", "pa").is_some_and(|v| v.contains(c))
+}
+
+/// 試作 `ENOMOTO_MIP_PROOFPROP=<文字の並び>` (既定では使わない、analysis/proofprop_20261123): 木の中の LP の外の伝播の手間を減らす。
+/// - `s`: 双対証明の走査 ([`Solver::apply_dual_proofs`]) で、前回の評価から差分 (列の境界) も右辺 (目的の証明は打ち切り値) も変わらず、そのときに刈りも
+///   締めもしなかった証明を、最初の回で飛ばす。評価の結果は前回と同じ (刈らない・締めない) なので答えも道筋も変わらない (走査の順は保つ)。
+///   同じ回の中でほかの証明が締めた列は、締めた側の差分は次の回で取り込むまで古いままで、古い余裕で締める値は前回より強くならない。
+pub(super) fn proofprop(c: char) -> bool {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| env_str!("ENOMOTO_MIP_PROOFPROP").map_or(String::new(), |v| v.to_string())).contains(c)
 }
 
 fn prof_tree_par() -> bool {
@@ -5942,6 +5955,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         proof_delta: Vec::new(),
         proof_touched: Vec::new(),
         proof_in_touched: Vec::new(),
+        proof_clean: Vec::new(),
+        proof_clean_lim: f64::NAN,
         proof_always: Vec::new(),
         proof_val_lo: Vec::new(),
         proof_val_up: Vec::new(),
@@ -13668,9 +13683,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
                 if !ok {
+                    xp("p_other");
                     if self.dom.conflict.is_some() && env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() {
                         self.add_conflict();
                     }
+                    xp("p_conflict");
                     self.proof_prunes += 1;
                     self.dbg_lost("dual proof", dn && self.dbg_contains());
                     if proof_verify() {
@@ -23010,6 +23027,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 双対証明と衝突制約で今の定義域を調べる: どれかが破れていれば偽 (枝刈り)。そうでなければ整数列の
     /// 境界を締め、締めたら伝播し直す (その結果矛盾すれば偽)。
     pub(super) fn apply_dual_proofs(&mut self) -> bool {
+        // 区間計時 (`ENOMOTO_MIP_XPROF`): 呼ぶ前の時間を切る (木のノードの外 (伝播のやり直し) からも呼ばれる)
+        xp("p_enter");
         if self.dual_proofs.is_empty() {
             return true;
         }
@@ -23028,6 +23047,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.proof_col_index[(a <= 0.0) as usize][j].push((id, a));
                 }
             }
+            crate::simplex::slope_intercept_dual::xcount("c_refresh");
             self.proof_snap = Some((lo, up));
             self.proof_snap_nodes = self.nodes;
             self.proof_snap_limit = self.prune_limit();
@@ -23049,6 +23069,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let cols: Vec<usize> = if self.proof_dirty || self.proof_delta.len() != npool {
             self.proof_delta.clear();
             self.proof_delta.resize(npool, (0.0, 0));
+            self.proof_clean.clear();
             for &k in &self.proof_touched {
                 if k < self.proof_in_touched.len() {
                     self.proof_in_touched[k] = false;
@@ -23057,6 +23078,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.proof_touched.clear();
             self.proof_in_touched.clear();
             self.proof_in_touched.resize(npool, false);
+            crate::simplex::slope_intercept_dual::xcount("c_dirty");
             self.proof_dirty = false;
             let (slo, sup) = self.proof_snap.as_ref().unwrap();
             self.proof_val_lo.clone_from(slo);
@@ -23092,9 +23114,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 目的の証明の右辺 `U - konst` の U (打ち切り値。調べる間は変わらないので 1 回だけ読む: 共有の最良値の読み込みを
         // 証明ごとにしない)
         let obj_lim = self.prune_limit() - self.p.offset;
+        // 試作 `ENOMOTO_MIP_PROOFPROP` の `s` ([`proofprop`]): 新しい証明は印なし、U が変われば全部の印を外す
+        let skip_clean = proofprop('s') && !full;
+        if skip_clean {
+            if self.proof_clean_lim.to_bits() != obj_lim.to_bits() {
+                self.proof_clean.clear();
+                self.proof_clean_lim = obj_lim;
+            }
+            self.proof_clean.resize(npool, false);
+        }
         for pass in 0..8 {
             let mut tightened_now = false;
             for &k in &scan {
+                if skip_clean {
+                    if pass == 0 && self.proof_clean[k] {
+                        continue;
+                    }
+                    // 評価の終わりに、刈らず締めなかったら印を付け直す (刈る・締めるところで外す)
+                    self.proof_clean[k] = true;
+                }
                 let rhs = {
                     let (_, konst, obj) = &self.dual_proofs[k];
                     if *obj {
@@ -23126,9 +23164,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     continue;
                 }
                 let slack = rhs - minact;
-                let org = (self.proof_state[k] == ProofState::Imported) as usize;
-                self.tprof.proof[org][0] += 1;
+                // 診断の数え (`ENOMOTO_PROF_TREE_PAR` のときだけ。analysis/proofprop_20261123)
+                let tp = prof_tree_par();
+                let org = if tp { (self.proof_state[k] == ProofState::Imported) as usize } else { 0 };
+                if tp {
+                    self.tprof.proof[org][0] += 1;
+                }
                 if slack < -gap1_proof_tol(rhs) {
+                    if skip_clean {
+                        self.proof_clean[k] = false;
+                    }
                     if self.dbg_on || proof_diag() {
                         self.proof_diag_prune(k, rhs, minact, full);
                     }
@@ -23137,6 +23182,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.proof_used(k);
                     self.proof_last_prune = Some(k);
                     self.proof_prune_after_tighten = tightened;
+                    xp("p_scan");
                     return false;
                 }
                 if !full && slack >= self.proof_base[k].2 {
@@ -23189,15 +23235,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         if super::cutconf::mode().is_some() { let (c, kk, _) = &self.dual_proofs[k]; super::cutconf::note_use(c, *kk, false); }
                     }
                     if self.dom.infeasible {
+                        if skip_clean {
+                            self.proof_clean[k] = false;
+                        }
                         self.tprof.proof[org][1] += 1;
                         if super::cutconf::mode().is_some() { let (c, kk, _) = &self.dual_proofs[k]; super::cutconf::note_use(c, *kk, true); }
                         self.proof_used(k);
                         self.proof_last_prune = Some(k);
                         self.proof_prune_after_tighten = true;
+                        xp("p_scan");
                         return false;
                     }
                 }
                 if used {
+                    if skip_clean {
+                        self.proof_clean[k] = false;
+                    }
                     self.proof_used(k);
                 }
             }
@@ -23212,7 +23265,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         xp("p_scan");
         if tightened {
-            return self.dom.propagate(p);
+            let r = self.dom.propagate(p);
+            xp("p_rowprop");
+            return r;
         }
         true
     }
@@ -23356,7 +23411,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         continue; // 古い証明
                     }
                     let k = (id - self.proof_first_id) as usize;
-                    self.tprof.proof[(self.proof_state[k] == ProofState::Imported) as usize][3] += 1;
+                    // 診断の数え (`ENOMOTO_PROF_TREE_PAR` のときだけ。証明の出どころを読むので、この輪では余計な読みになる。analysis/proofprop_20261123)
+                    if prof_tree_par() {
+                        self.tprof.proof[(self.proof_state[k] == ProofState::Imported) as usize][3] += 1;
+                    }
                     let (old, new) = (a * old_v, a * new_v);
                     if !self.proof_in_touched[k] {
                         self.proof_in_touched[k] = true;
@@ -23365,6 +23423,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if self.proof_chg_mark[k] != stamp {
                         self.proof_chg_mark[k] = stamp;
                         changed.push(k);
+                        // 試作 `ENOMOTO_MIP_PROOFPROP` の `s`: 差分の変わった証明は印を外す
+                        if let Some(c) = self.proof_clean.get_mut(k) {
+                            *c = false;
+                        }
                     }
                     let e = &mut self.proof_delta[k];
                     if old.is_finite() {
