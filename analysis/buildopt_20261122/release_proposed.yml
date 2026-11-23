@@ -5,8 +5,11 @@
 # どの job も scripts/build_dist_wheel.sh を呼ぶ。台本は 1 つの機械の上で
 #   (1) -Cprofile-generate の wheel を作る → (2) venv に入れて scripts/pgo_train.py を解く (学習)
 #   → (3) llvm-profdata で profile をまとめる → (4) -Cprofile-use で base を作る
-#   → (5) x86_64 なら -Ctarget-cpu=x86-64-v3 も足して v3 を作り、scripts/make_dual_wheel.py で 1 本にする
+#   → (5) x86_64 なら (1)〜(4) を -Ctarget-cpu=x86-64-v3 でもう一度 (v3 は v3 の計測用の版で学習する。base の profile を
+#         v3 に使うと関数の形が違って 1282 個の profile が捨てられる) → (6) scripts/make_dual_wheel.py で 1 本にする
 # を順に行う。学習は作った wheel を動かすので、その機械で動く対象 (ネイティブ) でしか PGO はできない。
+# v3 の学習には x86-64-v3 の機械が要る (GitHub の x86 の機械は AVX2 を持つ。持たなければ台本が止まる)。
+# 作りのたびに "hash mismatch" (profile と合わない関数) の数を数え、0 でなければ台本が止まる (MAX_MISMATCH)。
 
   linux:
     strategy:
@@ -36,6 +39,11 @@
         run: bash scripts/build_dist_wheel.sh
       - name: manylinux の確かめ (_core と _core_v3 の両方)
         run: auditwheel show dist/*.whl
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-logs-linux-${{ matrix.target }}   # 各作りのログ (hash mismatch の数を後から見られる)
+          path: target/dist-work/*.log
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-${{ matrix.target }}

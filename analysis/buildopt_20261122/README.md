@@ -123,7 +123,7 @@ wheel の試作は `make_dual_wheel.py BASE_WHEEL V3_WHEEL INIT_PY OUT_DIR` (こ
 配り方:
 - CI で maturin を 2 回回す (`RUSTFLAGS` を変えて、別の target dir に)。2 回目の .so を 1 回目の wheel に入れ直す小さな手順がいる (上の make_dual_wheel.py の形)。
 - maturin だけでこの形を作る機能は無い。
-- 作る時間は 2 倍。PGO を使うなら、学習は 1 回で両方に使える (pgo_v3 は pgo と同じ merged.profdata を使い、作るときに profile の警告は出なかった)。
+- 作る時間は 2 倍。PGO の学習も、base と v3 で別々に要る (7.3 節。ここで「1 回で両方に使える、警告は出なかった」と書いたのは誤り。build_var.sh が警告の行を捨てていて見えていなかった)。
 - PyPI の wheel の名札 (タグ) には CPU の命令の水準を書く欄が無い。v3 だけの wheel を出すと v3 の無い CPU で SIGILL になるので、出せるのは base だけか dual。
 - ここの wheel は手元の glibc で作ったので manylinux_2_39 になっている。配るときは今まで通り manylinux のコンテナで作る (auditwheel も .so 2 本を見る)。
 - macOS (arm64) と Windows は別の話。arm64 には v3 は無く、そのまま base 1 本でよい。Windows では /proc/cpuinfo が無いので、今の試作は base を読む。
@@ -255,8 +255,15 @@ pgo の fuzz は回していない。pgo は pgo_v3 と同じ profile・同じ L
 
 今の作り方は 128 秒。できた 2 本入りの wheel は 13,735,281 バイト。
 
-v3 を作るときに、`function control flow change detected (hash mismatch)` の警告が std の OnceLock の初期化の 3 関数で出る。
-profile は base の命令で取ったので、target-cpu を変えると形が変わる関数がある。その関数の profile が捨てられるだけで、害は無い。
+**訂正 (2026-11-23、親の指摘。analysis/losses_20261123/README.md 3.1 節)**: 上の 1 回目の作り (build_c.out) では、v3 の作りで
+`function control flow change detected (hash mismatch)` が **1282 個** 出ていた (base の作りでは 0)。
+前に「3 関数で害は無い」と書いたのは、ログの先頭だけを見た読み違い。
+- 原因: base の命令の計測用の版で学習した profile を、target-cpu=x86-64-v3 の作りに使ったこと。命令が違うと関数の形 (CFG) が変わる。
+- 結果: 当方の関数 (solve_slope_intercept_dual_impl を含む) の profile がほとんど捨てられ、v3 は実際にはほぼ LTO + v3 だった。
+- 1〜6 節の pgo_v3 も同じ作り (pgogen は base) なので、同じく v3 の PGO はほぼ効いていない。
+  m1 の pgo_v3 0.877 と、6 節の 4 スレッドの P の pgo_v3 は、この状態で測ったもの。
+- 直し方: 台本を、base は base の計測用の版で、v3 は v3 の計測用の版で、別々に学習する形にした (学習 2 回)。
+  さらに作りのたびに hash mismatch の数を数え、`MAX_MISMATCH` (既定 0) を超えたら止める。直した後の作りは 7.6 節。
 
 ### 7.4 release の CI の設計 (変更案は release_proposed.yml、まだ .github には入れない)
 
@@ -282,7 +289,38 @@ profile は base の命令で取ったので、target-cpu を変えると形が�
 
 ### 7.5 手元での確かめ (Linux x86_64)
 
-<!-- C_CHECK -->
+2 本入りの wheel を pip で入れて確かめた (`var/c_dual`。base だけ・v3 だけの wheel も `var/c_base`・`var/c_v3` に入れた)。
+
+- `pip install` は通り、`enomoto_solver/_core.cpython-313-x86_64-linux-gnu.so` と `_core_v3.cpython-313-x86_64-linux-gnu.so` が入った。
+- 読み分け: ENOMOTO_CORE が auto・空・不正な値 (警告を出して auto) では `_core_v3` (`build_cpu_level()` が "x86-64-v3")、base では `_core`、v3 では `_core_v3`。
+  `model.py` が使う `_core` も読み替えた方になっている。`_core_v3` の無い wheel で v3 を指定すると、警告して base を使う。
+- `tests/test_model.py` (43 件) は auto・base・v3 のどれでも全部通る。`test_version.py`・`test_select_problem.py` (9 件) も通る。
+
+<!-- C_FUZZ -->
+
+#### 1 スレッドの比べ (m2)
+
+`python run_var.py m2 base pgo pgo_v3 c_base c_v3 c_plain` (15 問 × 2 回、1 スレッド、決定的)。解析は `ana_m1.py res_m2.jsonl` → ana_m2.txt、`ana_m2b.txt`。
+
+- base・pgo・pgo_v3 は前のソース (e2b2f0677)、c_* は案 C を入れたソース (13aada96d)。
+  c_plain は案 C のソースを今の作り方 (LTO・PGO なし) で作ったもの。
+- 道筋: c_base・c_v3 は c_plain と、15 問 × 2 回すべてで状態・ノード数・目的値が同じ。
+  base と比べると 4 問 (mas76・rout・noswot・qiu) でノード数が違うが、c_plain も同じように違うので、作り方ではなくソースの差 (この間に入った PROBE_PAR・mps などの変更) による。目的値はどれも同じ。
+- 時間の比:
+
+| 版/基準 | 幾何平均 |
+|---|---:|
+| pgo/base (前のソース) | 0.918 |
+| pgo_v3/base (前のソース) | 0.879 |
+| c_base/c_plain (案 C のソース) | 0.884 |
+| c_v3/c_plain (案 C のソース) | 0.841 |
+| c_plain/base (ソースの差。4 問の道筋の違いを含む) | 1.044 |
+
+- 道筋が base と同じ 11 問だけで、学習の中身を比べると: c_base/pgo 1.017、c_v3/pgo_v3 1.003。
+  **生成問題で学習した PGO は、MIPLIB の 10 問で学習した PGO と同じだけ効く** (差は 2 回の揺れ 2.8〜4.7% の内)。
+  計測の問題を学習に使わなくてよいことが確かめられた。
+- 案 C の wheel (c_v3、auto で読まれる方) は、同じソースを今の作り方で作ったものより 16% 速い。
+
 
 ## 8. ファイル
 
