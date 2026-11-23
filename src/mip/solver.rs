@@ -9323,7 +9323,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `=d`: 双対の問題も LP の経路で解き、元の行の双対からクロスオーバーで最適基底を作る ([`MipLp::solve_from_primal_dual`])
         if env_str!("ENOMOTO_MIP_ROOTLP_PRESOLVE").is_some_and(|v| v.contains('d')) {
             let t1 = Instant::now();
-            if let Some(pi) = self.rootlp_dual_by_lp_path(&cost) {
+            if let Some(pi) = self.rootlp_dual_by_lp_path(&cost, &x) {
                 let t_dual = t1.elapsed().as_secs_f64();
                 let it0 = self.lp.total_iterations();
                 if let Some(st) = self.lp.solve_from_primal_dual(&x, &pi, &SolveLimits { deadline: self.deadline, ..Default::default() }) {
@@ -9356,8 +9356,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 試作 `ENOMOTO_MIP_ROOTLP_PRESOLVE=d`: 根の LP (min c x、行 lo <= a x <= up、列 l <= x <= u) の双対の問題
     /// max Σ lo p - up q + Σ l zl - u zu (s.t. 各列 Σ_i a_ij (p_i - q_i) + zl_j - zu_j = c_j、p・q・zl・zu >= 0。等式の行は自由な π) を
-    /// LP の経路 (前処理つき) で解き、元の行の双対 `π = p - q` (LP の符号) を返す。
-    fn rootlp_dual_by_lp_path(&self, cost: &[f64]) -> Option<Vec<f64>> {
+    /// LP の経路 (前処理つき) で解き、元の行の双対 `π = p - q` (LP の符号) を返す。主の最適解 `x` との相補性で、`x` で等号でない
+    /// 行の `p`・`q` と、`x` で境界にない列の `zl`・`zu` は 0 と決まるので変数から外す (双対の問題が小さくなり、返す双対は `x` と相補的)。
+    fn rootlp_dual_by_lp_path(&self, cost: &[f64], x: &[f64]) -> Option<Vec<f64>> {
+        let near = |v: f64, b: f64| b.is_finite() && (v - b).abs() <= 1e-7 * (1.0 + b.abs());
         use crate::types::{ConstraintRow, LinearExpr, Objective, RowSense, Sense, VarType, VariableData};
         let n = self.p.n;
         let m = self.lp.num_rows();
@@ -9371,6 +9373,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         for i in 0..m {
             let (lo, up) = self.lp.row_bounds(i);
             let row = self.lp.row_ref(i);
+            let act: f64 = row.iter().map(|&(j, a)| a * x[j]).sum();
+            let (lo, up) = (if near(act, lo) { lo } else { f64::NEG_INFINITY }, if near(act, up) { up } else { f64::INFINITY });
             if lo.is_finite() && up.is_finite() && lo == up {
                 let k = vars.len();
                 vars.push(cont(f64::NEG_INFINITY, f64::INFINITY));
@@ -9403,6 +9407,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut cons: Vec<ConstraintRow> = Vec::with_capacity(n);
         for j in 0..n {
             let (l, u) = self.lp.col_bounds(j);
+            let (l, u) = (if near(x[j], l) { l } else { f64::NEG_INFINITY }, if near(x[j], u) { u } else { f64::INFINITY });
             let mut coeffs = std::mem::take(&mut colrows[j]);
             if l.is_finite() {
                 let k = vars.len();
