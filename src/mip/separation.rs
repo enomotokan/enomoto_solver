@@ -4747,6 +4747,50 @@ impl<'a, L: MipLp> Solver<'a, L> {
         viol
     }
 
+    /// 試作 `ENOMOTO_MIP_POOL_SEL` (既定では使わない、analysis/nodespeed_20261123/README.md 5 節): カットプールで LP 解 `x` が破るカットを、
+    /// 本数を固定せずにノードの分離と同じ物差し ([`select_cuts`]: 質が最良の半分以上、平行度の上限、1 ラウンドの上限は
+    /// `ENOMOTO_T_MIP_HCM_NODE_MAX_CUTS`) で選んで LP に加える (SCIP のプールの分離は、効き目の下限とカット選びで絞った違反カットを
+    /// 毎ノード戻す)。呼び出し側は取り出したノードに限らず毎ノード呼ぶ。LP の行が増えすぎていれば先に効いていないカットを外す
+    /// ([`Self::pool_cut_round`] と同じ)。加えたら真
+    pub(super) fn pool_select_round(&mut self, x: &[f64]) -> bool {
+        if self.cut_pool.is_empty() {
+            return false;
+        }
+        let viol = self.pool_violated(x);
+        if viol.is_empty() {
+            return false;
+        }
+        let mut by_key: std::collections::HashMap<(usize, u64), Vec<usize>> = std::collections::HashMap::new();
+        let mut cands = Vec::with_capacity(viol.len());
+        for &(eff, k) in &viol {
+            let (c, r, _) = &self.cut_pool[k];
+            by_key.entry((c.len(), r.to_bits())).or_default().push(k);
+            cands.push(Candidate { coefs: c.clone(), rhs: *r, efficacy: eff, forced: false, src: sepprof::SRC_POOL, sub: 0, kind: 0 });
+        }
+        let chosen = select_cuts(cands, tunable!("ENOMOTO_T_MIP_HCM_NODE_MAX_CUTS", 100usize, usize), self.p);
+        if chosen.is_empty() {
+            return false;
+        }
+        let cap = self.p.m + (2 * self.cut_pool.len()).clamp(100, 2000);
+        if self.lp.num_rows() + chosen.len() > cap {
+            self.remove_inactive_cuts();
+        }
+        self.age_pool();
+        for c in &chosen {
+            if let Some(ks) = by_key.get(&(c.coefs.len(), c.rhs.to_bits())) {
+                if let Some(&k) = ks.iter().find(|&&k| self.cut_pool[k].0 == c.coefs) {
+                    self.pool_age[k] = 0;
+                }
+            }
+        }
+        self.poolsel_stats[0] += 1;
+        self.poolsel_stats[1] += chosen.len() as u64;
+        self.poolsel_stats[2] += viol.len() as u64;
+        let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = chosen.into_iter().map(|c| (c.coefs, f64::NEG_INFINITY, c.rhs)).collect();
+        self.add_cut_rows(&rows);
+        true
+    }
+
     /// カットプールから、LP 解 `x` が違反するカットを効き目の大きい順に最大 `max_cuts` 本 LP に加える
     /// (違反しているので今の LP にはないカット)。LP の行が増えすぎていれば先に効いていないカットを外す。加えたら真。
     pub(super) fn pool_cut_round(&mut self, x: &[f64], max_cuts: usize) -> bool {
