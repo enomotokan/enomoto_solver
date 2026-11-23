@@ -1,0 +1,107 @@
+# 案 C (LTO + PGO、x86_64 は base と v3 の 2 本入り) の release.yml の変更案。まだ .github/workflows には入れていない
+# (親の確認を経てから入れる。analysis/buildopt_20261122/README.md の 8 節)。今の release.yml と違うのは
+# linux・windows・macos の 3 つの job と test の最後の確かめだけ。version・sdist・publish は今のまま (ここでは省く)。
+#
+# どの job も scripts/build_dist_wheel.sh を呼ぶ。台本は 1 つの機械の上で
+#   (1) -Cprofile-generate の wheel を作る → (2) venv に入れて scripts/pgo_train.py を解く (学習)
+#   → (3) llvm-profdata で profile をまとめる → (4) -Cprofile-use で base を作る
+#   → (5) x86_64 なら -Ctarget-cpu=x86-64-v3 も足して v3 を作り、scripts/make_dual_wheel.py で 1 本にする
+# を順に行う。学習は作った wheel を動かすので、その機械で動く対象 (ネイティブ) でしか PGO はできない。
+
+  linux:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64
+            runner: ubuntu-latest
+            image: quay.io/pypa/manylinux_2_28_x86_64
+          - target: aarch64
+            runner: ubuntu-24.04-arm   # arm の機械で直に作る (今はクロス)。これで aarch64 も PGO できる
+            image: quay.io/pypa/manylinux_2_28_aarch64
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.image }}
+    env:
+      PY: /opt/python/cp313-cp313/bin/python
+      # abi3 (Python 3.9 以上)。manylinux_2_28 の確かめと名札付けは maturin が行う
+      MATURIN_ARGS: --features pyo3/abi3-py39 --compatibility manylinux_2_28 -i /opt/python/cp313-cp313/bin/python
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust と maturin
+        run: |
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --component llvm-tools
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          $PY -m pip install maturin
+          echo "$(dirname $PY)" >> "$GITHUB_PATH"
+      - name: wheel (LTO + PGO、x86_64 は dual)
+        run: bash scripts/build_dist_wheel.sh
+      - name: manylinux の確かめ (_core と _core_v3 の両方)
+        run: auditwheel show dist/*.whl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: dist
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash   # Git Bash で台本を動かす (rustc に渡すパスは台本が cygpath で C:/... に直す)
+    env:
+      PY: python
+      MATURIN_ARGS: --features pyo3/abi3-py39
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Rust の llvm-tools と maturin
+        run: |
+          rustup component add llvm-tools
+          python -m pip install maturin
+      - name: wheel (LTO + PGO + dual)
+        run: bash scripts/build_dist_wheel.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-x64
+          path: dist
+
+  macos:
+    strategy:
+      matrix:
+        include:
+          - target: aarch64
+            runner: macos-15          # Apple Silicon。PGO、1 本 (v3 は無い)
+          - target: x86_64
+            runner: macos-15-intel    # Intel の機械で直に作る (今は arm からクロス)。PGO + dual
+    runs-on: ${{ matrix.runner }}
+    env:
+      PY: python
+      MATURIN_ARGS: --features pyo3/abi3-py39
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Rust の llvm-tools と maturin
+        run: |
+          rustup component add llvm-tools
+          python -m pip install maturin
+      - name: wheel
+        run: bash scripts/build_dist_wheel.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}
+          path: dist
+
+  # test は今の形 (各 OS × Python 3.9・3.13・3.14 で tests/test_model.py) に、2 本入りの両方を通す確かめを足す
+  test:
+    # ... (今のまま) ...
+    steps:
+      # ... (今のまま: checkout・setup-python・download-artifact・pip install) ...
+      - shell: bash
+        run: |
+          python -c "import enomoto_solver._core as c; print('cpu v3', c.cpu_x86_64_v3(), 'loaded', c.build_cpu_level())"
+          cd tests
+          ENOMOTO_CORE=auto python -m pytest -q test_model.py
+          ENOMOTO_CORE=base python -c "import enomoto_solver._core as c; assert c.build_cpu_level() == 'base', c.build_cpu_level()"
+          ENOMOTO_CORE=base python -m pytest -q test_model.py
