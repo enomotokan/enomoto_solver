@@ -26,6 +26,11 @@ row = {"problem": p, "tag": tag, "env": extra, "wall": round(time.time() - t0, 1
 m = re.search(r"MIP: root LP (\S+) \((\d+) iters, ([\d.]+)s\)", out)
 if m: row["root_lp"] = [float(m.group(1)), int(m.group(2)), float(m.group(3))]
 row["rounds"] = [float(x) for x in re.findall(r"MIP: cut round \d+: .*?obj (\S+?)[,) ]", out)][:200]
+m = re.search(r"^Presolve: \d+ rows, \d+ columns -> \d+ rows, \d+ columns \(([\d.]+)s\)", out, re.M)
+if m: row["pre_secs"] = float(m.group(1))  # MIP の前処理の秒 (最初の Presolve の行)
+# 列挙の前処理の行 (場所, 行, 解, 固定, 締め付け, 同値な組, 衝突の組, 秒) と ENUM_WHERE=loop の回
+row["enum"] = [[g[0]] + [float(x) for x in g[1:]] for g in re.findall(r"MIP: enumeration presolve \(([a-z ]+)\): (\d+) rows, (\d+) solutions, (\d+) fixed, (\d+) bounds tightened, (\d+) equivalent pairs, (\d+) new conflict pairs.*?\(([\d.]+)s\)", out)]
+row["enum_loop"] = len(re.findall(r"MIP: ENUM_WHERE=loop: round", out))
 m = re.findall(r"^RESULT (.*)$", out, re.M)
 if m: row["result"] = m[-1].split()
 print(json.dumps(row)[:600])
