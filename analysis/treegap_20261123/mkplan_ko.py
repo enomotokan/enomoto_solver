@@ -26,10 +26,11 @@ OURS_KO = {
     "ko_norestart": ["ENOMOTO_MIP_NO_RESTART=1"],
     "rootsb_ilf": ["ENOMOTO_MIP_ROOTSB=ilf"],
 }
-plan = []
-for p in ["30n20b8", "dano3_5"]:
-    c = OPT[p] + 1e-6 * max(1, abs(OPT[p]))
-    for t, a in SCIP_KO.items(): plan.append(["scip", p, 1, t, a + [f"OBJLIMIT={c}"]])
-    for t, a in OURS_KO.items(): plan.append(["ours", p, 1, t, a + [f"ENOMOTO_MIP_CUTOFF={c}"]])
-json.dump(plan, open("plan_ko.json", "w"), indent=0)
-print(len(plan))
+if __name__ == "__main__":
+    plan = []
+    for p in ["30n20b8", "dano3_5"]:
+        c = OPT[p] + 1e-6 * max(1, abs(OPT[p]))
+        for t, a in SCIP_KO.items(): plan.append(["scip", p, 1, t, a + [f"OBJLIMIT={c}"]])
+        for t, a in OURS_KO.items(): plan.append(["ours", p, 1, t, a + [f"ENOMOTO_MIP_CUTOFF={c}"]])
+    json.dump(plan, open("plan_ko.json", "w"), indent=0)
+    print(len(plan))
