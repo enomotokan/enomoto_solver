@@ -763,8 +763,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) rs_removed: std::collections::HashSet<u64>,
     /// 試作 `ENOMOTO_MIP_NODE_ROWSCOPE` の数: [移った回, 外した行, 足し直した行, 行を持つ子の環, 印なしで消えていた道筋の行, 見た道筋の行]
     pub(super) rs_stats: [u64; 6],
-    /// 試作 `ENOMOTO_MIP_POOL_SEL` の数: [ラウンド, 戻したカット, 破られていたカット]
-    pub(super) poolsel_stats: [u64; 3],
+    /// 試作 `ENOMOTO_MIP_POOL_SEL` の数: [ラウンド, 戻したカット, 破られていたカット, (`e`) 伸びた, 伸びなかった, 外したカット]
+    pub(super) poolsel_stats: [u64; 6],
     /// 診断用: 効き目で続けるノードの分離の結果の内訳 (打ち切り、伸び/差が 0.02 未満、0.1 未満、0.3 未満、0.3 以上)
     pub(super) nca_hist: [u64; 5],
     /// ノードで加えたカットの非零の数の指数移動平均 (`ENOMOTO_T_MIP_NODE_CUT_ADAPT_DENSITY`、[`Solver::nca_dense`])。
@@ -2643,7 +2643,7 @@ impl SnapNode {
             Some(w) => super::queue::unpack_changes(w),
             None => self.changes,
         };
-        OpenNode { changes, lower_bound: self.lower_bound, estimate: self.estimate, depth: self.depth, basis: None, basis_epoch: 0, dse: None, branch: self.branch, prot: None, tags: None, sb: None, inh: self.inh, cwm: self.cwm, scope: None }
+        OpenNode { changes, lower_bound: self.lower_bound, estimate: self.estimate, depth: self.depth, basis: None, basis_epoch: 0, dse: None, branch: self.branch, prot: None, tags: None, sb: None, inh: self.inh, cwm: self.cwm, scope: None, nopool: false }
     }
 }
 
@@ -5559,7 +5559,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         ncl_removed_now: false,
         rs_removed: std::collections::HashSet::new(),
         rs_stats: [0; 6],
-        poolsel_stats: [0; 3],
+        poolsel_stats: [0; 6],
         nca_hist: [0; 5],
         tdd: if super::treedepth::on() && !params.submip { Some(Box::default()) } else { None },
         nca_cut_nnz: None,
@@ -6163,6 +6163,11 @@ pub(super) fn ncl_has(c: char) -> bool {
 
 /// 試作 `ENOMOTO_MIP_NODE_ROWSCOPE` (既定では使わない、analysis/nodespeed_20261123/README.md): [`Solver::rowscope_sync`]
 /// 試作 `ENOMOTO_MIP_POOL_SEL` (既定では使わない、analysis/nodespeed_20261123/README.md 5 節): [`Solver::pool_select_round`]
+/// 試作 `ENOMOTO_MIP_POOL_SEL` の文字 (`e`: 戻したカットを目的値の伸びで残すか外すか決める)
+pub(super) fn poolsel_has(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_POOL_SEL").is_some_and(|v| v.contains(c))
+}
+
 pub(super) fn poolsel_on() -> bool {
     env_str!("ENOMOTO_MIP_POOL_SEL").is_some()
 }
@@ -12555,7 +12560,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if let Some(snap) = self.snap.clone() {
             for (k, n) in snap.nodes.iter().enumerate() {
                 let tags = Some(Rc::new(vec![snap.serial << 32 | k as u64]));
-                self.queue.push(OpenNode { changes: n.changes.clone(), lower_bound: n.lower_bound.max(root_obj), estimate: n.estimate, depth: n.depth, basis: None, basis_epoch: 0, dse: None, branch: n.branch, prot: None, tags, sb: None, inh: n.inh.clone(), cwm: None, scope: None });
+                self.queue.push(OpenNode { changes: n.changes.clone(), lower_bound: n.lower_bound.max(root_obj), estimate: n.estimate, depth: n.depth, basis: None, basis_epoch: 0, dse: None, branch: n.branch, prot: None, tags, sb: None, inh: n.inh.clone(), cwm: None, scope: None, nopool: false });
             }
             self.snap_alive = vec![true; snap.nodes.len()];
             first = false;
@@ -12563,7 +12568,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if super::cwm::mode().is_some() && !self.params.submip && self.pool_tid == 0 {
                 super::cwm::reset(self.params.verbose);
             }
-            self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), basis_epoch: self.row_log.len(), dse: if dse_all() { self.lp.dse_snapshot().map(|w| Rc::new(NodeDse::Pairs(w))) } else { None }, branch: None, prot, tags: None, sb: None, inh: None, cwm: None, scope: None });
+            self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), basis_epoch: self.row_log.len(), dse: if dse_all() { self.lp.dse_snapshot().map(|w| Rc::new(NodeDse::Pairs(w))) } else { None }, branch: None, prot, tags: None, sb: None, inh: None, cwm: None, scope: None, nopool: false });
         }
         // 診断用 (`ENOMOTO_MIP_SUBMIP_VERBOSE`): 木の始まり (根の前処理・LP・カット・ヒューリスティクスの終わり) を道筋つきで出す
         // (サブ MIP の時間のうち根の割合を見る。analysis/rens_resume_20261101.md)
@@ -13686,6 +13691,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let mut resolves = 0;
             // 試作 `ENOMOTO_MIP_NODE_ROWSCOPE`: このノードで LP に加えたカットは、この番号以降
             let rs_id0 = self.next_cut_id;
+            // 試作 `ENOMOTO_MIP_POOL_SEL` の `e`: プールから戻したラウンドの前の目的値と、戻したカットの最初の番号 (解き直しで目的値が
+            // 伸びたかを見る)。伸びなかったら真にし、戻したカットを外して、このノードと子ではプールから戻さない
+            let mut pse_pending: Option<(f64, u64)> = None;
+            let mut pse_nopool = false;
             // ノードの分離でカットを加えた後の解き直しか (その LP の時間を `node_cut_secs` に足す)
             let mut node_cut_resolve: Option<Instant> = None;
             let mut nc_res_it = 0u64;
@@ -14143,6 +14152,32 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 xp("m_lpstat");
                 self.node_lp_opt = true;
                 node_obj = self.lp.objective() + self.p.offset;
+                // 試作 `ENOMOTO_MIP_POOL_SEL` の `e`: 直前にプールから戻したなら、目的値が伸びたかを見る (許容誤差は行の活動量の判定と同じ
+                // 相対 1e-6)。伸びなければ戻したカットを外して解き直し (外した後の LP の最適値は戻す前と同じ)、このノードと子では戻さない
+                if let Some((obj0, id0)) = pse_pending.take() {
+                    if node_obj > obj0 + 1e-6 * (1.0 + obj0.abs()) {
+                        self.poolsel_stats[3] += 1;
+                    } else {
+                        self.poolsel_stats[4] += 1;
+                        pse_nopool = true;
+                        self.sync_cut_age();
+                        let m0 = self.p.m;
+                        let mr = self.lp.num_rows();
+                        let mut remove = vec![false; mr];
+                        let mut cnt = 0u64;
+                        for k in 0..self.cut_ids.len().min(mr.saturating_sub(m0)) {
+                            if self.cut_ids[k] >= id0 {
+                                remove[m0 + k] = true;
+                                cnt += 1;
+                            }
+                        }
+                        if cnt > 0 {
+                            self.delete_lp_rows(&remove);
+                            self.poolsel_stats[5] += cnt;
+                            continue;
+                        }
+                    }
+                }
                 rp_obj = node_obj;
                 if resolves == 0 {
                     rp_obj0 = node_obj;
@@ -14775,12 +14810,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 40 問 (同時測定) 1 回目: 既定 10 本 18 問 27.75 に対し 100 本 18 問 26.86、2 回目: 19 問 27.19 に対し 18 問 27.63
                 // (neos-860300 が 58.7 秒 -> 時間切れ、nw04 17.7 -> 36.1 秒 (経路の揺れ)、misc07 11.3 -> 14.5 秒。mik-250・binkar10_1 は
                 // 2 回とも速い)。2 回の合計で解けた数が 37 -> 36 と減るので既定は 10 本のまま
-                } else if resolves < 2 && node.depth > 0 && (plunge_depth == 0 || (self.ncl_removed_now && (ncl_has('a') || rowscope_has('a'))) || poolsel_on()) && env_str!("ENOMOTO_MIP_NO_POOL_CUTS").is_none() && {
+                } else if resolves < 2 && node.depth > 0 && (plunge_depth == 0 || (self.ncl_removed_now && (ncl_has('a') || rowscope_has('a'))) || poolsel_on()) && !(poolsel_has('e') && (node.nopool || pse_nopool)) && env_str!("ENOMOTO_MIP_NO_POOL_CUTS").is_none() && {
                     let r0 = self.lp.num_rows();
                     // 試作 `ENOMOTO_MIP_NODE_CLEANUP` の `a`: このノードへ移るときに行を外したなら、破られたカットを本数の制限なしに戻す
                     let max_cuts = if self.ncl_removed_now && (ncl_has('a') || rowscope_has('a')) { usize::MAX } else { tunable!("ENOMOTO_T_MIP_POOL_CUTS_PER_NODE", 10usize, usize) };
                     // 試作 `ENOMOTO_MIP_POOL_SEL`: 毎ノード、本数を固定せずカット選びの物差しで選んで戻す
+                    let (obj_pre, id_pre) = (node_obj, self.next_cut_id);
                     let added = if poolsel_on() { self.pool_select_round(&x) } else { self.pool_cut_round(&x, max_cuts) };
+                    if added && poolsel_has('e') {
+                        pse_pending = Some((obj_pre, id_pre));
+                    }
                     if added && tree_log() && !self.params.submip {
                         eprintln!("EPOOL d={} rows {} -> {} lp={node_obj}", node.depth, r0, self.lp.num_rows());
                     }
@@ -15224,6 +15263,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     inh: child_inh.clone(),
                     cwm: None,
                     scope: child_scope.clone(),
+                    nopool: pse_nopool,
                 }
             };
             // 試作 `ENOMOTO_MIP_CWM`: 子の札 (対を始めるなら 2 つの子に違う腕)。乱数はスレッドの種とノード番号から
@@ -27750,7 +27790,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 print_basis_nb_diag();
             }
             if poolsel_on() {
-                eprintln!("MIP: pool selection (POOL_SEL): rounds {} cuts added {} violated {}", self.poolsel_stats[0], self.poolsel_stats[1], self.poolsel_stats[2]);
+                eprintln!("MIP: pool selection (POOL_SEL): rounds {} cuts added {} violated {}; e: improved {} not improved {} cuts removed {}", self.poolsel_stats[0], self.poolsel_stats[1], self.poolsel_stats[2], self.poolsel_stats[3], self.poolsel_stats[4], self.poolsel_stats[5]);
             }
             if rowscope_on() {
                 eprintln!("MIP: node row scope (NODE_ROWSCOPE): moves {} rows removed {} re-added {} child links {}; path rows seen {} of which gone without the mark {}", self.rs_stats[0], self.rs_stats[1], self.rs_stats[2], self.rs_stats[3], self.rs_stats[5], self.rs_stats[4]);
