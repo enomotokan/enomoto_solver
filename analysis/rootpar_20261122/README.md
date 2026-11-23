@@ -203,3 +203,4 @@ PROBE_PAR は閉じる (採らない)。試作のコードは既定オフのま�
   回し方はリポジトリの根で pip install -e . の後 `cd analysis/rootpar_20261122/wide && python run.py P K` (K = 0〜5)、集計 `python ci.py 60 def rp res_P_s*.jsonl`。
 - 分担 0 はこの子 (まとめ役)、1〜5 は親が割り当てる。
 - 回したビルド:
+  - P 1: be6ec6e56 (pip install -e .、_core .so 01:10 作成)。58 行・crash 0。分担 1 だけの集計 (`ci.py 60 def rp res_P_s1.jsonl`): 27 問、rp/def 1.008 [0.978, 1.038]、解けた def 24 / rp 24、食い違い 0。1.25 倍超: noswot 種 3 で rp が 4.07 倍遅い (4.2→17.0 秒、21525→25473 ノード)、mc11 種 2 で rp が速い (19.5→13.9 秒、2350→913 ノード)、gt2 種 3 は 0.13→0.20 秒で無視できる。時間切れ 5 件 (両方): 暫定解は rp が良い 2 (neos-1456979 種 3 185 vs 188、ran14x18-disj-8 種 3 3748 vs 3834)・悪い 1 (gen-ip054 種 1 6851.1 vs 6847.3)・同じ 2 (assign1-5-8 種 3、bppc4-08 種 3)。下界は neos-1456979 種 3 で rp が下 (167 vs 171)、ran14x18-disj-8 種 3 で下 (3522.5 vs 3559.4)、gen-ip054 種 1 でわずかに上。
