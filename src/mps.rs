@@ -6,7 +6,10 @@
 //!
 //! 読める形:
 //! - 自由形式 (空白区切り)。固定欄形式も、名前に空白を含まなければそのまま読める
-//!   (MIPLIB・Mittelmann の問題はこの形)。名前に空白を含む固定欄形式は読めない。
+//!   (MIPLIB・Mittelmann の問題はこの形)。自由形式で読めないとき (名前の重複・欄の数の不一致など) だけ、
+//!   データの行を固定欄の桁 (2〜3・5〜12・15〜22・25〜36・40〜47・50〜61 桁) で読み直す
+//!   (名前に空白を含む固定欄形式。Netlib の forplan、analysis/forplan_20261123。HiGHS も自由形式の `HMpsFF` で
+//!   読めなければ固定形式の `HMPSIO` で読み直す)。読み直しでも読めなければ、自由形式のエラーを返す。
 //! - 区切り: `NAME`・`OBJSENSE` (`MAX`/`MIN` を次の行か同じ行に)・`OBJSENSE` の別名
 //!   `OBJSENS`・`ROWS`・`COLUMNS` (`'MARKER'` の `'INTORG'`/`'INTEND'` で整数列)・`RHS`・
 //!   `RANGES`・`BOUNDS` (`UP`/`LO`/`FX`/`FR`/`MI`/`PL`/`BV`/`LI`/`UI`)・`ENDATA`。
@@ -100,8 +103,36 @@ enum RowRef {
     Row(usize),
 }
 
-/// MPS の本文を読む。読めなければ理由を返す。
+/// MPS の本文を読む。読めなければ理由を返す。自由形式で読めなければ固定欄形式で読み直す (モジュールの説明)。
 pub fn parse_mps(text: &str) -> Result<MpsData, String> {
+    match parse_mps_with(text, false) {
+        Ok(d) => Ok(d),
+        Err(e) => parse_mps_with(text, true).map_err(|_| e),
+    }
+}
+
+/// 固定欄形式のデータの行の欄 (1 始まりの桁 2〜3・5〜12・15〜22・25〜36・40〜47・50〜61) を、前後の空白を除いて返す。
+/// 空の欄は落とす (自由形式の空白区切りと同じ並びになる。RHS・RANGES の名前の欄が空なら、自由形式の名前なしと同じ)。
+/// 最後の欄は 61 桁で切らず行の終わりまで取る (数値が長く書かれた行のため)。
+fn fixed_fields(raw: &str) -> Vec<String> {
+    const F: [(usize, usize); 6] = [(1, 3), (4, 12), (14, 22), (24, 36), (39, 47), (49, usize::MAX)];
+    let b = raw.as_bytes();
+    let mut out = Vec::new();
+    for &(a, e) in &F {
+        if a >= b.len() {
+            break;
+        }
+        let e = e.min(b.len());
+        let f = String::from_utf8_lossy(&b[a..e]).trim().to_string();
+        if !f.is_empty() {
+            out.push(f);
+        }
+    }
+    out
+}
+
+/// [`parse_mps`] の本体。`fixed` なら区切りの行でないデータの行を固定欄の桁で読む ([`fixed_fields`])
+fn parse_mps_with(text: &str, fixed: bool) -> Result<MpsData, String> {
     let mut d = MpsData::default();
     let mut sec = Section::None;
     let mut row_kind: Vec<RowKind> = Vec::new();
@@ -125,7 +156,11 @@ pub fn parse_mps(text: &str) -> Result<MpsData, String> {
             continue;
         }
         let starts_at_col0 = !line.starts_with(|c: char| c.is_whitespace());
-        let toks: Vec<&str> = line.split_whitespace().collect();
+        let owned: Vec<String> = if fixed && !starts_at_col0 { fixed_fields(line) } else { Vec::new() };
+        let toks: Vec<&str> = if fixed && !starts_at_col0 { owned.iter().map(|s| s.as_str()).collect() } else { line.split_whitespace().collect() };
+        if toks.is_empty() {
+            continue;
+        }
         if starts_at_col0 {
             let key = toks[0].to_ascii_uppercase();
             let next = match key.as_str() {
@@ -504,6 +539,22 @@ ENDATA
         assert_eq!(d.rows[0], vec![(0, 1.0), (1, 1.0)]);
         assert_eq!(d.rows[2], vec![(1, -1.0), (2, 1.0)]);
         assert_eq!(d.rows[3], vec![(3, 3.0)]);
+    }
+
+    /// 名前に空白を含む固定欄形式 (Netlib の forplan の形、analysis/forplan_20261123): 自由形式では行の名前が重なって読めないので、固定欄の桁で読み直す
+    #[test]
+    fn fixed_format_with_spaces_in_names() {
+        let t = "NAME          FIXSP\nROWS\n N  OB J\n E  DEDO3 1R\n E  DEDO3 2R\n L  CAP A\nCOLUMNS\n    X 1       OB J                1.   DEDO3 1R            1.\n    X 1       CAP A               1.\n    X 2       OB J                2.   DEDO3 2R            1.\n    X 2       CAP A               1.\nRHS\n    RHS       DEDO3 1R            3.   DEDO3 2R            4.\n    RHS       CAP A              10.\nRANGES\n    RNG       CAP A               2.\nBOUNDS\n UP BND       X 1                 5.\nENDATA\n";
+        let d = parse_mps(t).unwrap();
+        assert_eq!(d.row_names, vec!["DEDO3 1R", "DEDO3 2R", "CAP A"]);
+        assert_eq!(d.col_names, vec!["X 1", "X 2"]);
+        assert_eq!(d.cost, vec![1.0, 2.0]);
+        assert_eq!((d.row_lo.clone(), d.row_hi.clone()), (vec![3.0, 4.0, 8.0], vec![3.0, 4.0, 10.0]));
+        assert_eq!(d.rows, vec![vec![(0, 1.0)], vec![(1, 1.0)], vec![(0, 1.0), (1, 1.0)]]);
+        assert_eq!((d.col_lb.clone(), d.col_ub.clone()), (vec![0.0, 0.0], vec![5.0, f64::INFINITY]));
+        // 自由形式で読める本文は固定欄で読み直さない (名前の前後の空白で区切る今までの読み方のまま)
+        let f = "NAME x\nROWS\n N obj\n L c\nCOLUMNS\n a obj 1 c 1\nRHS\n rhs c 2\nENDATA\n";
+        assert_eq!(parse_mps(f).unwrap().row_names, vec!["c"]);
     }
 
     #[test]
