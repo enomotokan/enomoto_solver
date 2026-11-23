@@ -13668,9 +13668,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
                 if !ok {
+                    xp("p_other");
                     if self.dom.conflict.is_some() && env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() {
                         self.add_conflict();
                     }
+                    xp("p_conflict");
                     self.proof_prunes += 1;
                     self.dbg_lost("dual proof", dn && self.dbg_contains());
                     if proof_verify() {
@@ -23010,6 +23012,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 双対証明と衝突制約で今の定義域を調べる: どれかが破れていれば偽 (枝刈り)。そうでなければ整数列の
     /// 境界を締め、締めたら伝播し直す (その結果矛盾すれば偽)。
     pub(super) fn apply_dual_proofs(&mut self) -> bool {
+        // 区間計時 (`ENOMOTO_MIP_XPROF`): 呼ぶ前の時間を切る (木のノードの外 (伝播のやり直し) からも呼ばれる)
+        xp("p_enter");
         if self.dual_proofs.is_empty() {
             return true;
         }
@@ -23028,6 +23032,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.proof_col_index[(a <= 0.0) as usize][j].push((id, a));
                 }
             }
+            crate::simplex::slope_intercept_dual::xcount("c_refresh");
             self.proof_snap = Some((lo, up));
             self.proof_snap_nodes = self.nodes;
             self.proof_snap_limit = self.prune_limit();
@@ -23057,6 +23062,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.proof_touched.clear();
             self.proof_in_touched.clear();
             self.proof_in_touched.resize(npool, false);
+            crate::simplex::slope_intercept_dual::xcount("c_dirty");
             self.proof_dirty = false;
             let (slo, sup) = self.proof_snap.as_ref().unwrap();
             self.proof_val_lo.clone_from(slo);
@@ -23137,6 +23143,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.proof_used(k);
                     self.proof_last_prune = Some(k);
                     self.proof_prune_after_tighten = tightened;
+                    xp("p_scan");
                     return false;
                 }
                 if !full && slack >= self.proof_base[k].2 {
@@ -23194,6 +23201,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.proof_used(k);
                         self.proof_last_prune = Some(k);
                         self.proof_prune_after_tighten = true;
+                        xp("p_scan");
                         return false;
                     }
                 }
@@ -23212,7 +23220,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         xp("p_scan");
         if tightened {
-            return self.dom.propagate(p);
+            let r = self.dom.propagate(p);
+            xp("p_rowprop");
+            return r;
         }
         true
     }
