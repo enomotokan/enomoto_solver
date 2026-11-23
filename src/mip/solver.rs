@@ -23407,6 +23407,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 } else {
                     self.proof_val_lo[j] = new_v;
                 }
+                // 試作 `ENOMOTO_MIP_PROOFPROP` の `s`: 締め付けは反対側の境界 (幅) にもよるので、この側の境界が最小活動量に効かない証明も印を外す
+                if !self.proof_clean.is_empty() {
+                    for &(id, _) in &self.proof_col_index[!upper as usize][j] {
+                        if id >= self.proof_first_id {
+                            if let Some(c) = self.proof_clean.get_mut((id - self.proof_first_id) as usize) {
+                                *c = false;
+                            }
+                        }
+                    }
+                }
                 // この側の境界が最小活動量に効く証明だけをたどる (下限は係数が正、上限は係数が正でないもの)
                 for &(id, a) in &self.proof_col_index[upper as usize][j] {
                     if id < self.proof_first_id {
