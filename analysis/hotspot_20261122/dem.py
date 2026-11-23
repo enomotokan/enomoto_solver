@@ -24,7 +24,9 @@ def name(sym):
     keep = [x for x in ids if x not in skip]
     # Solver<TwoStageLp> の関数は「Solver::関数」にする (型の引数 mip_lp::TwoStageLp が間に入るため)
     if "Solver" in ids and keep:
-        return "Solver::" + keep[-1]
+        # TwoStageLp の後ろ (閉包・入れ子の関数名) があれば残す (例 Solver::path_aggregation::separate)
+        tail = keep[keep.index("TwoStageLp") + 1:] if "TwoStageLp" in keep else keep[-1:]
+        return "Solver::" + "::".join(tail[-2:] or keep[-1:])
     return "::".join(keep[-3:]) if keep else sym[:60]
 
 
