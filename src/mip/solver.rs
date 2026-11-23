@@ -10471,6 +10471,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         } else {
             root_iters
         };
+        // 試作 `ENOMOTO_MIP_P2RIT=a` (既定では使わない。analysis/presym_20261123): 根のヒューリスティクスの予算 (Feasibility Pump の
+        // `1000 + 5 × 根の LP の反復`、ダイビングの `2 × 根の LP の反復 + 1000` など) も、上の物差し (前処理の LP の最初の LP の反復) で決める。
+        // `P2RIT` (値なし) は `self.root_lp_iters` だけを変え、この局所の `root_iters` は温め直した根の LP の反復のままだった
+        // (CMS750_4 の 1 スレッド: 根の LP が前処理の LP の基底から 1 反復で終わり、FP の LP が予算約 1000 反復で 2 回目に打ち切られていた)
+        let root_iters = if env_str!("ENOMOTO_MIP_P2RIT").is_some_and(|v| v.contains('a')) { self.root_lp_iters } else { root_iters };
         self.root_lp_secs = t_root_lp.elapsed().as_secs_f64();
         self.root_lp_ticks = crate::ticks::total() - tk_root_lp;
         if !self.params.submip {
@@ -24540,6 +24545,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
         (self.incumbent.is_none() && self.ref_sol.is_none())
             || (self.inc_only_fj && env_str!("ENOMOTO_MIP_FJ2_KEEP_NOINC").is_some())
             || (self.fj_poor() && env_str!("ENOMOTO_MIP_FJ_POOR_NOINC").is_some_and(|v| v != "rens"))
+            || self.poor_any()
+    }
+
+    /// 試作 `ENOMOTO_MIP_POOR_NOINC=1` (既定では使わない。analysis/presym_20261123): 根で、暫定解が誰のものでも、その目的値が根の LP の値から
+    /// [`Self::fj_poor`] と同じ基準 (相対ギャップが `ENOMOTO_T_MIP_FJ_POOR_GAP`、既定 0.5 を超える) で離れていれば、暫定解なし用の
+    /// ヒューリスティクス (Feasibility Pump・ダイビングなど、[`Self::noinc_like`]) を回す。`fj_poor` は FJ の解だけを見るので、根の丸め
+    /// (shifting) が FJ の解を少し良くすると止まる (CMS750_4 の 1 スレッド: FJ 767 → shifting 604、根の LP 250 で、FP もダイビングも回らず
+    /// 600 秒で 525 止まり。SCIP は FP で 278 を出す)
+    pub(super) fn poor_any(&self) -> bool {
+        if env_str!("ENOMOTO_MIP_POOR_NOINC").is_none_or(|v| v == "0") || self.nodes > 1 || self.params.submip || !self.fj_poor_lb.is_finite() {
+            return false;
+        }
+        let Some((z, _)) = self.incumbent.as_ref() else { return false };
+        let lb = self.fj_poor_lb;
+        (z - lb) / z.abs().max(lb.abs()).max(1.0) > tunable!("ENOMOTO_T_MIP_FJ_POOR_GAP", 0.5, f64)
     }
 
     /// `ENOMOTO_MIP_FJ_POOR_NOINC` (試作): 根で、暫定解が Feasibility Jump のものだけで、その目的値が根の LP の値から大きく

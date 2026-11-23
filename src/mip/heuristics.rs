@@ -1167,6 +1167,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let st = self.lp.solve_primal(&SolveLimits { iteration_limit: lim, cutoff: f64::INFINITY, deadline: self.deadline });
             self.heur_iters += self.lp.total_iterations() - it0;
             if st != LpStatus::Optimal || self.lp.total_iterations() == it0 {
+                if env_str!("ENOMOTO_MIP_FP_STATS").is_some() && self.params.verbose {
+                    eprintln!("MIP: FP_STATS: LP stop at pass {_pass}: status {st:?}, {} iterations (limit {lim})", self.lp.total_iterations() - it0);
+                }
                 end = 10;
                 break;
             }
@@ -1189,7 +1192,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
             None => fj_search(self.p, &self.dom.lo, &self.dom.up, effort, time_cap, seed, None),
         };
         match found {
-            Some(x) => self.try_incumbent(x),
+            Some(x) => {
+                // 試作 `ENOMOTO_MIP_FJSYNC_LABEL=1` (既定では使わない。analysis/presym_20261123): 主のスレッドで同期して回した FJ (1 スレッドの道) の解にも、
+                // FJ のスレッドの解と同じ名札を付ける。名札がないと「FJ の解だけ」(`inc_only_fj`) にならず、質の悪い FJ の解でも
+                // 暫定解なし用のヒューリスティクス (`ENOMOTO_MIP_FJ_POOR_NOINC` など) が働かない (CMS750_4 の 1 スレッドは FJ の 767 から 600 秒動けなかった)
+                let label = env_str!("ENOMOTO_MIP_FJSYNC_LABEL").is_some_and(|v| v != "0");
+                if label {
+                    self.heur_label = "feasibility jump";
+                }
+                let r = self.try_incumbent(x);
+                if label {
+                    self.heur_label = "";
+                }
+                r
+            }
             None => false,
         }
     }

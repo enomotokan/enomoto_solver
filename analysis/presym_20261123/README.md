@@ -45,3 +45,29 @@ SCIP の部品を 1 つずつ切って調べる。
 ## 5. 次
 
 - 5 問とも「前処理・対称性」の型ではなかった。根の後の差の 3 型 (分枝・木、解探し、ノードの速さ) を順に切り分ける。
+
+## 6. CMS750_4 の 1 スレッドの解探し (事実と試作、2026-11-23)
+
+- SCIP (1 スレッド、300 秒): 38.0 秒・652 ノードで最適値 252。解の出どころは 1 つではなく、根の locks 746 → Feasibility Pump 278 (4.7 秒) → 目的つきのダイビング・
+  ALNS・Crossover で少しずつ良くし、zirounding が 252 (38 秒)。
+- 当方 (1 スレッド、200 秒): 主のスレッドの FJ (同期) が 767 (0.02 秒)、根の shifting が 604 (7.5 秒)、その後は 7500 ノード目の tree mutation まで動かず 525 で時間切れ
+  (4 スレッドは Local-MIP などの並列の解探しで 245 秒で解ける)。根で Feasibility Pump とダイビングが回っていない。
+- 原因の連なり (ログで確かめた):
+  1. 根の FP・ダイビングは「暫定解なし」(`noinc_like`) のときだけ回る。質の悪い FJ の解を「なし」とみなす既存の試作 `ENOMOTO_MIP_FJ_POOR_NOINC` は、
+     FJ のスレッドの解だけを見る (`inc_only_fj`)。1 スレッドの同期の FJ の解には名札がなく「[tree]」で入るので働かない。
+     名札を付けても、根の shifting が 767 → 604 と少し良くした時点で「FJ の解だけ」でなくなる。
+  2. FP・ダイビングの予算は「根の LP の反復」に比例するが、根の LP は前処理の LP プロービングの基底から 1 反復で終わる (プロービングの側は 3857 反復)。
+     FP の LP が約 1000 反復の予算で 2 回目に打ち切られていた (`FP_STATS: LP stop at pass 1: status IterationLimit`)。既存の試作 `ENOMOTO_MIP_P2RIT` は
+     `self.root_lp_iters` だけを変え、FP・ダイビングに渡す局所の `root_iters` は 1 のままだった。
+  3. 予算を足しても、当方の FP は 179 回の丸めのすべてで「整数列は全部固定できたが、連続列の LP が実行不能」(FP_STATS の fixed_not_found) で解を出さない。
+     SCIP の FP は丸めた点の周りをサブ MIP で直す段 (stage 3) を持つ。当方の FP にはこれがない。
+- 試作 (どれも既定オフ):
+  - `ENOMOTO_MIP_FJSYNC_LABEL=1` (heuristics.rs の feasibility_jump): 同期の FJ の解にも「feasibility jump」の名札を付ける。
+  - `ENOMOTO_MIP_POOR_NOINC=1` (solver.rs の `poor_any`): 根で、暫定解が誰のものでも、根の LP との相対ギャップが既存の基準 (`ENOMOTO_T_MIP_FJ_POOR_GAP` = 0.5) を
+    超えていれば、暫定解なし用のヒューリスティクス (FP・ダイビングなど) を回す。新しい閾値は足していない。
+  - `ENOMOTO_MIP_P2RIT=a` (solver.rs): FP・ダイビングの予算の物差しも前処理の LP の最初の LP の反復にする。
+  - 診断: `ENOMOTO_MIP_FP_STATS` のとき、FP の LP が最適で終わらなかった回の状態と反復を出す。
+- CMS750_4 (1 スレッド、200 秒、種 1) の結果: どの組でも時間切れ。暫定解は既定 525、POOR_NOINC 575、P2RIT=a + POOR_NOINC 576、
+  RHBUDGET=0 + P2RIT=a + POOR_NOINC 509 (どれも木の中の LNS による)。FP は回るようになったが、3. の理由で解を出さない。**まだ効いていない**。
+- cargo test (3 つとも有効にして): 421 通過・0 失敗。
+- 次の候補: FP に丸めた点の周りのサブ MIP の段 (SCIP の stage 3、連続列を自由にして整数列を丸めた値の近くに絞る) を足す。
