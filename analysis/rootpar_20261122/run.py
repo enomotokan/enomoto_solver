@@ -15,8 +15,8 @@ D = Path(__file__).resolve().parent
 WT = D.parents[1]
 PLAN = json.loads((D / sys.argv[1]).read_text())
 OUT = D / (sys.argv[2] if len(sys.argv) > 2 else "res.jsonl")
-# 計画の項目の 4 つ目 (省略可) は設定の名前。def は既定 (環境変数なし)、sp は試作 ENOMOTO_MIP_SEP_PARALLEL (分離の並列)、rp は試作 ENOMOTO_MIP_RINS_PAR (根の RINS を並列にして木へ)
-CFGS = {"def": {}, "sp": {"ENOMOTO_MIP_SEP_PARALLEL": "1"}, "rp": {"ENOMOTO_MIP_RINS_PAR": "1"}}
+# 計画の項目の 4 つ目 (省略可) は設定の名前。def は既定 (環境変数なし)、sp は試作 ENOMOTO_MIP_SEP_PARALLEL (分離の並列)、rp は試作 ENOMOTO_MIP_RINS_PAR (根の RINS を並列にして木へ)、pp は試作 ENOMOTO_MIP_PROBE_PAR (含意を使うプロービングも窓で並べる)
+CFGS = {"def": {}, "sp": {"ENOMOTO_MIP_SEP_PARALLEL": "1"}, "rp": {"ENOMOTO_MIP_RINS_PAR": "1"}, "pp": {"ENOMOTO_MIP_PROBE_PAR": "1"}}
 TL = 120
 TICK = os.sysconf("SC_CLK_TCK")
 M_RESTART = re.compile(r"^MIP: restart \d+ \(")

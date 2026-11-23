@@ -7847,7 +7847,12 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     // 逐次に試す。今の定義域が窓を作った時点から変わっていなければ (固定・締め付けがなければ) 結果をそのまま使い、変わっていれば
     // 次の候補から窓を作り直す。窓・塊の大きさはスレッドの数によらず決まるので、結果はスレッドの数・順序によらない
     let par_threads = PREPAR_THREADS.with(|t| t.get());
-    let par = prepar_has('p') && !submip && !want_strengthen && !want_pclique && par_threads >= 1 && !solver::in_submip_thread();
+    // 試作 `ENOMOTO_MIP_PROBE_PAR` (analysis/rootpar_20261122 の 3 節、既定では使わない): 含意を伝播に使う形 (`want_pclique`、`ENOMOTO_MIP_CLQPRB` の
+    // やり直しなど) でも窓を使う。窓の塊は窓を作った時点の定義域 (含意の表を含む) の写しで試すので、同じ窓の前の候補が足した含意は使わない
+    // (逐次より弱いが、含意はどれも大域的に成り立つので正しい)。窓・塊の大きさは数えた量だけで決まるので、結果はスレッドの数・順序によらない。
+    // 1 スレッドの動きは変えない (2 スレッド以上のときだけ)。`ENOMOTO_MIP_PRB_TABLE` の `a` (`prbt`) とは使わない
+    let probe_par = env_str!("ENOMOTO_MIP_PROBE_PAR").is_some() && par_threads > 1 && !prbt;
+    let par = prepar_has('p') && !submip && !want_strengthen && (!want_pclique || probe_par) && par_threads >= 1 && !solver::in_submip_thread();
     let pool = par.then(|| rayon::ThreadPoolBuilder::new().num_threads(par_threads).build().ok()).flatten();
     let par_blocks = tunable!("ENOMOTO_T_MIP_PREPAR_BLOCKS", 4usize, usize).max(1);
     let (bsz_min, bsz_max) = (2usize, tunable!("ENOMOTO_T_MIP_PREPAR_BSZ_MAX", 32usize, usize).max(2));
@@ -8063,10 +8068,20 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
                     // `ENOMOTO_MIP_PREPAR` の `p`: 塊のスレッドで集計した分をそのまま足す (定義域は窓の時点と同じ)
                     let dv = derived.take().unwrap();
                     if want_impl {
+                        // `ENOMOTO_MIP_PROBE_PAR`: 逐次の道と同じく、上限に近づいたら重複を除いて詰め、足した含意を伝播に使う
+                        if clqprb && want_pclique && edges.len() + dv.edges.len() >= edge_cap && edges.len() >= compact_at {
+                            edges.sort_unstable();
+                            edges.dedup();
+                            compact_at = edges.len() + edge_cap / 8;
+                        }
+                        let e0 = edges.len();
                         for e in dv.edges {
                             if edges.len() < edge_cap {
                                 edges.push(e);
                             }
+                        }
+                        if want_pclique {
+                            dom.add_implications(n, &edges[e0..]);
                         }
                         if want_implied {
                             for t in dv.implied {
