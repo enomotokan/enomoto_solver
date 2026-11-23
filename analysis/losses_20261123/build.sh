@@ -13,8 +13,14 @@
 set -e
 D=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$D/../.." && pwd)
 PY=${PYTHON:-python}
-COMMIT=$(git -C "$REPO" rev-parse --short HEAD)
-WT=$(mktemp -d)/src
+COMMIT=${COMMIT:-$(git -C "$REPO" rev-parse --short HEAD)}  # COMMIT=… で作るコミットを選べる (既定 HEAD)
+# 作業木と学習結果は固定の場所に置く (2026-11-23 の直し): 場所や -Cprofile-use のパスが RUSTFLAGS・-C metadata に入り、学習の版と計測の版で
+# 食い違うのを避ける。前の版は mktemp の毎回違う場所に作業木を作り、学習用を x86-64-v3 なしで作っていたので、計測の版の作り直しで
+# 当方のクレートの関数 1281 個の学習結果が「hash mismatch」で捨てられていた (README 3 節)
+B=/tmp/enomoto_losses_build
+WT=$B/src
+git -C "$REPO" worktree remove --force "$WT" >/dev/null 2>&1 || true
+rm -rf "$WT"; mkdir -p "$B"
 git -C "$REPO" worktree add --detach "$WT" "$COMMIT" >/dev/null 2>&1
 trap 'git -C "$REPO" worktree remove --force "$WT" >/dev/null 2>&1 || true' EXIT
 TRAIN=neos17,binkar10_1,eil33-2,neos-827175,nu25-pr12,dcmulti,qiu,rout,mas76,neos-911970
@@ -22,14 +28,15 @@ LTO="CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1"
 PD=$(ls ~/.rustup/toolchains/*/lib/rustlib/*/bin/llvm-profdata 2>/dev/null | head -n 1)
 build() {  # $1 = 名前 (target の場所), $2 = RUSTFLAGS
   T="$D/target/$1"; rm -rf "$T/wheels"
-  (cd "$WT" && env $LTO CARGO_TARGET_DIR="$T" RUSTFLAGS="$2" maturin build --release 2>&1 | grep -E "^error|Built wheel" >&2 || true)
+  (cd "$WT" && env $LTO CARGO_TARGET_DIR="$T" RUSTFLAGS="$2" maturin build --release > "$T.log" 2>&1 || true; grep -E "^error|Built wheel" "$T.log" >&2 || true)
   ls -t "$T"/wheels/enomoto_solver-*.whl | head -n 1
 }
 if [ -z "$PROF" ]; then
   [ -n "$PD" ] || { echo "llvm-profdata がない: rustup component add llvm-tools"; exit 1; }
   echo "== 1. 学習用 (pgogen) を作る ($COMMIT)"
   rm -rf "$D/pgo/raw"; mkdir -p "$D/pgo/raw"
-  W=$(build pgogen "-Cprofile-generate=$D/pgo/raw")
+  # 学習用も計測用と同じ target-cpu で作る (違うと関数の形が変わり、学習結果が当たらない)
+  W=$(build pgogen "-C target-cpu=x86-64-v3 -Cprofile-generate=$D/pgo/raw")
   G="$D/target/pgogen_py"; rm -rf "$G"; mkdir -p "$G/enomoto_solver"
   cp "$WT"/python/enomoto_solver/*.py "$G/enomoto_solver/"
   $PY -c "import zipfile,sys;z=zipfile.ZipFile(sys.argv[1]);[open(sys.argv[2]+'/'+n.split('/')[-1],'wb').write(z.read(n)) for n in z.namelist() if n.endswith(('.so','.pyd'))]" "$W" "$G/enomoto_solver"
@@ -43,13 +50,16 @@ if [ -z "$PROF" ]; then
   PROF="$D/pgo/merged.profdata"
 fi
 PROF=$(cd "$(dirname "$PROF")" && pwd)/$(basename "$PROF")
-case $PROF in *.gz) mkdir -p "$D/target"; gzip -dc "$PROF" > "$D/target/merged.profdata"; PROF="$D/target/merged.profdata" ;; esac
+case $PROF in *.gz) gzip -dc "$PROF" > "$B/merged.profdata" ;; *) cp "$PROF" "$B/merged.profdata" ;; esac
+PROF=$B/merged.profdata
 echo "== 3. pgo_v3 を作る (学習結果 $PROF)"
 W=$(build pgo_v3 "-C target-cpu=x86-64-v3 -Cprofile-use=$PROF")
 mkdir -p "$D/dist"; rm -f "$D"/dist/*.whl; cp "$W" "$D/dist/"
 WD="$D/dist/$(basename "$W")"
+MISMATCH=$(grep -c "hash mismatch" "$D/target/pgo_v3.log" || true)
 SO_SHA=$($PY -c "import zipfile,hashlib,sys;z=zipfile.ZipFile(sys.argv[1]);print([hashlib.sha1(z.read(n)).hexdigest() for n in z.namelist() if n.endswith(('.so','.pyd'))][0])" "$WD")
 { echo "commit $COMMIT"; echo "rustc $(rustc --version)"; echo "maturin $(maturin --version)"; echo "profdata $PROF sha1 $(sha1sum "$PROF" | cut -c1-40)"
-  echo "env LTO=fat CGU=1 RUSTFLAGS=-C target-cpu=x86-64-v3 -Cprofile-use"; echo "wheel $(basename "$WD") sha1 $(sha1sum "$WD" | cut -c1-40)"; echo "so_sha1 $SO_SHA"; } > "$D/dist/build.txt"
+  echo "env LTO=fat CGU=1 RUSTFLAGS=-C target-cpu=x86-64-v3 -Cprofile-use"; echo "wheel $(basename "$WD") sha1 $(sha1sum "$WD" | cut -c1-40)"; echo "so_sha1 $SO_SHA"
+  echo "pgo_hash_mismatch $MISMATCH (学習結果を捨てた関数の数。0 に近いはず)"; } > "$D/dist/build.txt"
 cat "$D/dist/build.txt"
 echo "入れ方: pip install --force-reinstall --no-deps $WD"

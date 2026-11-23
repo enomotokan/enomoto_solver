@@ -201,6 +201,8 @@ Unlike HiGHS:
 - Coefficients are read exactly as written: entries with absolute value at most 1e-9 are not dropped.
 - A negative `UP` bound on a column whose lower bound is not written sets the lower bound to `-inf` (the convention of many readers; HiGHS keeps it at 0).
 
+A file with no readable data (empty, only comments, or only `NAME`) raises `ValueError`; it is not read as a problem with no variables.
+
 Not supported (raise `ValueError`): quadratic terms (`QUADOBJ`, `QSECTION`, `QMATRIX`, `QCMATRIX`), `SOS`, `INDICATORS`, `GENCONS`, `PWLOBJ`, and semi-continuous / semi-integer bounds (`SC`, `SI`).
 
 ### Number of threads (`threads`)

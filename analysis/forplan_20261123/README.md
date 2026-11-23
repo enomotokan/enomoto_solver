@@ -35,3 +35,15 @@
 - Netlib 93 問 (`check/netlib.csv`・`netlib.out`、`python -m enomoto_solver.benchmark_highs`): 93 / 93 で最適、目的値は全部 HiGHS と一致。
   forplan は 0.012 秒で −664.2189612722 (HiGHS −664.2189612722054)。ほかの 92 問は状態が同じで、13 問は目的値が最後の 1〜2 桁 (相対 1e-15 程度) だけ
   前回 (analysis/proofcost_20261123/adopt/netlib.csv) と違う。読みの指紋は同じなので、読み込みの変更ではなく求解側の揺れ。
+
+## 3. 読めるデータが無いファイルをエラーにした (2026-11-23、利用者の依頼)
+
+- 事象: 空のファイル (注釈と空行だけ・`NAME` だけも同じ) を `readModel` に渡すと、エラーにならず変数 0 個の問題として読まれ、`solve` が
+  「最適、目的値 0」を返していた。
+- 直し (`src/mps.rs` の `parse_mps_with`): 読み終えたときに `ROWS` の節が一度も現れていない、または目的の行・制約の行・列がどれも 1 つも無ければ
+  `no MPS data found (the file is empty or has no ROWS section)` を返す。`ENDATA` が無いだけのファイルは、そこまでに `ROWS` と中身を読めているので
+  今までどおり読める。
+- 単体テスト `mps::tests::rejects_files_without_rows` (空・改行だけ・注釈だけ・`NAME` だけ・`NAME` + `ENDATA` はエラー、`ENDATA` の無い普通のファイルは読める)。
+  cargo test --release --lib 421 通過・0 失敗。
+- 読みの結果の比べ: `.miplib_cache` 203 本と Netlib 93 本の計 296 本で、2 節の直しの後 (`check/read_new.jsonl`) と今回 (`check/read_new2.jsonl`) の指紋が全部同じ。
+- README.md・README.ja.md の `readModel` の節に「読めるデータが無いファイルは `ValueError`」を足した。
