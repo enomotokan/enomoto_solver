@@ -254,6 +254,14 @@ fn aggrsel() -> bool {
     env_str!("ENOMOTO_MIP_AGGRSEL").is_some()
 }
 
+/// 試作 `ENOMOTO_MIP_SCIPAGG` (既定では使わない。analysis/cutgap_20261123 の 3 節): HiGHS の経路集約の移植 ([`Solver::path_aggregation_highs`]) を
+/// SCIP の sepa_aggregation の止め方・選び方にする。(1) 段の上限 (6) を外し、消せる連続変数 (境界から離れたもの) が無くなるか相手の行が無くなるまで足す
+/// (行は 1 本 1 度)。(2) 始点の行と相手の行を SCIP の行の点数 (`ENOMOTO_MIP_AGGRSEL` の点数に密度・すき間の項を足したもの) で選ぶ。(3) 境界から最も遠い
+/// 連続変数を消す行が無ければ次に遠いものを試す。istanbul-no-cutoff では SCIP の段の上限 0・1・6 で根が 85.7・114.9・136.6 と伸びる
+fn scipagg_on() -> bool {
+    env_str!("ENOMOTO_MIP_SCIPAGG").is_some()
+}
+
 fn gen_top3() -> bool {
     env_str!("ENOMOTO_MIP_GEN_TOP3").is_none_or(|v| v != "0")
 }
@@ -2812,6 +2820,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if super::sepalloc::active() && !self.params.submip && job.is_none() {
                 super::sepalloc::begin_round(&self.sl.st[0], self.lp.objective() + p.offset, self.params.verbose);
+            }
+            // 試作 `ENOMOTO_MIP_HEUR1T` の `r` ([`super::solver::heur1t`]): ラウンドの初めの LP の被約費用を lurking bound としてためる
+            if super::solver::heur1t('r') && !self.params.submip && job.is_none() && self.snap.is_none() {
+                self.heur1t_collect_lurking();
             }
             // 診断 (`ENOMOTO_MIP_CUTSTOP_LOG`、analysis/sepalloc_20261121/): ラウンドの初めの LP の値とループの手間 (同じ手間での伸びの比べ用)
             if !self.params.submip && job.is_none() && env_str!("ENOMOTO_MIP_CUTSTOP_LOG").is_some_and(|v| v != "0") {
@@ -5538,7 +5550,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
     where
         F: FnMut(Option<RawCut>, &mut Vec<Candidate>, &Solver<L>),
     {
-        const MAX_PATH_LEN: usize = 6;
+        // 試作 `ENOMOTO_MIP_SCIPAGG` ([`scipagg_on`]、既定では使わない): SCIP の sepa_aggregation の止め方にする (段の上限 6 を外す ほか、下の各所)
+        let scipagg = scipagg_on();
+        let max_path_len: usize = if scipagg { usize::MAX } else { 6 };
         let n = self.p.n;
         let m = lp_rows.len();
         let feastol = PATHH_FEASTOL;
@@ -5548,7 +5562,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 使えるものでなく、SCIP の sepa_aggregation.c の行の点数 (|双対値| × 分数の活動量 / 行のノルム) が最も高いものにする。
         // 分数の活動量 = Σ |a_ij| × min(f_j, 1 − f_j) (整数列)、連続列は効いている変数上界・下界の相手の整数列の分数 × 係数 (SCIP と同じ)。
         // SCIP の点数の密度・すき間の小さな項 (densityscore 1e-4・slackscore 1e-3) は入れない (新しい閾値を置かない)。同点は行の番号の小さい方
-        let rscore: Option<Vec<f64>> = aggrsel().then(|| {
+        // `ENOMOTO_MIP_SCIPAGG` でも同じ点数を使い、SCIP の点数の密度の項 (densityscore 1e-4 × (1 − 行の非零 / 列の数)) と
+        // すき間の項 (slackscore 1e-3 × max(1 − 正規化したすき間, 0)) も足す (SCIP の重みのまま。双対の項は SCIP と同じく 1e-6 を下限にする)
+        let rscore: Option<Vec<f64>> = (aggrsel() || scipagg).then(|| {
             let duals = self.lp.row_duals();
             let frac = |v: f64| {
                 let f = v - v.floor();
@@ -5578,7 +5594,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             (0..m)
                 .map(|i| {
                     let (fa, nr) = lp_rows[i].iter().fold((0.0, 0.0), |(fa, nr), &(j, a)| (fa + (a * fj[j]).abs(), nr + a * a));
-                    duals.get(i).map_or(0.0, |d| d.abs()) * fa / nr.sqrt().max(0.1)
+                    let base = duals.get(i).map_or(0.0, |d| d.abs()) * fa / nr.sqrt().max(0.1);
+                    if !scipagg {
+                        return base;
+                    }
+                    let (l, u, r) = (vars.lo[n + i], vars.up[n + i], vars.x[n + i]);
+                    let slack = (if l.is_finite() { r - l } else { f64::INFINITY }).min(if u.is_finite() { u - r } else { f64::INFINITY }).max(0.0) / nr.sqrt().max(1e-9);
+                    base.max(1e-6) + 1e-4 * (1.0 - lp_rows[i].len() as f64 / n.max(1) as f64) + 1e-3 * (1.0 - slack).max(0.0)
                 })
                 .collect()
         });
@@ -5636,8 +5658,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 pd[0], pd[1], pd[2], pd[3], pd[4], pd[5], pd[6], pd[7], pd[8], pd[9]
             );
         };
-        for start in 0..m {
-            if start % 64 == 0 && self.time_up() {
+        // `ENOMOTO_MIP_SCIPAGG`: 始点の行を点数の高い順に試す (SCIP と同じ。同点は行の番号の小さい方)
+        let order: Vec<usize> = match (scipagg, rscore.as_ref()) {
+            (true, Some(rs)) => {
+                let mut o: Vec<usize> = (0..m).collect();
+                o.sort_by(|&a, &b| rs[b].total_cmp(&rs[a]).then(a.cmp(&b)));
+                o
+            }
+            _ => (0..m).collect(),
+        };
+        for (si, &start) in order.iter().enumerate() {
+            if si % 64 == 0 && self.time_up() {
                 if pdiag {
                     pd_out(&pd, m);
                 }
@@ -5661,9 +5692,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let mut try_neg = false;
                 let mut success = false;
                 let mut guard = 0;
-                while path.len() < MAX_PATH_LEN {
+                while path.len() < max_path_len {
                     guard += 1;
-                    if guard > 50 {
+                    // `ENOMOTO_MIP_SCIPAGG`: 行は 1 本 1 度しか足さないので、段は行の数で止まる (代入の分を足した安全網)
+                    if guard > if scipagg { m + 50 } else { 50 } {
                         break;
                     }
                     let in_path = |r: usize, path: &Vec<usize>| path.contains(&r);
@@ -5778,7 +5810,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         if !snapshot.iter().any(|&(j, _)| cont[j]) {
                             pd[7] += 1;
                         }
-                    } else if path.len() + 1 >= MAX_PATH_LEN {
+                    } else if path.len() + 1 >= max_path_len {
                         pd[6] += 1;
                     }
                     if success || (best_out.is_none() && best_in.is_none()) {
@@ -5811,11 +5843,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                         None
                     };
-                    let pick = match (best_out, best_in) {
+                    let mut pick = match (best_out, best_in) {
                         (Some(o), i) if i.is_none_or(|i| o.2 >= i.2 - feastol) => find_row(o.0, o.1, &in_arcs[o.0], self, &path).or_else(|| i.and_then(|i| find_row(i.0, i.1, &out_arcs[i.0], self, &path))),
                         (_, Some(i)) => find_row(i.0, i.1, &out_arcs[i.0], self, &path),
                         _ => None,
                     };
+                    // `ENOMOTO_MIP_SCIPAGG`: 境界から最も遠い連続変数を消す行がなければ、次に遠いものを順に試す (SCIP の aggregateNextRow と同じ)
+                    if scipagg && pick.is_none() {
+                        let mut cs: Vec<(f64, usize, f64)> = snapshot.iter().filter(|&&(j, _)| cont[j] && subst[j].is_none()).map(|&(j, v)| (bound_dist(j), j, v)).filter(|t| t.0 > 0.0).collect();
+                        cs.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+                        for &(_, j, v) in &cs {
+                            let arcs = if v < 0.0 { &in_arcs[j] } else { &out_arcs[j] };
+                            if let Some(rw) = find_row(j, v, arcs, self, &path) {
+                                pick = Some(rw);
+                                break;
+                            }
+                        }
+                    }
                     let Some((r, w)) = pick else {
                         pd[5] += 1;
                         break;

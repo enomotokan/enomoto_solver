@@ -5846,15 +5846,29 @@ fn substitute_probe_equiv(prob: &MipProblem, mut postsolve: Vec<crate::presolve:
 /// 前処理は列の番号を保ち、整数最適化では列の尺度をかけない (d = 1) ので、後処理は内側の手順の後に外側の手順を並べればよい
 fn represolve_after_probe(prob: MipProblem, mut postsolve: Vec<crate::presolve::PostsolveStep>, scaling: crate::presolve::scaling::Scaling, verbose: bool, submip: bool, depth: u32) -> Option<Presolved> {
     // 試作 `ENOMOTO_MIP_PRB_TABLE` の `b` ([`prb_table`]): かけ直しを `ENOMOTO_T_MIP_PRB_TABLE_ROUNDS` (8) 回まで、行の減り方によらず使う
-    let max = if prb_table('b') { tunable!("ENOMOTO_T_MIP_PRB_TABLE_ROUNDS", 8u32, u32) } else { tunable!("ENOMOTO_T_MIP_PROBE_REPRESOLVE_MAX", 2u32, u32) };
+    // 試作 `ENOMOTO_MIP_PRR_TIGHT` (既定では使わない。analysis/cutgap_20261123 の 3 節): 固定が 0 本でも、プロービングが境界を締めたらかけ直し、
+    // 締めた境界で前処理 (係数の強化) をかけて、またプロービングする、を繰り返す (SCIP は probing と linear の前処理を交互に回す。istanbul-no-cutoff
+    // では 13 周で境界の変更 14294 本・係数の締め 47989)。回数の上限・行の減り方の判定は使わず、SCIP の前処理の打ち切り (`presolving/abortfac` 0.0008:
+    // 1 周の変更が列の数のその割合より少なければやめる) と同じ形で、その周のプロービングの固定と締め付けが列の数の 0.0008 倍に届かなければやめる
+    let tight = env_str!("ENOMOTO_MIP_PRR_TIGHT").is_some() && !submip && !PRESOLVE_IN_SUBMIP.with(|f| f.get());
+    let max = if tight { u32::MAX } else if prb_table('b') { tunable!("ENOMOTO_T_MIP_PRB_TABLE_ROUNDS", 8u32, u32) } else { tunable!("ENOMOTO_T_MIP_PROBE_REPRESOLVE_MAX", 2u32, u32) };
     if !prr_active(submip) || depth >= max {
         return Some(Presolved::Reduced { prob, postsolve, scaling });
+    }
+    if tight {
+        let (gf, gt, _) = PROBE_GAIN.with(|f| f.get());
+        if gf + gt == 0 || ((gf + gt) as f64) < 0.0008 * prob.n as f64 {
+            if verbose {
+                eprintln!("MIP: presolve again after probing: PRR_TIGHT: stopped (probing fixed {gf}, tightened {gt} of {} columns)", prob.n);
+            }
+            return Some(Presolved::Reduced { prob, postsolve, scaling });
+        }
     }
     // プロービングが列を `ENOMOTO_T_MIP_PRR_MIN_FIXED` 本 (既定 1) より少なくしか固定しなければ (境界を締めただけなら)、かけ直さない。
     // drayage-25-23 (連続列の境界を 8 本締めるだけ) では、かけ直しが行を 2〜5% しか減らさず、下の判定で捨てるかけ直しに再スタートの
     // 度に 0.4 秒ほど使っていた
     let fixed = PROBE_FIXED.with(|f| f.get());
-    if fixed < tunable!("ENOMOTO_T_MIP_PRR_MIN_FIXED", 1usize, usize) {
+    if !tight && fixed < tunable!("ENOMOTO_T_MIP_PRR_MIN_FIXED", 1usize, usize) {
         if verbose {
             eprintln!("MIP: presolve again after probing: skipped (probing fixed {fixed} columns)");
         }
@@ -5868,7 +5882,7 @@ fn represolve_after_probe(prob: MipProblem, mut postsolve: Vec<crate::presolve::
     // 減らさないのに、根の LP の解がずれて根の clique のサブ MIP が解を出さなくなり、根の被約費用の固定が再スタートの閾値に届かずに
     // 6 秒 -> 13〜60 秒になっていた。かけ直しが効く momentum1・traininstance6 は行を 38〜43% 減らす (analysis/prr_harm_20261106.md)。
     // 捨てるときは、かけ直しの中のプロービングが置いた同値な組を元に戻す
-    let min_frac = if prb_table('b') { 0.0 } else { tunable!("ENOMOTO_T_MIP_PRR_MIN_ROW_FRAC", 0.1, f64) };
+    let min_frac = if prb_table('b') || tight { 0.0 } else { tunable!("ENOMOTO_T_MIP_PRR_MIN_ROW_FRAC", 0.1, f64) };
     let saved_equiv = (min_frac > 0.0).then(|| (PROBE_EQUIV.with(|e| e.borrow().clone()), PROBE_EQUIV_FORCE.with(|f| f.get())));
     let precheck = min_frac > 0.0 && env_str!("ENOMOTO_MIP_PRR_PRECHECK").is_some_and(|v| v != "0");
     let prev_pc = PRR_PRECHECK.with(|c| c.replace(precheck.then_some((depth + 1, prob.m, min_frac))));
@@ -7574,6 +7588,12 @@ thread_local! {
 
 fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     let _pt = pretime::guard("probe");
+    if env_str!("ENOMOTO_MIP_ENUM_PRESOLVE").is_some() && enum_where() == "loop" && !submip && !ENUM_LOOP_IN.with(|f| f.get()) {
+        ENUM_LOOP_IN.with(|f| f.set(true));
+        let r = enum_probe_loop(prob, verbose, submip);
+        ENUM_LOOP_IN.with(|f| f.set(false));
+        return r;
+    }
     // `ENOMOTO_MIP_PROBREP` ([`probrep_on`]): 前の回が成果 0 で、列の状態が同じなら回さない
     if probrep_on() && !submip && !PRESOLVE_IN_SUBMIP.with(|f| f.get()) {
         let same = PROBREP_LAST.with(|c| {
@@ -7916,6 +7936,16 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     let (mut seq_left, mut seq_run) = (0usize, 32usize);
     let (mut sum_units, mut n_units) = (0.0f64, 0usize);
     let clone_mult = tunable!("ENOMOTO_T_MIP_PREPAR_CLONE_MULT", 0.25, f64);
+    // `ENOMOTO_MIP_ENUM_WHERE=before` (試作 [`enum_where`]): 列挙の前処理をプロービングの前に回す
+    if env_str!("ENOMOTO_MIP_ENUM_PRESOLVE").is_some() && !submip && enum_where() == "before" {
+        match enum_presolve_step(prob, &mut dom, &bin0, want_equiv, &mut equiv, &mut edges, verbose, "before probing") {
+            None => return Some(false),
+            Some((f, t)) => {
+                fixed += f;
+                tightened += t;
+            }
+        }
+    }
     'passes: for _pass in 0..max_pass {
         passes += 1;
         // `ENOMOTO_MIP_CLQPRB`: 2 巡目からは、含意の重複を除き、伝播に使う含意の表を作り直す (同じ含意を 2 度集めて表が膨らむのを防ぐ)。
@@ -8318,62 +8348,16 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         CLQPRB_SUPPRESS.with(|f| f.set(false));
         return r;
     }
-    // `ENOMOTO_MIP_ENUM_PRESOLVE` (試作): HiGHS の Enumeration 前処理 ([`enumerate_rows`])。`=impl` ならプロービングの含意も伝播に使う
+    // `ENOMOTO_MIP_ENUM_PRESOLVE` (試作): HiGHS の Enumeration 前処理 ([`enumerate_rows`])。`=impl` ならプロービングの含意も伝播に使う。`=all`・`=allimpl` は行の数・空振りの上限を外す ([`enumerate_rows`])
     // (行の数の上限と空振りでやめる規則を外して全部の候補の行に回す試作 `ENOMOTO_MIP_HO3_ENUM` は 2026-11-18 に削除。
     // analysis/highs_only_20261105/G3.md・analysis/gate2_20261117/ho3sl/README.md)
-    if let Some(mode) = env_str!("ENOMOTO_MIP_ENUM_PRESOLVE").filter(|_| !submip) {
-        let te = std::time::Instant::now();
-        let (f0, t0n, e0) = (fixed, tightened, equiv.len());
-        let mut d2 = if mode == "impl" && !edges.is_empty() {
-            let mut d = dom.clone();
-            d.add_implications(n, &edges);
-            Some(d)
-        } else {
-            None
-        };
-        // `ENOMOTO_MIP_ENUM_EDGES`: 列挙で分かった衝突の組を含意の表 (クリークのグラフ、クリーク行の拡張が使う) に足す
-        let want_edges = env_str!("ENOMOTO_MIP_ENUM_EDGES").is_some();
-        let mut new_edges: Vec<(u32, u32)> = Vec::new();
-        // 列挙の前の境界 ([`enumerate_rows`] は見つけた締め付けをその場で `dom` に入れるので、下で入れ直すときに「締まった」と数えるため)
-        let (pre_lo, pre_up) = (dom.lo.clone(), dom.up.clone());
-        let res = enumerate_rows(prob, d2.as_mut().unwrap_or(&mut dom), &bin0, if want_equiv { Some(&mut equiv) } else { None }, if want_edges { Some(&mut new_edges) } else { None });
-        if want_edges {
-            let have: std::collections::HashSet<(u32, u32)> = edges.iter().map(|&(a, b)| (a.min(b), a.max(b))).collect();
-            new_edges.sort_unstable();
-            new_edges.dedup();
-            new_edges.retain(|e| !have.contains(e));
-            if verbose {
-                eprintln!("MIP: enumeration presolve: {} new conflict pairs", new_edges.len());
+    if env_str!("ENOMOTO_MIP_ENUM_PRESOLVE").is_some() && !submip && enum_where() != "before" {
+        match enum_presolve_step(prob, &mut dom, &bin0, want_equiv, &mut equiv, &mut edges, verbose, "after probing") {
+            None => return Some(false),
+            Some((f, t)) => {
+                fixed += f;
+                tightened += t;
             }
-            edges.extend(new_edges);
-        }
-        let Some((wc, rows_done, sols)) = res else { return Some(false) };
-        // 見つけた境界を元の定義域に入れる (`impl` の写しで見つけたものも大域的に成り立つ)
-        for (k, upper, v) in wc {
-            let was_fixed = pre_lo[k] == pre_up[k];
-            let ch = if upper { dom.tighten_upper(prob, k, v) } else { dom.tighten_lower(prob, k, v) };
-            // 列挙の中で入れ済みの締め付け (`ch` が偽) も、列挙の前より締まっていれば数える (以前は数えず、neos-960392 で 84 本の締め付けを
-            // 「0 固定・0 締め付け」と出し、`HO3_ENUM` の `a` が「何も見つからなかった」と誤って次の回を飛ばしていた。treeclose 9.57 節)
-            let ch = ch || if upper { dom.up[k] < pre_up[k] } else { dom.lo[k] > pre_lo[k] };
-            if ch {
-                if !was_fixed && dom.lo[k] == dom.up[k] {
-                    fixed += 1;
-                } else {
-                    tightened += 1;
-                }
-            }
-        }
-        if !dom.propagate(prob) {
-            return Some(false);
-        }
-        if verbose {
-            eprintln!(
-                "MIP: enumeration presolve: {rows_done} rows, {sols} solutions, {} fixed, {} bounds tightened, {} equivalent pairs ({:.2}s)",
-                fixed - f0,
-                tightened - t0n,
-                equiv.len() - e0,
-                te.elapsed().as_secs_f64()
-            );
         }
     }
     // `ENOMOTO_MIP_PROBE_CLIQUE=equiv`: 集めた含意をすべて伝播に入れた写しの定義域で 0-1 列をもう一巡試し、同値な組だけを足す。
@@ -8940,10 +8924,140 @@ fn quick_probe_fixings(prob: &mut MipProblem, verbose: bool, submip: bool) -> Op
 /// 行の中でどの解でも同じ値・逆の値の列の組を `equiv` に足す。何も見つからない行が 6 行続いたらやめる (HiGHS と同じ)。
 /// 実行可能な割り当てのない行があれば `None` (問題は実行不能)。返り値は (締める境界、列挙した行の数、解の数の合計)。
 /// physiciansched6-2 では HiGHS の前処理のこの規則を切ると、HiGHS の前処理後の問題に対する ENOMOTO の根の LP が 48974 -> 48374 に下がる
+/// 試作 `ENOMOTO_MIP_ENUM_WHERE` (`ENOMOTO_MIP_ENUM_PRESOLVE` と組み合わせる。analysis/cutgap_20261123 の 7 節): 列挙の前処理を置く場所。
+/// `before` = プロービングの前だけ、`after` (既定) = プロービングの後だけ、`loop` = プロービングの後に回し、その回 (プロービングと列挙) で新しい固定・締め付け・
+/// 同値な組・衝突の組 (clique) が出れば、プロービングと列挙をもう一度回す、を何も出なくなるまで繰り返す ([`enum_probe_loop`]。回数の上限は置かない。
+/// 止めは前処理の時間の止め [`presolve_stop`] だけ)。`loop` では列挙で分かった衝突の組を含意の表に足す (足さないと次の回も同じ組を新しいと数える)
+fn enum_where() -> &'static str {
+    match env_str!("ENOMOTO_MIP_ENUM_WHERE") {
+        Some("before") => "before",
+        Some("loop") => "loop",
+        _ => "after",
+    }
+}
+
+thread_local! {
+    /// `ENOMOTO_MIP_ENUM_WHERE=loop`: [`enum_probe_loop`] の中の [`probe`] か (入れ子で回さない)
+    static ENUM_LOOP_IN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 最後の [`enum_presolve_step`] の成果 (固定, 締め付け, 新しい同値な組, 新しい衝突の組)
+    static ENUM_GAIN: std::cell::Cell<(usize, usize, usize, usize)> = const { std::cell::Cell::new((0, 0, 0, 0)) };
+}
+
+/// `ENOMOTO_MIP_ENUM_WHERE=loop` ([`enum_where`]): [`probe`] (中でプロービングと列挙) を、新しい固定・締め付け・同値な組・衝突の組が出なくなるまで繰り返す。
+/// 固定・締め付けは各回で問題の境界に入り、衝突の組は問題の含意として次の回に引き継がれる。同値な組は回をまたいで重複を除いて集める
+fn enum_probe_loop(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
+    let t0 = std::time::Instant::now();
+    let mut merged: Vec<(usize, usize, bool)> = Vec::new();
+    let mut seen: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    let (mut force, mut any, mut tot_fixed, mut tot_tight, mut it) = (false, false, 0usize, 0usize, 0usize);
+    let r = loop {
+        it += 1;
+        ENUM_GAIN.with(|g| g.set((0, 0, 0, 0)));
+        let r = probe(prob, verbose, submip);
+        if r == Some(false) {
+            break Some(false);
+        }
+        any |= r == Some(true);
+        force |= PROBE_EQUIV_FORCE.with(|f| f.get());
+        let eq = PROBE_EQUIV.with(|e| std::mem::take(&mut *e.borrow_mut()));
+        let mut new_eq = 0usize;
+        for (j, k, neg) in eq {
+            if seen.insert((j.min(k), j.max(k))) {
+                merged.push((j, k, neg));
+                new_eq += 1;
+            }
+        }
+        let (gf, gt, _) = PROBE_GAIN.with(|f| f.get());
+        let (_, _, _, ge) = ENUM_GAIN.with(|g| g.get());
+        tot_fixed += PROBE_FIXED.with(|f| f.get());
+        tot_tight += gt;
+        if verbose {
+            eprintln!("MIP: ENUM_WHERE=loop: round {it}: {gf} fixed, {gt} tightened, {new_eq} new equivalent pairs, {ge} new conflict pairs ({:.2}s)", t0.elapsed().as_secs_f64());
+        }
+        if gf + gt + new_eq + ge == 0 || presolve_stop() {
+            break if any { Some(true) } else { None };
+        }
+    };
+    PROBE_EQUIV.with(|e| *e.borrow_mut() = merged);
+    PROBE_EQUIV_FORCE.with(|f| f.set(force));
+    PROBE_FIXED.with(|f| f.set(tot_fixed));
+    let ne = PROBE_EQUIV.with(|e| e.borrow().len());
+    PROBE_GAIN.with(|f| f.set((tot_fixed, tot_tight, ne)));
+    r
+}
+
+/// 列挙の前処理 ([`enumerate_rows`]) を 1 回回し、見つけた境界を `dom` に入れる。`ENOMOTO_MIP_ENUM_PRESOLVE` の `impl`・`allimpl` は含意 `edges` を伝播に使う
+/// 写しで列挙する。衝突の組は数え、`ENOMOTO_MIP_ENUM_EDGES` か `ENOMOTO_MIP_ENUM_WHERE=loop` なら `edges` に足す。返り値は (固定, 締め付け) (実行不能なら `None`)
+#[allow(clippy::too_many_arguments)]
+fn enum_presolve_step(prob: &MipProblem, dom: &mut domain::Domain, bin0: &[bool], want_equiv: bool, equiv: &mut Vec<(usize, usize, bool)>, edges: &mut Vec<(u32, u32)>, verbose: bool, where_: &str) -> Option<(usize, usize)> {
+    let mode = env_str!("ENOMOTO_MIP_ENUM_PRESOLVE").unwrap_or("1");
+    let n = prob.n;
+    let te = std::time::Instant::now();
+    let e0 = equiv.len();
+    let (mut fixed, mut tightened) = (0usize, 0usize);
+    let mut d2 = if (mode == "impl" || mode == "allimpl") && !edges.is_empty() {
+        let mut d = dom.clone();
+        d.add_implications(n, edges);
+        Some(d)
+    } else {
+        None
+    };
+    // `ENOMOTO_MIP_ENUM_EDGES`: 列挙で分かった衝突の組を含意の表 (クリークのグラフ、クリーク行の拡張が使う) に足す
+    let want_edges = env_str!("ENOMOTO_MIP_ENUM_EDGES").is_some() || enum_where() == "loop";
+    let mut new_edges: Vec<(u32, u32)> = Vec::new();
+    // 列挙の前の境界 ([`enumerate_rows`] は見つけた締め付けをその場で `dom` に入れるので、下で入れ直すときに「締まった」と数えるため)
+    let (pre_lo, pre_up) = (dom.lo.clone(), dom.up.clone());
+    let res = enumerate_rows(prob, d2.as_mut().unwrap_or(dom), bin0, if want_equiv { Some(&mut *equiv) } else { None }, Some(&mut new_edges));
+    let have: std::collections::HashSet<(u32, u32)> = edges.iter().map(|&(a, b)| (a.min(b), a.max(b))).collect();
+    new_edges.sort_unstable();
+    new_edges.dedup();
+    new_edges.retain(|e| !have.contains(e));
+    let n_edges = new_edges.len();
+    if want_edges {
+        edges.extend(new_edges);
+    }
+    let (wc, rows_done, sols) = res?;
+    // 見つけた境界を元の定義域に入れる (`impl` の写しで見つけたものも大域的に成り立つ)
+    for (k, upper, v) in wc {
+        let was_fixed = pre_lo[k] == pre_up[k];
+        let ch = if upper { dom.tighten_upper(prob, k, v) } else { dom.tighten_lower(prob, k, v) };
+        // 列挙の中で入れ済みの締め付け (`ch` が偽) も、列挙の前より締まっていれば数える (以前は数えず、neos-960392 で 84 本の締め付けを
+        // 「0 固定・0 締め付け」と出し、`HO3_ENUM` の `a` が「何も見つからなかった」と誤って次の回を飛ばしていた。treeclose 9.57 節)
+        let ch = ch || if upper { dom.up[k] < pre_up[k] } else { dom.lo[k] > pre_lo[k] };
+        if ch {
+            if !was_fixed && dom.lo[k] == dom.up[k] {
+                fixed += 1;
+            } else {
+                tightened += 1;
+            }
+        }
+    }
+    if !dom.propagate(prob) {
+        return None;
+    }
+    let ne = equiv.len() - e0;
+    ENUM_GAIN.with(|g| {
+        let (a, b, c, d) = g.get();
+        g.set((a + fixed, b + tightened, c + ne, d + if want_edges { n_edges } else { 0 }));
+    });
+    if verbose {
+        eprintln!(
+            "MIP: enumeration presolve ({where_}): {rows_done} rows, {sols} solutions, {fixed} fixed, {tightened} bounds tightened, {ne} equivalent pairs, {n_edges} new conflict pairs{} ({:.2}s)",
+            if want_edges { "" } else { " (not added)" },
+            te.elapsed().as_secs_f64()
+        );
+    }
+    Some((fixed, tightened))
+}
+
 fn enumerate_rows(prob: &MipProblem, dom: &mut domain::Domain, bin0: &[bool], mut equiv: Option<&mut Vec<(usize, usize, bool)>>, mut edges: Option<&mut Vec<(u32, u32)>>) -> Option<(Vec<(usize, bool, f64)>, usize, usize)> {
     const MAX_ROW: usize = 8;
-    let max_rows = tunable!("ENOMOTO_T_MIP_ENUM_ROWS", 400usize, usize);
-    let max_fails = tunable!("ENOMOTO_T_MIP_ENUM_FAILS", 6usize, usize);
+    // `ENOMOTO_MIP_ENUM_PRESOLVE=all` (試作、analysis/cutgap_20261123 の 2 節): 行の数の上限と空振りでやめる規則を外し、候補の行を全部列挙する
+    // (止めるのは前処理の時間の止め [`presolve_stop`] だけ)。net12 は上限つきでは 30 行で空振り 6 回に当たって何も見つけず、全部 (953 行・0.05 秒) で
+    // 根の LP が 68.4 → 128.3 (HiGHS の Enumeration 前処理と同じ)
+    let all = env_str!("ENOMOTO_MIP_ENUM_PRESOLVE").is_some_and(|v| v.starts_with("all"));
+    let max_rows = if all { usize::MAX } else { tunable!("ENOMOTO_T_MIP_ENUM_ROWS", 400usize, usize) };
+    let max_fails = if all { usize::MAX } else { tunable!("ENOMOTO_T_MIP_ENUM_FAILS", 6usize, usize) };
     let row_vars = |dom: &domain::Domain, i: usize| -> Option<Vec<usize>> {
         let mut v = Vec::new();
         for &(j, _) in &prob.rows[i] {
