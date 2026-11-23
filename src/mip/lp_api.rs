@@ -52,6 +52,11 @@ pub trait MipLp: Clone + Send {
     fn solve_rescue(&mut self, _lim: &SolveLimits) -> LpStatus {
         LpStatus::Error
     }
+    /// 試作 `ENOMOTO_MIP_ROOTLP_PRESOLVE`: 元の空間の点 `xo` (LP の経路で解いた最適解) から基底を作って解き直す
+    /// ([`TwoStageLp::solve_from_point`])。対応しない実装は `None`。
+    fn solve_from_point(&mut self, _xo: &[f64], _lim: &SolveLimits) -> Option<LpStatus> {
+        None
+    }
     /// 根の LP の安全網: 尺度を調整した写しを基底なしで解いて元の LP を解き直す ([`TwoStageLp::solve_scaled_rescue`])。
     /// 試さない (係数の幅が狭い・対応しない実装) なら `None`。
     fn solve_scaled_rescue(&mut self, _lim: &SolveLimits) -> Option<LpStatus> {
@@ -232,6 +237,9 @@ forward_impl!(
     },
     fn solve_scaled_rescue(&mut self, lim: &SolveLimits) -> Option<LpStatus> {
         TwoStageLp::solve_scaled_rescue(self, lim)
+    },
+    fn solve_from_point(&mut self, xo: &[f64], lim: &SolveLimits) -> Option<LpStatus> {
+        TwoStageLp::solve_from_point(self, xo, lim)
     },
     fn request_scale_once(&mut self) {
         TwoStageLp::request_scale_once(self)

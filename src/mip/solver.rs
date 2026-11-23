@@ -9185,6 +9185,67 @@ impl<'a, L: MipLp> Solver<'a, L> {
         eprintln!("PROBE_BASIS {{\"kind\":\"{kind}\",\"feat\":{feat},\"warm\":{warm},\"dflt\":{dflt},\"cold\":{cold},\"fix\":{fix}{fills}}}");
     }
 
+    /// 試作 `ENOMOTO_MIP_ROOTLP_PRESOLVE` (既定では使わない、analysis/highsonly_20261123): 主の根の LP (最初・再スタートの後) を、
+    /// 出発の基底がないときに、LP の経路 ([`crate::simplex::solve_lp_dual_with`]: LP の前処理 → 二段解法 → 後処理) で解き、
+    /// その最適解から基底を作って MIP の LP で解き直す ([`MipLp::solve_from_point`])。HiGHS は根の LP を LP の前処理つきで解く
+    /// (`HighsMipSolverData::evaluateRootNode` の `presolve on`)。neos-873061 の根の LP は LP の前処理で行 9.3 万 → 数千に縮み、
+    /// MIP の LP の 101 秒・43812 反復に対し LP の経路は 5.2 秒。LP の経路が最適を返さなければ `None` (従来どおり解く)。
+    fn rootlp_presolve_solve(&mut self, root_kind: Option<usize>) -> Option<LpStatus> {
+        if !matches!(root_kind, Some(3) | Some(4)) || env_str!("ENOMOTO_MIP_ROOTLP_PRESOLVE").is_none_or(|v| v == "0") || self.lp.has_warm_basis() {
+            return None;
+        }
+        use crate::types::{ConstraintRow, LinearExpr, Objective, RowSense, Sense, VarType, VariableData};
+        let t0 = Instant::now();
+        let n = self.p.n;
+        let vars: Vec<VariableData> = (0..n)
+            .map(|j| {
+                let (lb, ub) = self.lp.col_bounds(j);
+                VariableData { vtype: VarType::Continuous, lb, ub }
+            })
+            .collect();
+        let cost = self.lp.costs();
+        let obj = Objective { expr: LinearExpr { coeffs: (0..n).filter(|&j| cost[j] != 0.0).map(|j| (j, cost[j])).collect(), constant: 0.0 }, sense: Sense::Minimize };
+        let mut cons: Vec<ConstraintRow> = Vec::with_capacity(self.lp.num_rows());
+        for i in 0..self.lp.num_rows() {
+            let (lo, up) = self.lp.row_bounds(i);
+            let expr = || LinearExpr { coeffs: self.lp.row_ref(i).iter().map(|&(j, a)| (j, a)).collect(), constant: 0.0 };
+            if lo.is_finite() && up.is_finite() && lo == up {
+                cons.push(ConstraintRow { expr: expr(), sense: RowSense::Eq, rhs: lo });
+                continue;
+            }
+            if lo.is_finite() {
+                cons.push(ConstraintRow { expr: expr(), sense: RowSense::Ge, rhs: lo });
+            }
+            if up.is_finite() {
+                cons.push(ConstraintRow { expr: expr(), sense: RowSense::Le, rhs: up });
+            }
+        }
+        let t_build = t0.elapsed().as_secs_f64();
+        let r = crate::cancel::with_deadline(self.deadline, || crate::simplex::solve_lp_dual_with(&vars, &obj, &cons, crate::types::LpOptions::default()));
+        let t_lp = t0.elapsed().as_secs_f64() - t_build;
+        let x = match (&r.status, r.x) {
+            (crate::types::Status::Optimal, Some(x)) => x,
+            (st, _) => {
+                if self.params.verbose {
+                    eprintln!("MIP: ROOTLP_PRESOLVE: the LP path gave {st:?} ({t_lp:.2}s); solving as usual");
+                }
+                return None;
+            }
+        };
+        let it0 = self.lp.total_iterations();
+        let st = self.lp.solve_from_point(&x, &SolveLimits { deadline: self.deadline, ..Default::default() });
+        if self.params.verbose {
+            let lp_obj: f64 = (0..n).map(|j| cost[j] * x[j]).sum();
+            eprintln!(
+                "MIP: ROOTLP_PRESOLVE: LP path {:.10e} (build {t_build:.2}s, solve {t_lp:.2}s); warm re-solve from the point: {st:?} in {} iters ({:.2}s)",
+                lp_obj + self.p.offset,
+                self.lp.total_iterations() - it0,
+                t0.elapsed().as_secs_f64() - t_build - t_lp
+            );
+        }
+        st
+    }
+
     fn rootlp_simplex_diag(&mut self) {
         let prefix = env_str!("ENOMOTO_MIP_ROOTLP_SIMPLEX_DIAG").unwrap_or_default();
         let mut lp0 = crate::simplex::mip_lp::TwoStageLp::new(&self.dom.global_lo, &self.dom.global_up, &self.p.cost, &self.p.rows, &self.p.row_lo, &self.p.row_up);
@@ -10218,6 +10279,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let _ = crate::simplex::mip_lp::take_race_diag();
         }
         let mut root_st = if let Some(st) = self.rootlp3_solve(rootlp3.as_ref()) {
+            st
+        } else if let Some(st) = self.rootlp_presolve_solve(root_kind) {
             st
         } else if probe_cols_only_warm && root_kind == Some(4) && (probe_basis_guard_has('r') || probe_basis_guard_has('x')) {
             self.probe_basis_guard_solve()
