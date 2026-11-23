@@ -759,6 +759,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) ncl_tree_id0: u64,
     /// 試作 `ENOMOTO_MIP_NODE_CLEANUP` の `a`: 今のノードで行を外したか (外したならプールのラウンドで破られたカットを本数の制限なしに戻す)
     pub(super) ncl_removed_now: bool,
+    /// 試作 `ENOMOTO_MIP_NODE_ROWSCOPE`: 道筋の外へ移るときに外した木の行の番号 (道筋に戻れば足し直す)
+    pub(super) rs_removed: std::collections::HashSet<u64>,
+    /// 試作 `ENOMOTO_MIP_NODE_ROWSCOPE` の数: [移った回, 外した行, 足し直した行, 行を持つ子の環, 印なしで消えていた道筋の行, 見た道筋の行]
+    pub(super) rs_stats: [u64; 6],
     /// 診断用: 効き目で続けるノードの分離の結果の内訳 (打ち切り、伸び/差が 0.02 未満、0.1 未満、0.3 未満、0.3 以上)
     pub(super) nca_hist: [u64; 5],
     /// ノードで加えたカットの非零の数の指数移動平均 (`ENOMOTO_T_MIP_NODE_CUT_ADAPT_DENSITY`、[`Solver::nca_dense`])。
@@ -2637,7 +2641,7 @@ impl SnapNode {
             Some(w) => super::queue::unpack_changes(w),
             None => self.changes,
         };
-        OpenNode { changes, lower_bound: self.lower_bound, estimate: self.estimate, depth: self.depth, basis: None, basis_epoch: 0, dse: None, branch: self.branch, prot: None, tags: None, sb: None, inh: self.inh, cwm: self.cwm }
+        OpenNode { changes, lower_bound: self.lower_bound, estimate: self.estimate, depth: self.depth, basis: None, basis_epoch: 0, dse: None, branch: self.branch, prot: None, tags: None, sb: None, inh: self.inh, cwm: self.cwm, scope: None }
     }
 }
 
@@ -5551,6 +5555,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         ncl_stats: [0; 3],
         ncl_tree_id0: u64::MAX,
         ncl_removed_now: false,
+        rs_removed: std::collections::HashSet::new(),
+        rs_stats: [0; 6],
         nca_hist: [0; 5],
         tdd: if super::treedepth::on() && !params.submip { Some(Box::default()) } else { None },
         nca_cut_nnz: None,
@@ -6150,6 +6156,11 @@ fn gap1_proof_tol(rhs: f64) -> f64 {
 /// 試作 `ENOMOTO_MIP_NODE_CLEANUP` (既定では使わない、analysis/nodespeed_20261123/README.md): [`Solver::node_cleanup_rows`]
 pub(super) fn ncl_has(c: char) -> bool {
     env_str!("ENOMOTO_MIP_NODE_CLEANUP").is_some_and(|v| v.contains(c))
+}
+
+/// 試作 `ENOMOTO_MIP_NODE_ROWSCOPE` (既定では使わない、analysis/nodespeed_20261123/README.md): [`Solver::rowscope_sync`]
+pub(super) fn rowscope_on() -> bool {
+    env_str!("ENOMOTO_MIP_NODE_ROWSCOPE").is_some()
 }
 
 pub(super) fn ncl_on() -> bool {
@@ -9497,6 +9508,90 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
+    /// 試作 `ENOMOTO_MIP_NODE_ROWSCOPE` (既定では使わない、analysis/nodespeed_20261123/README.md): 子に持たせる行の鎖。親の鎖 `parent` に、
+    /// このノードで加えて (番号が `id0` 以降) LP に残っている行の環を足す。足す行がなければ親の鎖をそのまま渡す
+    fn rowscope_child(&mut self, parent: &Option<Rc<super::queue::RowScope>>, id0: u64) -> Option<Rc<super::queue::RowScope>> {
+        if !rowscope_on() || self.params.submip {
+            return None;
+        }
+        self.sync_cut_age();
+        let m0 = self.p.m;
+        let mr = self.lp.num_rows();
+        let id0 = id0.max(self.ncl_tree_id0);
+        let mut rows = Vec::new();
+        for k in 0..self.cut_ids.len().min(mr.saturating_sub(m0)) {
+            let id = self.cut_ids[k];
+            if id >= id0 {
+                let (lo, up) = self.lp.row_bounds(m0 + k);
+                rows.push((id, Rc::new((self.lp.row(m0 + k), lo, up))));
+            }
+        }
+        if rows.is_empty() {
+            return parent.clone();
+        }
+        self.rs_stats[3] += 1;
+        Some(Rc::new(super::queue::RowScope { parent: parent.clone(), rows }))
+    }
+
+    /// 試作 `ENOMOTO_MIP_NODE_ROWSCOPE` (既定では使わない、analysis/nodespeed_20261123/README.md): 兄弟・待ち行列のノードへ移るとき
+    /// (保存した基底を置く前) に、LP の木の行 (番号が木の始まり以降) をそのノードの道筋の行 `scope` に合わせる。SCIP と同じく、木の中で
+    /// 加えた行は加えたノードの部分木の LP にだけ置く。道筋にない木の行は外し (プールには残る)、前に外した道筋の行は同じ番号で足し直す。
+    /// 根で加えた行は今までどおり全体に残し、年齢で外す仕組みもそのまま (年齢で外れた道筋の行は足し直さない)。行の追加・削除は
+    /// `row_log` に残るので、置く基底はそれに合わせて直される (足し直した行は基底になる)
+    fn rowscope_sync(&mut self, scope: &Option<Rc<super::queue::RowScope>>) {
+        if !rowscope_on() || self.params.submip {
+            return;
+        }
+        self.rs_stats[0] += 1;
+        let mut path: std::collections::HashMap<u64, &Rc<(Vec<(usize, f64)>, f64, f64)>> = std::collections::HashMap::new();
+        let mut c = scope.as_ref();
+        while let Some(sc) = c {
+            for (id, r) in &sc.rows {
+                path.insert(*id, r);
+            }
+            c = sc.parent.as_ref();
+        }
+        self.sync_cut_age();
+        let m0 = self.p.m;
+        let mr = self.lp.num_rows();
+        let id0 = self.ncl_tree_id0;
+        let prot = self.prot_aging_on();
+        let mut remove = vec![false; mr];
+        let mut cnt = 0u64;
+        let mut present = std::collections::HashSet::new();
+        for k in 0..self.cut_ids.len().min(mr.saturating_sub(m0)) {
+            let id = self.cut_ids[k];
+            present.insert(id);
+            if id < id0 || path.contains_key(&id) || self.merged_cuts.contains(&id) || (prot && self.queue.is_protected(id)) {
+                continue;
+            }
+            remove[m0 + k] = true;
+            self.rs_removed.insert(id);
+            cnt += 1;
+        }
+        // 足し直す道筋の行 (外したもので、今の LP にないもの)。番号の順に
+        let mut back: Vec<(u64, Rc<(Vec<(usize, f64)>, f64, f64)>)> =
+            path.iter().filter(|(id, _)| self.rs_removed.contains(id) && !present.contains(id)).map(|(id, r)| (*id, Rc::clone(r))).collect();
+        back.sort_by_key(|e| e.0);
+        // 道筋の行のうち LP になく、外した印もないもの (年齢などで外れた) の数と、道筋の行の数
+        self.rs_stats[4] += path.keys().filter(|id| !present.contains(id) && !self.rs_removed.contains(id)).count() as u64;
+        self.rs_stats[5] += path.len() as u64;
+        if cnt > 0 {
+            self.delete_lp_rows(&remove);
+            self.rs_stats[1] += cnt;
+        }
+        if !back.is_empty() {
+            let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = back.iter().map(|(_, r)| (**r).clone()).collect();
+            self.add_cut_rows(&rows);
+            let n = self.cut_ids.len();
+            for (k, (id, _)) in back.iter().enumerate() {
+                self.cut_ids[n - back.len() + k] = *id;
+                self.rs_removed.remove(id);
+            }
+            self.rs_stats[2] += back.len() as u64;
+        }
+    }
+
     fn tree4_proof_cuts(&mut self, x: &[f64]) -> bool {
         let mut cand: Vec<(f64, usize)> = Vec::new();
         for k in 0..self.dual_proofs.len() {
@@ -12445,7 +12540,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if let Some(snap) = self.snap.clone() {
             for (k, n) in snap.nodes.iter().enumerate() {
                 let tags = Some(Rc::new(vec![snap.serial << 32 | k as u64]));
-                self.queue.push(OpenNode { changes: n.changes.clone(), lower_bound: n.lower_bound.max(root_obj), estimate: n.estimate, depth: n.depth, basis: None, basis_epoch: 0, dse: None, branch: n.branch, prot: None, tags, sb: None, inh: n.inh.clone(), cwm: None });
+                self.queue.push(OpenNode { changes: n.changes.clone(), lower_bound: n.lower_bound.max(root_obj), estimate: n.estimate, depth: n.depth, basis: None, basis_epoch: 0, dse: None, branch: n.branch, prot: None, tags, sb: None, inh: n.inh.clone(), cwm: None, scope: None });
             }
             self.snap_alive = vec![true; snap.nodes.len()];
             first = false;
@@ -12453,7 +12548,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if super::cwm::mode().is_some() && !self.params.submip && self.pool_tid == 0 {
                 super::cwm::reset(self.params.verbose);
             }
-            self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), basis_epoch: self.row_log.len(), dse: if dse_all() { self.lp.dse_snapshot().map(|w| Rc::new(NodeDse::Pairs(w))) } else { None }, branch: None, prot, tags: None, sb: None, inh: None, cwm: None });
+            self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), basis_epoch: self.row_log.len(), dse: if dse_all() { self.lp.dse_snapshot().map(|w| Rc::new(NodeDse::Pairs(w))) } else { None }, branch: None, prot, tags: None, sb: None, inh: None, cwm: None, scope: None });
         }
         // 診断用 (`ENOMOTO_MIP_SUBMIP_VERBOSE`): 木の始まり (根の前処理・LP・カット・ヒューリスティクスの終わり) を道筋つきで出す
         // (サブ MIP の時間のうち根の割合を見る。analysis/rens_resume_20261101.md)
@@ -13028,6 +13123,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                         continue;
                     }
+                    self.rowscope_sync(&n.scope);
                     if let Some(b) = &n.basis {
                         self.restore_node_basis(b, n.basis_epoch, n.dse.as_ref().map(|d| d.pairs(b)).as_deref(), &full_changes(&n), n.prot.as_deref().map(|v| v.as_slice()));
                         if ncl_has('s') {
@@ -13164,6 +13260,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             ok = self.apply_inh_chain(&n.inh);
                         }
                         if ok {
+                            self.rowscope_sync(&n.scope);
                             if let Some(b) = &n.basis {
                                 self.restore_node_basis(b, n.basis_epoch, n.dse.as_ref().map(|d| d.pairs(b)).as_deref(), &full_changes(&n), n.prot.as_deref().map(|v| v.as_slice()));
                                 if ncl_has('q') {
@@ -13572,6 +13669,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // ノードの LP を解く (強分岐で境界が締まったら解き直す)。
             let mut node_obj;
             let mut resolves = 0;
+            // 試作 `ENOMOTO_MIP_NODE_ROWSCOPE`: このノードで LP に加えたカットは、この番号以降
+            let rs_id0 = self.next_cut_id;
             // ノードの分離でカットを加えた後の解き直しか (その LP の時間を `node_cut_secs` に足す)
             let mut node_cut_resolve: Option<Instant> = None;
             let mut nc_res_it = 0u64;
@@ -15078,6 +15177,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.tc_len[3] += node.depth as u64 + 1;
             }
             let sb_child = self.sb_child_inherit(&node);
+            // 試作 `ENOMOTO_MIP_NODE_ROWSCOPE`: 子の行の鎖 = 親の鎖 + このノードで加えて LP に残っている行
+            let child_scope = self.rowscope_child(&node.scope, rs_id0);
             let child_inh = if tc_on('s') && tc_base_len != usize::MAX {
                 let tail = of_fixes.split_off(tc_base_len);
                 if tail.is_empty() { node.inh.clone() } else { Some(std::sync::Arc::new(InhChain { parent: node.inh.clone(), fixes: tail })) }
@@ -15106,6 +15207,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     sb: sb_child.clone(),
                     inh: child_inh.clone(),
                     cwm: None,
+                    scope: child_scope.clone(),
                 }
             };
             // 試作 `ENOMOTO_MIP_CWM`: 子の札 (対を始めるなら 2 つの子に違う腕)。乱数はスレッドの種とノード番号から
@@ -27630,6 +27732,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if self.snap.is_none() && !self.params.submip {
                 print_basis_nb_diag();
+            }
+            if rowscope_on() {
+                eprintln!("MIP: node row scope (NODE_ROWSCOPE): moves {} rows removed {} re-added {} child links {}; path rows seen {} of which gone without the mark {}", self.rs_stats[0], self.rs_stats[1], self.rs_stats[2], self.rs_stats[3], self.rs_stats[5], self.rs_stats[4]);
             }
             if ncl_on() {
                 eprintln!("MIP: node cleanup (NODE_CLEANUP): nodes {} rows removed {} kept (nonbasic) {}", self.ncl_stats[0], self.ncl_stats[1], self.ncl_stats[2]);
