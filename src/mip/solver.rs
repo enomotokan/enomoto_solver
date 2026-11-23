@@ -3973,6 +3973,11 @@ pub(crate) fn divequota(c: char) -> bool {
 /// - `r`: 根の被約費用のサブ MIP ([`Solver::root_reduced_cost`]) の候補 (lurking bound) を、最後の LP だけでなく根のカットの各回の
 ///   LP からためる (HiGHS の `HighsRedcostFixing::addRootRedcost`)。並びは「固定が正しくなる打ち切り値 − 今の LP の値」の大きい順で、
 ///   今の LP の値以下のものは使わない。スレッドの数によらない。
+/// - `f`: 外側の根から出したサブ MIP (成果連動の打ち切りの対象) でも、根のヒューリスティクスの後に暫定解がなければ `ENOMOTO_MIP_ROBUST` の
+///   `g` の FJ・Local-MIP のやり直し ([`Solver::robust_fj_retry`]) を回す (今は外側だけ。10teams の被約費用のサブ MIP の近傍は
+///   単独で解くと FJ が 0.03 秒で最適解を出すが、サブ MIP の中では回らず 250〜500 ノードで解なし)。スレッドの数によらない。
+/// - `l`: 外側が 1 スレッドのとき、木の中の大近傍探索の時間の割合 (既定 2〜10%) を、4 スレッドでヒューリスティクス役に回る割合
+///   (`ENOMOTO_T_MIP_HEUR_ROLE_FRAC`、既定 0.25 = 4 本のうち 1 本) まで上げる (暫定解があるときだけ)。
 /// - `d`: 外側が 1 スレッドのとき、外側の根で前に解いたサブ MIP と同じ問題 (列の境界・行の数・打ち切り値が同じ) のサブ MIP は解かない
 ///   (10teams では暫定解のない根の被約費用のサブ MIP と LP face が同じ固定になり、同じ計算を 2 回する)。
 pub(crate) fn heur1t(c: char) -> bool {
@@ -11498,7 +11503,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 試作 `ENOMOTO_MIP_ROBUST` の `g` ([`robust`]): `f` の FJ・Local-MIP のやり直しを、安い根のヒューリスティクス
                 // (ダイビング・FP・locks・clique・vbounds) と並列のサブ MIP の後ろへ回す (`f` の位置では blend2・flugpl のように
                 // 後ろの安いものがすぐ見つける問題でも FJ が最大 6 秒空回りした)
-                if robust('g') && !self.params.submip && self.incumbent.is_none() {
+                // 試作 `ENOMOTO_MIP_HEUR1T` の `f` ([`heur1t`]): 外側の根から出したサブ MIP ([`submip_outcome_stop`] の対象) でも回す
+                if robust('g') && (!self.params.submip || (heur1t('f') && self.root_submip.is_some())) && self.incumbent.is_none() {
                     heur!("robust FJ", self.robust_fj_retry());
                 }
                 self.poll_find_thread();
@@ -14099,6 +14105,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         super::secs_since_last_incumbent().is_some_and(|d| d >= need)
                     };
                     let frac = if stalled { frac.max(tunable!("ENOMOTO_T_MIP_ROBUST_LNSFREQ_TIME", 0.1, f64)) } else { frac };
+                    // 試作 `ENOMOTO_MIP_HEUR1T` の `l` ([`heur1t`]): 1 スレッドの外側の木では、時間の割合を 4 スレッドのヒューリスティクス役の
+                    // 割合 (`ENOMOTO_T_MIP_HEUR_ROLE_FRAC`、[`heur_role_count`]) まで上げる (暫定解があるときだけ。役も暫定解があるときだけ就く)
+                    let frac = if heur1t('l') && !self.params.submip && self.pool.is_none() && self.params.threads <= 1 && self.incumbent.is_some() {
+                        frac.max(tunable!("ENOMOTO_T_MIP_HEUR_ROLE_FRAC", 0.25, f64))
+                    } else {
+                        frac
+                    };
                     // 既定は時間の予算で 50 ノードおき。`ENOMOTO_MIP_LNS_ITERS` なら以前の、ヒューリスティクス共通の反復の
                     // 予算の中で 100 ノードおき (根のサブ MIP の反復を数えるので、根で数万反復使った問題では木の中で
                     // 一度も呼ばれなかった: h80x6320d・timtab1・assign1-5-8・graph20)
