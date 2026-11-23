@@ -2126,6 +2126,23 @@ pub fn factorize_reusing(m: usize, rows_in: &[Vec<(usize, f64)>], prev: Option<&
     Some(ft)
 }
 
+/// 試作 `ENOMOTO_MIP_LU_EXTEND` (analysis/lpiter_20261123、既定では使わない): **与えた列順** (`pivot_col[s]` = ステップ `s` の基底スロット) と
+/// 行順の手がかり (`pivot_row_hint`) で `rows_in` を分解する ([`factorize_reusing_order`] と同じ左視の再生、探索しない)。
+/// LP に行を足した・外したときに、直前の分解の列順 ([`FtLu::pivot_order`]) を写した順で分解し直すのに使う: 足した行のスラック (基底) を
+/// 列順の最後に置くと、古い基底列の新しい行の係数は `L` に入り、新しいスラックは対角 1 のピボットになる (`B' = [B 0; R I]` の分解
+/// `diag(L,I) [I 0; R U^-1 I] diag(U,I)` と同じ形)。`fill_baseline` は直前の通常の分解の非ゼロ数 (fill の上限の基準、
+/// [`factorize_reusing`] と同じ倍率)。順が正しくない・数値的に使い果たした・fill が上限を超えたら `None` (呼び出し側は通常の分解に任せる)。
+pub fn factorize_with_order(m: usize, rows_in: &[Vec<(usize, f64)>], pivot_col: &[usize], pivot_row_hint: &[usize], fill_baseline: usize) -> Option<FtLu> {
+    if m == 0 || is_dense_input(m, rows_in) || border_wanted(m, detect_border_columns(m, rows_in).len()) {
+        return None;
+    }
+    let max_nnz = (reuse_fill_limit() * fill_baseline as f64) as usize + m;
+    let lu = factorize_reusing_order(m, rows_in, pivot_col, pivot_row_hint, max_nnz)?;
+    let mut ft = FtLu::new(lu);
+    ft.fill_baseline = fill_baseline.max(1);
+    Some(ft)
+}
+
 /// [`factorize`] がこの入力を [`factorize_bordered`] に回すか (同じ判定を切り出したもの)。
 /// [`factorize_reusing`] は境界付きになる基底には再利用を使わない。
 #[allow(dead_code)]
@@ -7782,6 +7799,12 @@ impl FtLu {
     }
 
     /// 最後の分解以降に成功した FT 更新の数 (= `R` eta の数)。
+    /// 試作 `ENOMOTO_MIP_LU_EXTEND` ([`factorize_with_order`]): この分解の列順・行順 (ステップ `s` の基底スロットと行) と、fill の上限の
+    /// 基準 (直前の通常の分解の非ゼロ数)。密ブロックを持つ分解は `None` (左視の再生には向かない)。
+    pub fn pivot_order(&self) -> Option<(&[usize], &[usize], usize)> {
+        (self.base.dense_s0 >= self.base.col_perm.len()).then_some((&self.base.col_perm[..], &self.base.row_perm[..], self.fill_baseline))
+    }
+
     pub fn update_count(&self) -> usize {
         self.r_etas.n_headers()
     }
@@ -8843,6 +8866,97 @@ mod tests {
         let first = factorize(m, &rows).expect("factorizes");
         // `max_nnz` が対角だけより小さい: どんな分解も収まらないのでガードが働くこと。
         assert!(factorize_reusing_order(m, &rows, &first.col_perm, &first.row_perm, 1).is_none());
+    }
+
+    /// 試作 `ENOMOTO_MIP_LU_EXTEND` の確かめ: 2 つの分解が FTRAN・BTRAN で同じ答えを返し、どちらも残差が小さい。
+    fn assert_same_solves(rows: &[Vec<(usize, f64)>], a: &FtLu, b: &FtLu, what: &str) {
+        let m = rows.len();
+        let mut state = 4242u64;
+        for t in 0..5 {
+            let rhs: Vec<f64> = (0..m).map(|_| next_rand(&mut state)).collect();
+            let mut scratch = vec![0.0; m];
+            let (mut xa, mut xb) = (vec![0.0; m], vec![0.0; m]);
+            a.solve_into(&rhs, &mut scratch, &mut xa);
+            b.solve_into(&rhs, &mut scratch, &mut xb);
+            assert!(residual_inf(rows, &xa, &rhs) < 1e-9, "{what} {t}: FTRAN residual");
+            for i in 0..m {
+                assert!((xa[i] - xb[i]).abs() < 1e-9, "{what} {t}, {i}: FTRAN {} vs {}", xa[i], xb[i]);
+            }
+            let (ya, yb) = (a.solve_transpose(&rhs), b.solve_transpose(&rhs));
+            for i in 0..m {
+                assert!((ya[i] - yb[i]).abs() < 1e-9, "{what} {t}, {i}: BTRAN {} vs {}", ya[i], yb[i]);
+            }
+        }
+    }
+
+    /// 試作 `ENOMOTO_MIP_LU_EXTEND`: 基底にスラックとして入る行を足した `B' = [B 0; R I]` を、直前の分解の列順の後ろに
+    /// 新しいスラックを置いた順で分解 ([`factorize_with_order`]) すると、一からの分解と同じ答えになる (列を入れ替えて順が古く
+    /// なった場合も)。
+    #[test]
+    fn factorize_with_order_extends_a_basis_by_slack_rows() {
+        for (seed, replaced) in [(11u64, 0usize), (12, 3), (13, 6)] {
+            let m0 = 40;
+            let mut rows = random_sparse_diag_dominant(m0, seed);
+            let lu0 = FtLu::new(factorize(m0, &rows).expect("factorizes"));
+            let (col, row, fill) = lu0.pivot_order().expect("sparse factorization has an order");
+            let (mut col, mut row) = (col.to_vec(), row.to_vec());
+            if replaced > 0 {
+                replace_columns(&mut rows, replaced, seed + 100);
+            }
+            let k = 6;
+            let mut state = seed * 7 + 1;
+            for i in 0..k {
+                let mut r: Vec<(usize, f64)> = (0..3).map(|t| ((i * 5 + t * 13 + seed as usize) % m0, next_rand(&mut state))).collect();
+                r.sort_unstable_by_key(|e| e.0);
+                r.dedup_by_key(|e| e.0);
+                r.push((m0 + i, 1.0));
+                rows.push(r);
+            }
+            let m = m0 + k;
+            col.extend(m0..m);
+            row.extend(m0..m);
+            let ext = factorize_with_order(m, &rows, &col, &row, fill).expect("extends");
+            let fresh = FtLu::new(factorize(m, &rows).expect("factorizes"));
+            assert_same_solves(&rows, &ext, &fresh, &format!("extend seed {seed} replaced {replaced}"));
+        }
+    }
+
+    /// 試作 `ENOMOTO_MIP_LU_EXTEND`: スラック (単位列) が基底にある行を外した基底を、直前の分解の列順・行順からその位置と行を抜いて
+    /// 番号を詰めた順で分解すると、一からの分解と同じ答えになる。
+    #[test]
+    fn factorize_with_order_shrinks_a_basis_by_slack_rows() {
+        for seed in [21u64, 22, 23] {
+            let m0 = 40;
+            let mut rows = random_sparse_diag_dominant(m0, seed);
+            // 位置 p を行 r のスラックにする (列 p は行 r の 1 だけ)
+            let slacks: Vec<(usize, usize)> = (0..5).map(|t| ((t * 7 + seed as usize) % m0, (t * 11 + 3 + seed as usize) % m0)).collect();
+            let mut used_p = std::collections::HashSet::new();
+            let mut used_r = std::collections::HashSet::new();
+            let slacks: Vec<(usize, usize)> = slacks.into_iter().filter(|&(p, r)| used_p.insert(p) && used_r.insert(r)).collect();
+            for &(p, r) in &slacks {
+                for row in rows.iter_mut() {
+                    row.retain(|&(c, _)| c != p);
+                }
+                rows[r].push((p, 1.0));
+                rows[r].sort_unstable_by_key(|e| e.0);
+            }
+            let Some(lu0) = factorize(m0, &rows).map(FtLu::new) else { continue };
+            let (col, row, fill) = lu0.pivot_order().expect("sparse factorization has an order");
+            let gone_p: Vec<bool> = (0..m0).map(|p| slacks.iter().any(|s| s.0 == p)).collect();
+            let gone_r: Vec<bool> = (0..m0).map(|r| slacks.iter().any(|s| s.1 == r)).collect();
+            let map = |gone: &[bool]| -> Vec<usize> {
+                let mut k = 0;
+                gone.iter().map(|&g| if g { usize::MAX } else { k += 1; k - 1 }).collect()
+            };
+            let (np, nr) = (map(&gone_p), map(&gone_r));
+            let small: Vec<Vec<(usize, f64)>> = (0..m0).filter(|&r| !gone_r[r]).map(|r| rows[r].iter().filter(|e| !gone_p[e.0]).map(|&(c, v)| (np[c], v)).collect()).collect();
+            let col: Vec<usize> = col.iter().filter(|&&p| np[p] != usize::MAX).map(|&p| np[p]).collect();
+            let row: Vec<usize> = row.iter().filter(|&&r| nr[r] != usize::MAX).map(|&r| nr[r]).collect();
+            let m = small.len();
+            let shr = factorize_with_order(m, &small, &col, &row, fill).expect("shrinks");
+            let fresh = FtLu::new(factorize(m, &small).expect("factorizes"));
+            assert_same_solves(&small, &shr, &fresh, &format!("shrink seed {seed}"));
+        }
     }
 
     /// 列置換を繰り返しながら `factorize_reusing` で再分解した結果が、同じ行列の

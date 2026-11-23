@@ -114,6 +114,9 @@ pub struct TwoStageLp {
     lu: Option<Arc<super::lu::FtLu>>,
     /// 直近の最適基底とその LU (次の warm start で分解を省く)。
     lu_cache: Option<Arc<LuCache>>,
+    /// 試作 `ENOMOTO_MIP_LU_EXTEND` ([`lu_extend_on`]): 行を外した・足したあと標準形を作り直すまでのあいだ持ち越す、今の基底に対する
+    /// 分解の列順・行順・fill の基準と、その基底 (行の追加・削除の中だけで使い、作り直しの直後に [`Self::lu_ext_finish`] が消費する)
+    lu_ext: Option<(Vec<usize>, Vec<usize>, usize, Vec<usize>)>,
     iters: u64,
     /// 制約行列の識別子 (作り直すたびに新しい値。PRICE 用の行列の使い回しに使う)。
     price_key: u64,
@@ -741,6 +744,7 @@ impl TwoStageLp {
             status: None,
             lu: None,
             lu_cache: None,
+            lu_ext: None,
             dse_cache: None,
             dse_age: 0,
             dc_last_it: None,
@@ -972,6 +976,45 @@ impl TwoStageLp {
     /// キャッシュを捨てる)、新しい行のスラックを基底に入れる。次の求解は基底を分解し直す (HiGHS は
     /// `kExtendInvertWhenAddingRows` で INVERT を拡張する)。コストの実測 (mik-250、HiGHS 流のカット管理で 40 秒、3192 回の
     /// 追加 + 削除): この関数 0.9 秒、`delete_rows` 0.7 秒、再分解 0.1 秒未満。LP の反復 (16 秒) に比べ小さいので、
+    /// 試作 `ENOMOTO_MIP_LU_EXTEND`: 行の追加・削除の始めに、今の基底に対する分解の列順・行順を用意する (持ち越し中のものか、
+    /// 今の基底と同じ基底の LU のキャッシュから)。使えなければ `None`。
+    fn lu_ext_start(&mut self) -> Option<(Vec<usize>, Vec<usize>, usize, Vec<usize>)> {
+        if !lu_extend_on() {
+            return None;
+        }
+        let b = self.basis.as_ref()?;
+        if let Some(o) = self.lu_ext.take() {
+            if o.3 == *b {
+                return Some(o);
+            }
+        }
+        let c = self.lu_cache.as_ref().filter(|c| c.basis == *b)?;
+        let (col, row, fill) = c.lu.pivot_order()?;
+        (col.len() == b.len()).then(|| (col.to_vec(), row.to_vec(), fill, b.clone()))
+    }
+
+    /// 試作 `ENOMOTO_MIP_LU_EXTEND`: 標準形を作り直した直後に、持ち越した列順で今の基底を分解し ([`super::basis_kernel::factorize_basis_order`])、
+    /// LU のキャッシュに置く (次の求解の warm start が分解を省く)。分解できなければ何もしない (次の求解が普通に分解する)。
+    fn lu_ext_finish(&mut self) {
+        let Some((col, row, fill, b)) = self.lu_ext.take() else { return };
+        if self.basis.as_ref() != Some(&b) || b.len() != self.rows.len() {
+            return;
+        }
+        let mut pos = vec![None; self.std.n_total];
+        for (p, &v) in b.iter().enumerate() {
+            if v >= pos.len() || pos[v].is_some() {
+                return;
+            }
+            pos[v] = Some(p);
+        }
+        if let Some(lu) = super::basis_kernel::factorize_basis_order(&self.std, &pos, &col, &row, fill) {
+            sid::xcount("n_lu_ext");
+            self.lu_cache = Some(Arc::new(LuCache { basis: b, lu: Arc::new(lu), d: None }));
+        } else {
+            sid::xcount("n_lu_ext_fail");
+        }
+    }
+
     /// LU の拡張は実装していない (`ENOMOTO_MIP_XPROF` の `lp_add_rows` / `lp_del_rows` で測れる)。
     /// 行を加える。既存の基底に新しい行のスラックを足し、DSE 重みも引き継ぐ (新しい行の重みは 1)。
     /// `ENOMOTO_MIP_ROWS_DSE_EXACT` (試作、既定では使わない): 新しい行の重みを 1 ではなく「未知」(`NaN`) にし、次の求解が
@@ -991,6 +1034,8 @@ impl TwoStageLp {
     /// [`Self::delete_and_add_rows`])。
     fn add_rows_inner(&mut self, new_rows: &[(Vec<(usize, f64)>, f64, f64)], rebuild: bool) {
         let m0 = self.rows.len();
+        // 試作 `ENOMOTO_MIP_LU_EXTEND`: 足す前の基底の分解の順 (足した行のスラックは順の最後に置く)
+        let ext = self.lu_ext_start();
         let new_w = if env_str!("ENOMOTO_MIP_ROWS_DSE_EXACT").is_some() { f64::NAN } else { 1.0 };
         for (r, l, u) in new_rows {
             let mut r: Vec<(usize, f64)> = r.iter().filter(|&&(_, v)| v != 0.0).cloned().collect();
@@ -1007,6 +1052,15 @@ impl TwoStageLp {
         if let Some(b) = self.basis.as_mut() {
             for i in m0..self.rows.len() {
                 b.push(self.n + i);
+            }
+        }
+        // 試作 `ENOMOTO_MIP_LU_EXTEND`: 順の最後に新しい行のスラック (基底の位置 m0..、行 m0..) を足して持ち越し、作り直していれば分解する
+        if let (Some((mut col, mut row, fill, _)), Some(b)) = (ext, self.basis.as_ref()) {
+            col.extend(m0..self.rows.len());
+            row.extend(m0..self.rows.len());
+            self.lu_ext = Some((col, row, fill, b.clone()));
+            if rebuild {
+                self.lu_ext_finish();
             }
         }
         // DSE 重みも引き継ぎ、新しい行の重みは 1 (スラックが基底の行)
@@ -1070,6 +1124,8 @@ impl TwoStageLp {
     /// 基底の修復 ([`Self::repair_basis`]) は標準形を見ないので、作り直しの前に行ってよい。
     fn delete_rows_inner(&mut self, remove: &[bool], rebuild: bool) {
         let m = self.rows.len();
+        // 試作 `ENOMOTO_MIP_LU_EXTEND`: 外す前の基底の分解の順 (外した行のスラックが基底にあった位置と、その行を順から抜く)
+        let ext = self.lu_ext_start();
         let mut new_index = vec![usize::MAX; m];
         let mut k = 0;
         for i in 0..m {
@@ -1115,12 +1171,35 @@ impl TwoStageLp {
             if same {
                 self.dse_cache = Some(Arc::new((nb.clone(), nw)));
             }
+            // 試作 `ENOMOTO_MIP_LU_EXTEND`: 外した行のスラックがすべて基底にあったときだけ、順から外した位置と行を抜いて番号を詰める
+            // (基底の位置は残った位置の順、行は残った行の順)。外した行の数と外れた基底の位置の数が違えば (基底の外のスラックの行を
+            // 外した) 使わない (基底が足りなくなり、下の修復が列を足す)
+            if let Some((col, row, fill, _)) = ext {
+                let mut new_pos = vec![usize::MAX; b.len()];
+                let mut k2 = 0usize;
+                for (p, &v) in b.iter().enumerate() {
+                    if v < n || !remove[v - n] {
+                        new_pos[p] = k2;
+                        k2 += 1;
+                    }
+                }
+                if k2 == k {
+                    let col: Vec<usize> = col.iter().filter_map(|&p| (new_pos[p] != usize::MAX).then_some(new_pos[p])).collect();
+                    let row: Vec<usize> = row.iter().filter_map(|&r| (new_index[r] != usize::MAX).then_some(new_index[r])).collect();
+                    if col.len() == k && row.len() == k {
+                        self.lu_ext = Some((col, row, fill, nb.clone()));
+                    }
+                }
+            }
             self.basis = Some(nb);
         }
         if rebuild {
             self.rebuild();
         }
         self.repair_basis();
+        if rebuild {
+            self.lu_ext_finish();
+        }
         // 基底を直したら重みは使わない
         if !matches!((&self.basis, self.dse_cache.as_deref()), (Some(b), Some((cb, _))) if b == cb) {
             self.dse_cache = None;
@@ -4048,4 +4127,14 @@ pub(crate) fn nodecut_report() {
 /// `s` 標準形で空の行にせず係数を残してスラックを自由変数にする、`p` 受け渡しの基底の直し (`fix_pool_basis`) で空の行を特別に扱わない
 pub(crate) fn freerow_off(c: char) -> bool {
     env_str!("ENOMOTO_MIP_FREEROW_OFF").is_some_and(|v| v.contains(c))
+}
+
+/// 試作 `ENOMOTO_MIP_LU_EXTEND` (analysis/lpiter_20261123、既定では使わない): LP に行を足した・外したとき、LU のキャッシュを捨てて
+/// 次の求解で一から分解する代わりに、直前の分解の列順を写した順で分解し直してキャッシュに置く ([`TwoStageLp::lu_ext_finish`])。
+/// 足した行のスラック (基底) は列順の最後に置くので、古い基底列の新しい行の係数は `L` に入り、新しいスラックは対角 1 のピボットになる
+/// (HiGHS の `HFactor::addRows` と同じ形の分解。探索なしの左視の再生で作る)。外した行は、そのスラックがすべて基底にあったときだけ
+/// その位置と行を順から抜く。分解の作り直しの条件 (更新の回数の上限・数値の確かめ) は今までどおり
+pub(crate) fn lu_extend_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_MIP_LU_EXTEND").is_some_and(|v| v != "0"))
 }
