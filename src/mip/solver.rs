@@ -10841,6 +10841,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 大小の順が整数と同じ
             HO4_ROOT_LP_SECS.fetch_max(self.root_lp_secs.max(0.0).to_bits(), std::sync::atomic::Ordering::Relaxed);
         }
+        // 試作 `ENOMOTO_MIP_HO4_ACFIX` の `e` (確かめ用、analysis/highsonly_20261123): 根の LP の直後に必ず [`Self::acfix_dual`] を回す
+        // (fuzz の小さい問題は根の内点法の丸めまで進まず、`d` が一度も働かない)
+        if !self.params.submip && self.snap.is_none() && super::heur_ipm::acfix_d() && env_str!("ENOMOTO_MIP_HO4_ACFIX").is_some_and(|v| v.contains('e')) {
+            self.acfix_dual(Instant::now() + std::time::Duration::from_secs(10));
+        }
         if self.params.verbose {
             eprintln!("MIP: root LP {:.10e} ({} iters, {:.2}s)", root_obj, self.lp.total_iterations(), self.start.elapsed().as_secs_f64());
             // 根の LP の大きさ (PRESOLVE2 の比べ用、記録だけ): 行、固定でない列、それらの非零

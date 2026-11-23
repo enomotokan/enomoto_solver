@@ -22,7 +22,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// `Σ_j d_j (x_j - 境界) = -L(y)` (`d = -A^T y`、各項は 0 以上) を満たすので、`d_j > 0` の整数列は `x_j - 下限 <= -L / d_j`
     /// (上限側も同じ) で、これが 1 未満なら固定してよい。費用 0・上界 0 の被約費用の固定で、LP を解かずに正しい
     /// (中心の点の値で固定する `HO4_ACFIX` は確かめなしでは誤り、LP で確かめると satellites2 では間に合わない)
-    fn acfix_dual(&mut self, deadline: Instant) {
+    pub(super) fn acfix_dual(&mut self, deadline: Instant) {
         let p = self.p;
         let t0 = Instant::now();
         let Some(ip) = self.lp.interior_point(true, false, deadline) else {
@@ -281,6 +281,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
 }
 
 /// 試作 `ENOMOTO_MIP_HO4_ACFIX` の `d` ([`Solver::acfix_dual`])
-fn acfix_d() -> bool {
+pub(super) fn acfix_d() -> bool {
     env_str!("ENOMOTO_MIP_HO4_ACFIX").is_some_and(|v| v.contains('d'))
 }
