@@ -203,8 +203,9 @@ analysis/buildopt_20261122 の pgo_v3 と同じ作り方 (LTO fat・codegen-unit
 | traininstance6 | 両方解けず | 両方解けず | 1.99 相手だけ | 1.90 相手だけ (1.09) | 広がった | 0・6.15982・54004 | 731.255・14957 | 28290・115954 |
 
 - 2 倍以上負けから外れた問題 (21 問): 当方が追いついた問題。decomp2 (0.1 秒、前処理で解ける)・hypothyroid-k1・graph20-20-1rand・noswot・misc07 などは逆に大きく勝つ。
-- 広がったのは 10teams (1 スレッド、前回 3.53 → 16.0)・30n20b8・CMS750_4 (1 スレッド、時間切れ)・rocI-4-11 と、HiGHS だけが解く 6 問
-  (net12・satellites2-40/60-fs・traininstance6・neos-3216931-puriri・sct2 の多く)。前回は 4 スレッドで 1.0〜1.5 倍だったものが、今回は時間切れで 1.4〜2.0 倍になった。
+- 広がったのは 10teams (1 スレッド、前回 3.53 → 16.0)・30n20b8・CMS750_4 (1 スレッド、時間切れ)・rocI-4-11・fhnw-binpack4-4 (4 スレッド / scip 5.85 → 7.56) と、
+  HiGHS だけが解く 5 問 (net12・satellites2-40・satellites2-60-fs・traininstance6・neos-3216931-puriri)。この 5 問は前回の 4 スレッドの比が 1.0〜1.5 倍で、
+  今回は当方が時間切れになり 1.4〜2.0 倍になった。
 
 ### 6.3 負けの型の見立て
 
