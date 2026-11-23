@@ -1,0 +1,47 @@
+行数 40、問題 8、種 [1]、上限 [600] 秒、設定 ['ours_t1', 'ours_t4', 'scip', 'highs_t1', 'highs_t4']
+版: {'{"enomoto-solver": "0.1.10", "highspy": "1.15.1", "ours_so_sha1": "fd9e4a30f62a626313db0d61fd19cd571a71d068", "pyscipopt": "6.3.0"}': 40}
+当方の .so の sha1 ごとの行の数: {'fd9e4a30': 16} (--so 先頭 8 文字 で当方の行をその .so だけにできる)
+
+== 状態の内訳
+  ours_t1: {'time_limit': 1, 'optimal': 7}
+  ours_t4: {'time_limit': 1, 'optimal': 7}
+  scip: {'time_limit': 2, 'optimal': 6}
+  highs_t1: {'time_limit': 2, 'optimal': 6}
+  highs_t4: {'time_limit': 2, 'optimal': 6}
+  crash・killed・取得失敗 0: []
+
+== 解けた数 (全設定がそろった (問題, 種) で)
+  8 組: ours_t1 7, ours_t4 7, scip 6, highs_t1 6, highs_t4 6
+
+== 最大 RSS
+  ours_t1: 406 MB (comp07-2idx)
+  ours_t4: 987 MB (comp07-2idx)
+  scip: 522 MB (comp07-2idx)
+  highs_t1: 916 MB (comp07-2idx)
+  highs_t4: 959 MB (comp07-2idx)
+
+== 食い違い
+  0 件
+
+== ours_t1 / scip: 8 組、解けた ours_t1 7・scip 6 (ours_t1 だけ 1、scip だけ 0)
+  SGM の比 (どちらかが解けた 7 問、shift 1 秒): 1.657 (95% [0.687, 4.309])  1 より小さければ ours_t1 が速い
+  2 倍以上負けた問題 2:
+    10teams: 16.00 (種 1: optimal 92.7 秒 / optimal 4.9 秒)
+    dano3_5: 2.41 (種 1: optimal 526.4 秒 / optimal 218.1 秒)
+  2 倍以上勝った問題 1:
+    neos-933966: 0.20 (種 1: optimal 120.6 秒 / time_limit 600.0 秒)
+
+== ours_t1 / highs_t1: 8 組、解けた ours_t1 7・highs_t1 6 (ours_t1 だけ 1、highs_t1 だけ 0)
+  SGM の比 (どちらかが解けた 7 問、shift 1 秒): 1.414 (95% [0.226, 7.352])  1 より小さければ ours_t1 が速い
+  2 倍以上負けた問題 2:
+    10teams: 62.62 (種 1: optimal 92.7 秒 / optimal 0.5 秒)
+    mzzv11: 5.32 (種 1: optimal 425.6 秒 / optimal 79.2 秒)
+  2 倍以上勝った問題 1:
+    graph20-20-1rand: 0.01 (種 1: optimal 7.4 秒 / time_limit 600.0 秒)
+
+== ours_t4 / highs_t4: 8 組、解けた ours_t4 7・highs_t4 6 (ours_t4 だけ 1、highs_t4 だけ 0)
+  SGM の比 (どちらかが解けた 7 問、shift 1 秒): 0.636 (95% [0.138, 1.694])  1 より小さければ ours_t4 が速い
+  2 倍以上負けた問題 1:
+    10teams: 3.05 (種 1: optimal 3.6 秒 / optimal 0.5 秒)
+  2 倍以上勝った問題 1:
+    graph20-20-1rand: 0.01 (種 1: optimal 4.1 秒 / time_limit 600.0 秒)
