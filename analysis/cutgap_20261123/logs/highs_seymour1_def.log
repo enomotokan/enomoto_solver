@@ -1,0 +1,76 @@
+Running HiGHS 1.15.1 (git hash: 04024d7): Copyright (c) 2026 under MIT licence terms
+Includes third-party software components, see THIRD_PARTY_NOTICES.md for full details
+MIP seymour1 has 4944 rows; 1372 cols; 33549 nonzeros; 451 integer variables (451 binary)
+Presolving model
+4827 rows, 1219 cols, 33396 nonzeros 0s
+4563 rows, 890 cols, 29839 nonzeros 0s
+Presolve reductions: rows 4563(-381); columns 890(-482); nonzeros 29839(-3710) 
+Presolve reductions: rows 4563(-381); columns 890(-482); nonzeros 29839(-3710) 
+Presolve status: Reduced
+Writing the model to /home/user/enomoto_solver/analysis/cutgap_20261123/presolved/seymour1.mps
+MIP seymour1 has 4944 rows; 1372 cols; 33549 nonzeros; 451 integer variables (451 binary)
+Coefficient ranges:
+  Matrix  [1e+00, 1e+00]
+  Cost    [1e+00, 1e+00]
+  Bound   [1e+00, 1e+00]
+  RHS     [1e+00, 1e+00]
+Presolving model
+4827 rows, 1219 cols, 33396 nonzeros 0s
+4563 rows, 890 cols, 29839 nonzeros 0s
+Presolve reductions: rows 4563(-381); columns 890(-482); nonzeros 29839(-3710) 
+
+Solving MIP model with:
+   4563 rows
+   890 cols (184 binary, 0 integer, 0 implied int., 706 continuous, 0 domain fixed)
+   29839 nonzeros
+   Thread count 1 (of 4 threads). Using 1 max workers. Parallel search off
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+ J       0       0         0   0.00%   -inf            467                Large        0      0      0         0     0.1s
+ S       0       0         0   0.00%   227             460.2507293       50.68%        0      0      0         0     0.5s
+ R       0       0         0   0.00%   403.8464741     457.2881611       11.69%        0      0      0      2912     0.7s
+ S       0       0         0   0.00%   404.3197006     444.7343707        9.09%       29      5      0      3036     0.8s
+ S       0       0         0   0.00%   405.6934255     444.4745564        8.73%       84     24      0      3936     1.7s
+ L       0       0         0   0.00%   405.6934255     412.6439664        1.68%       84     24      0      3936     7.6s
+
+Symmetry detection completed in 0.0s
+No symmetry present
+
+         1       1         1   0.00%   405.6934255     412.6439664        1.68%       84     20      0     24176     7.6s
+
+Solving report
+  Model             seymour1
+  Status            Solution limit reached
+  Primal bound      412.643966429
+  Dual bound        405.693425504
+  Gap               1.68%
+  P-D integral      0.838791133645
+  Solution status   feasible
+                    412.643966429 (objective)
+                    0 (bound viol.)
+                    0 (int. viol.)
+                    0 (row viol.)
+  Timing            7.56
+                    0.04 (Presolve)
+                        MIP    time [calls] = 0.02 [1]
+                        subMIP time [calls] = 0.02 [1]
+                    7.52 (Solve)
+                        MIP    time [calls] = 1.69 [1]
+                        subMIP time [calls] = 5.83 [1]
+                    0.00 (Postsolve)
+                        MIP    time [calls] = 0.00 [1]
+                        subMIP time [calls] = 0.00 [1]
+  Max sub-MIP depth 2
+  Nodes             1
+  Repair LPs        0
+  LP iterations     24176
+                    0 (strong br.)
+                    1024 (separation)
+                    20240 (heuristics)
