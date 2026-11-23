@@ -1,11 +1,11 @@
 #!/bin/bash
-# 試作 ENOMOTO_MIP_RINS_PAR=1 の誤答の確かめ (rootpar_20261122/fuzz.sh の写し、1 スレッドでは試作が効かないので 4 スレッド)。analysis/release0110_20261120/fuzz.sh と同じ 7 本をつけて回し、
+# 試作 ENOMOTO_MIP_RINS_PAR=1 (引数 pp なら ENOMOTO_MIP_PROBE_PAR=1) の誤答の確かめ (rootpar_20261122/fuzz.sh の写し、1 スレッドでは試作が効かないので 4 スレッド)。analysis/release0110_20261120/fuzz.sh と同じ 7 本をつけて回し、
 # cargo test を既定とつけた形で回す。リポジトリの根から: bash analysis/rootpar_20261122/fuzz.sh 
 # ログは analysis/rootpar_20261122/fuzz_logs/ (コミットしない)。
 set -u
 cd "$(dirname "$0")/../.."
-L=analysis/rootpar_20261122/fuzz_logs; mkdir -p $L
-export ENOMOTO_MIP_RINS_PAR=1 ENOMOTO_MIP_THREADS=4
+L=analysis/rootpar_20261122/fuzz_logs${1:-}; mkdir -p $L
+if [ "${1:-}" = pp ]; then export ENOMOTO_MIP_PROBE_PAR=1 ENOMOTO_MIP_THREADS=4; else export ENOMOTO_MIP_RINS_PAR=1 ENOMOTO_MIP_THREADS=4; fi
 run() { name=$1; shift; echo "== $name: $*"; "$@" > $L/$name.log 2>&1; echo "rc=$?"; tail -5 $L/$name.log; }
 run fuzz_tiny env ENOMOTO_MIP_REL_GAP=1e-9 python3 benchmarks/equiv2_bug_20261022/fuzz_tiny.py 400 0
 run fuzz_highs env ENOMOTO_MIP_REL_GAP=1e-9 python3 scripts/mip_fuzz_vs_highs.py 300
@@ -17,5 +17,5 @@ run fuzz_slack2 python3 analysis/wrongans_20261112/seed14/fuzz_slack.py 1000 500
 CT="cargo test --release --lib"
 export CARGO_TARGET_DIR=target/test-py RUSTFLAGS="-L /usr/local/lib -C link-arg=-lpython3.13" LD_LIBRARY_PATH=/usr/local/lib
 echo "== cargo test (RINS_PAR)"; $CT > $L/cargo_rp.log 2>&1; echo "rc=$?"; grep "test result" $L/cargo_rp.log
-unset ENOMOTO_MIP_RINS_PAR ENOMOTO_MIP_THREADS
+unset ENOMOTO_MIP_RINS_PAR ENOMOTO_MIP_PROBE_PAR ENOMOTO_MIP_THREADS
 echo "== cargo test (既定)"; $CT > $L/cargo_def.log 2>&1; echo "rc=$?"; grep "test result" $L/cargo_def.log
