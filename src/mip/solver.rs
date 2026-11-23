@@ -763,6 +763,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) rs_removed: std::collections::HashSet<u64>,
     /// 試作 `ENOMOTO_MIP_NODE_ROWSCOPE` の数: [移った回, 外した行, 足し直した行, 行を持つ子の環, 印なしで消えていた道筋の行, 見た道筋の行]
     pub(super) rs_stats: [u64; 6],
+    /// 試作 `ENOMOTO_MIP_POOL_SEL` の数: [ラウンド, 戻したカット, 破られていたカット, (`e`) 伸びた, 伸びなかった, 外したカット]
+    pub(super) poolsel_stats: [u64; 6],
     /// 診断用: 効き目で続けるノードの分離の結果の内訳 (打ち切り、伸び/差が 0.02 未満、0.1 未満、0.3 未満、0.3 以上)
     pub(super) nca_hist: [u64; 5],
     /// ノードで加えたカットの非零の数の指数移動平均 (`ENOMOTO_T_MIP_NODE_CUT_ADAPT_DENSITY`、[`Solver::nca_dense`])。
@@ -2641,7 +2643,7 @@ impl SnapNode {
             Some(w) => super::queue::unpack_changes(w),
             None => self.changes,
         };
-        OpenNode { changes, lower_bound: self.lower_bound, estimate: self.estimate, depth: self.depth, basis: None, basis_epoch: 0, dse: None, branch: self.branch, prot: None, tags: None, sb: None, inh: self.inh, cwm: self.cwm, scope: None }
+        OpenNode { changes, lower_bound: self.lower_bound, estimate: self.estimate, depth: self.depth, basis: None, basis_epoch: 0, dse: None, branch: self.branch, prot: None, tags: None, sb: None, inh: self.inh, cwm: self.cwm, scope: None, nopool: false }
     }
 }
 
@@ -5557,6 +5559,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         ncl_removed_now: false,
         rs_removed: std::collections::HashSet::new(),
         rs_stats: [0; 6],
+        poolsel_stats: [0; 6],
         nca_hist: [0; 5],
         tdd: if super::treedepth::on() && !params.submip { Some(Box::default()) } else { None },
         nca_cut_nnz: None,
@@ -6093,6 +6096,16 @@ fn highs_conflict_score() -> bool {
     env_str!("ENOMOTO_MIP_HIGHS_CONFLICT_SCORE").is_some()
 }
 
+/// 試作 `ENOMOTO_MIP_CONFSCORE_LITS` (既定では使わない): `a` か `o` ([`Solver::add_conflicts_multi`] の付け方)。ほかの値・未指定は None
+fn confscore_lits() -> Option<char> {
+    static F: std::sync::OnceLock<Option<char>> = std::sync::OnceLock::new();
+    *F.get_or_init(|| match env_str!("ENOMOTO_MIP_CONFSCORE_LITS") {
+        Some("a") => Some('a'),
+        Some("o") => Some('o'),
+        _ => None,
+    })
+}
+
 /// `ENOMOTO_MIP_PROOF_SIDE_REDUCE` ([`Solver::add_proof_from`]): 0 使わない、1 常に (`=1` など)、2 密すぎる証明だけ (`=dense`)。
 fn proof_side_reduce_mode() -> u8 {
     match env_str!("ENOMOTO_MIP_PROOF_SIDE_REDUCE") {
@@ -6159,6 +6172,16 @@ pub(super) fn ncl_has(c: char) -> bool {
 }
 
 /// 試作 `ENOMOTO_MIP_NODE_ROWSCOPE` (既定では使わない、analysis/nodespeed_20261123/README.md): [`Solver::rowscope_sync`]
+/// 試作 `ENOMOTO_MIP_POOL_SEL` (既定では使わない、analysis/nodespeed_20261123/README.md 5 節): [`Solver::pool_select_round`]
+/// 試作 `ENOMOTO_MIP_POOL_SEL` の文字 (`e`: 戻したカットを目的値の伸びで残すか外すか決める)
+pub(super) fn poolsel_has(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_POOL_SEL").is_some_and(|v| v.contains(c))
+}
+
+pub(super) fn poolsel_on() -> bool {
+    env_str!("ENOMOTO_MIP_POOL_SEL").is_some()
+}
+
 pub(super) fn rowscope_has(c: char) -> bool {
     env_str!("ENOMOTO_MIP_NODE_ROWSCOPE").is_some_and(|v| v.contains(c))
 }
@@ -9297,6 +9320,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 return None;
             }
         };
+        // `=d`: 双対の問題も LP の経路で解き、元の行の双対からクロスオーバーで最適基底を作る ([`MipLp::solve_from_primal_dual`])
+        if env_str!("ENOMOTO_MIP_ROOTLP_PRESOLVE").is_some_and(|v| v.contains('d')) {
+            let t1 = Instant::now();
+            if let Some(pi) = self.rootlp_dual_by_lp_path(&cost) {
+                let t_dual = t1.elapsed().as_secs_f64();
+                let it0 = self.lp.total_iterations();
+                if let Some(st) = self.lp.solve_from_primal_dual(&x, &pi, &SolveLimits { deadline: self.deadline, ..Default::default() }) {
+                    if self.params.verbose {
+                        eprintln!(
+                            "MIP: ROOTLP_PRESOLVE=d: primal LP path {t_lp:.2}s, dual LP path {t_dual:.2}s; {st:?} after {} iters ({:.2}s in all)",
+                            self.lp.total_iterations() - it0,
+                            t0.elapsed().as_secs_f64()
+                        );
+                    }
+                    return Some(st);
+                }
+            } else if self.params.verbose {
+                eprintln!("MIP: ROOTLP_PRESOLVE=d: the dual LP path failed ({:.2}s); using the point only", t1.elapsed().as_secs_f64());
+            }
+        }
         let it0 = self.lp.total_iterations();
         let st = self.lp.solve_from_point(&x, &SolveLimits { deadline: self.deadline, ..Default::default() });
         if self.params.verbose {
@@ -9309,6 +9352,88 @@ impl<'a, L: MipLp> Solver<'a, L> {
             );
         }
         st
+    }
+
+    /// 試作 `ENOMOTO_MIP_ROOTLP_PRESOLVE=d`: 根の LP (min c x、行 lo <= a x <= up、列 l <= x <= u) の双対の問題
+    /// max Σ lo p - up q + Σ l zl - u zu (s.t. 各列 Σ_i a_ij (p_i - q_i) + zl_j - zu_j = c_j、p・q・zl・zu >= 0。等式の行は自由な π) を
+    /// LP の経路 (前処理つき) で解き、元の行の双対 `π = p - q` (LP の符号) を返す。
+    fn rootlp_dual_by_lp_path(&self, cost: &[f64]) -> Option<Vec<f64>> {
+        use crate::types::{ConstraintRow, LinearExpr, Objective, RowSense, Sense, VarType, VariableData};
+        let n = self.p.n;
+        let m = self.lp.num_rows();
+        let mut vars: Vec<VariableData> = Vec::new();
+        let mut obj: Vec<(usize, f64)> = Vec::new();
+        // 各列の制約の係数
+        let mut colrows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+        // 行 i の (p の番号, q の番号) (等式なら (π の番号, MAX))
+        let mut rv: Vec<(usize, usize)> = Vec::with_capacity(m);
+        let cont = |lb: f64, ub: f64| VariableData { vtype: VarType::Continuous, lb, ub };
+        for i in 0..m {
+            let (lo, up) = self.lp.row_bounds(i);
+            let row = self.lp.row_ref(i);
+            if lo.is_finite() && up.is_finite() && lo == up {
+                let k = vars.len();
+                vars.push(cont(f64::NEG_INFINITY, f64::INFINITY));
+                obj.push((k, -lo));
+                for &(j, a) in row.iter() {
+                    colrows[j].push((k, a));
+                }
+                rv.push((k, usize::MAX));
+                continue;
+            }
+            let (mut kp, mut kq) = (usize::MAX, usize::MAX);
+            if lo.is_finite() {
+                kp = vars.len();
+                vars.push(cont(0.0, f64::INFINITY));
+                obj.push((kp, -lo));
+                for &(j, a) in row.iter() {
+                    colrows[j].push((kp, a));
+                }
+            }
+            if up.is_finite() {
+                kq = vars.len();
+                vars.push(cont(0.0, f64::INFINITY));
+                obj.push((kq, up));
+                for &(j, a) in row.iter() {
+                    colrows[j].push((kq, -a));
+                }
+            }
+            rv.push((kp, kq));
+        }
+        let mut cons: Vec<ConstraintRow> = Vec::with_capacity(n);
+        for j in 0..n {
+            let (l, u) = self.lp.col_bounds(j);
+            let mut coeffs = std::mem::take(&mut colrows[j]);
+            if l.is_finite() {
+                let k = vars.len();
+                vars.push(cont(0.0, f64::INFINITY));
+                if l != 0.0 {
+                    obj.push((k, -l));
+                }
+                coeffs.push((k, 1.0));
+            }
+            if u.is_finite() {
+                let k = vars.len();
+                vars.push(cont(0.0, f64::INFINITY));
+                if u != 0.0 {
+                    obj.push((k, u));
+                }
+                coeffs.push((k, -1.0));
+            }
+            cons.push(ConstraintRow { expr: LinearExpr { coeffs: coeffs.into_iter().collect(), constant: 0.0 }, sense: RowSense::Eq, rhs: cost[j] });
+        }
+        // 最大化を最小化 (目的の符号を反転) で解く
+        let objective = Objective { expr: LinearExpr { coeffs: obj.into_iter().collect(), constant: 0.0 }, sense: Sense::Minimize };
+        let r = crate::cancel::with_deadline(self.deadline, || crate::simplex::solve_lp_dual_with(&vars, &objective, &cons, crate::types::LpOptions::default()));
+        let y = match (&r.status, r.x) {
+            (crate::types::Status::Optimal, Some(y)) => y,
+            _ => return None,
+        };
+        Some(
+            rv.iter()
+                .map(|&(kp, kq)| (if kp != usize::MAX { y[kp] } else { 0.0 }) - (if kq != usize::MAX { y[kq] } else { 0.0 }))
+                .collect(),
+        )
     }
 
     fn rootlp_simplex_diag(&mut self) {
@@ -10715,6 +10840,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 最大を残す (裏のカットの写しの根の LP は主の基底から 1 反復で終わり、0 秒で上書きしてしまうので)。正の f64 のビットは
             // 大小の順が整数と同じ
             HO4_ROOT_LP_SECS.fetch_max(self.root_lp_secs.max(0.0).to_bits(), std::sync::atomic::Ordering::Relaxed);
+        }
+        // 試作 `ENOMOTO_MIP_HO4_ACFIX` の `e` (確かめ用、analysis/highsonly_20261123): 根の LP の直後に必ず [`Self::acfix_dual`] を回す
+        // (fuzz の小さい問題は根の内点法の丸めまで進まず、`d` が一度も働かない)
+        if !self.params.submip && self.snap.is_none() && super::heur_ipm::acfix_d() && env_str!("ENOMOTO_MIP_HO4_ACFIX").is_some_and(|v| v.contains('e')) {
+            self.acfix_dual(Instant::now() + std::time::Duration::from_secs(10));
         }
         if self.params.verbose {
             eprintln!("MIP: root LP {:.10e} ({} iters, {:.2}s)", root_obj, self.lp.total_iterations(), self.start.elapsed().as_secs_f64());
@@ -12547,7 +12677,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if let Some(snap) = self.snap.clone() {
             for (k, n) in snap.nodes.iter().enumerate() {
                 let tags = Some(Rc::new(vec![snap.serial << 32 | k as u64]));
-                self.queue.push(OpenNode { changes: n.changes.clone(), lower_bound: n.lower_bound.max(root_obj), estimate: n.estimate, depth: n.depth, basis: None, basis_epoch: 0, dse: None, branch: n.branch, prot: None, tags, sb: None, inh: n.inh.clone(), cwm: None, scope: None });
+                self.queue.push(OpenNode { changes: n.changes.clone(), lower_bound: n.lower_bound.max(root_obj), estimate: n.estimate, depth: n.depth, basis: None, basis_epoch: 0, dse: None, branch: n.branch, prot: None, tags, sb: None, inh: n.inh.clone(), cwm: None, scope: None, nopool: false });
             }
             self.snap_alive = vec![true; snap.nodes.len()];
             first = false;
@@ -12555,7 +12685,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if super::cwm::mode().is_some() && !self.params.submip && self.pool_tid == 0 {
                 super::cwm::reset(self.params.verbose);
             }
-            self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), basis_epoch: self.row_log.len(), dse: if dse_all() { self.lp.dse_snapshot().map(|w| Rc::new(NodeDse::Pairs(w))) } else { None }, branch: None, prot, tags: None, sb: None, inh: None, cwm: None, scope: None });
+            self.queue.push(OpenNode { changes: Vec::new(), lower_bound: root_obj, estimate: root_obj, depth: 0, basis: Some(Rc::new(self.lp.basis())), basis_epoch: self.row_log.len(), dse: if dse_all() { self.lp.dse_snapshot().map(|w| Rc::new(NodeDse::Pairs(w))) } else { None }, branch: None, prot, tags: None, sb: None, inh: None, cwm: None, scope: None, nopool: false });
         }
         // 診断用 (`ENOMOTO_MIP_SUBMIP_VERBOSE`): 木の始まり (根の前処理・LP・カット・ヒューリスティクスの終わり) を道筋つきで出す
         // (サブ MIP の時間のうち根の割合を見る。analysis/rens_resume_20261101.md)
@@ -13678,6 +13808,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let mut resolves = 0;
             // 試作 `ENOMOTO_MIP_NODE_ROWSCOPE`: このノードで LP に加えたカットは、この番号以降
             let rs_id0 = self.next_cut_id;
+            // 試作 `ENOMOTO_MIP_POOL_SEL` の `e`: プールから戻したラウンドの前の目的値と、戻したカットの最初の番号 (解き直しで目的値が
+            // 伸びたかを見る)。伸びなかったら真にし、戻したカットを外して、このノードと子ではプールから戻さない
+            let mut pse_pending: Option<(f64, u64)> = None;
+            let mut pse_nopool = false;
             // ノードの分離でカットを加えた後の解き直しか (その LP の時間を `node_cut_secs` に足す)
             let mut node_cut_resolve: Option<Instant> = None;
             let mut nc_res_it = 0u64;
@@ -14135,6 +14269,32 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 xp("m_lpstat");
                 self.node_lp_opt = true;
                 node_obj = self.lp.objective() + self.p.offset;
+                // 試作 `ENOMOTO_MIP_POOL_SEL` の `e`: 直前にプールから戻したなら、目的値が伸びたかを見る (許容誤差は行の活動量の判定と同じ
+                // 相対 1e-6)。伸びなければ戻したカットを外して解き直し (外した後の LP の最適値は戻す前と同じ)、このノードと子では戻さない
+                if let Some((obj0, id0)) = pse_pending.take() {
+                    if node_obj > obj0 + 1e-6 * (1.0 + obj0.abs()) {
+                        self.poolsel_stats[3] += 1;
+                    } else {
+                        self.poolsel_stats[4] += 1;
+                        pse_nopool = true;
+                        self.sync_cut_age();
+                        let m0 = self.p.m;
+                        let mr = self.lp.num_rows();
+                        let mut remove = vec![false; mr];
+                        let mut cnt = 0u64;
+                        for k in 0..self.cut_ids.len().min(mr.saturating_sub(m0)) {
+                            if self.cut_ids[k] >= id0 {
+                                remove[m0 + k] = true;
+                                cnt += 1;
+                            }
+                        }
+                        if cnt > 0 {
+                            self.delete_lp_rows(&remove);
+                            self.poolsel_stats[5] += cnt;
+                            continue;
+                        }
+                    }
+                }
                 rp_obj = node_obj;
                 if resolves == 0 {
                     rp_obj0 = node_obj;
@@ -14767,11 +14927,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 40 問 (同時測定) 1 回目: 既定 10 本 18 問 27.75 に対し 100 本 18 問 26.86、2 回目: 19 問 27.19 に対し 18 問 27.63
                 // (neos-860300 が 58.7 秒 -> 時間切れ、nw04 17.7 -> 36.1 秒 (経路の揺れ)、misc07 11.3 -> 14.5 秒。mik-250・binkar10_1 は
                 // 2 回とも速い)。2 回の合計で解けた数が 37 -> 36 と減るので既定は 10 本のまま
-                } else if resolves < 2 && node.depth > 0 && (plunge_depth == 0 || (self.ncl_removed_now && (ncl_has('a') || rowscope_has('a')))) && env_str!("ENOMOTO_MIP_NO_POOL_CUTS").is_none() && {
+                } else if resolves < 2 && node.depth > 0 && (plunge_depth == 0 || (self.ncl_removed_now && (ncl_has('a') || rowscope_has('a'))) || poolsel_on()) && !(poolsel_has('e') && (node.nopool || pse_nopool)) && env_str!("ENOMOTO_MIP_NO_POOL_CUTS").is_none() && {
                     let r0 = self.lp.num_rows();
                     // 試作 `ENOMOTO_MIP_NODE_CLEANUP` の `a`: このノードへ移るときに行を外したなら、破られたカットを本数の制限なしに戻す
                     let max_cuts = if self.ncl_removed_now && (ncl_has('a') || rowscope_has('a')) { usize::MAX } else { tunable!("ENOMOTO_T_MIP_POOL_CUTS_PER_NODE", 10usize, usize) };
-                    let added = self.pool_cut_round(&x, max_cuts);
+                    // 試作 `ENOMOTO_MIP_POOL_SEL`: 毎ノード、本数を固定せずカット選びの物差しで選んで戻す
+                    let (obj_pre, id_pre) = (node_obj, self.next_cut_id);
+                    let added = if poolsel_on() { self.pool_select_round(&x) } else { self.pool_cut_round(&x, max_cuts) };
+                    if added && poolsel_has('e') {
+                        pse_pending = Some((obj_pre, id_pre));
+                    }
                     if added && tree_log() && !self.params.submip {
                         eprintln!("EPOOL d={} rows {} -> {} lp={node_obj}", node.depth, r0, self.lp.num_rows());
                     }
@@ -15215,6 +15380,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     inh: child_inh.clone(),
                     cwm: None,
                     scope: child_scope.clone(),
+                    nopool: pse_nopool,
                 }
             };
             // 試作 `ENOMOTO_MIP_CWM`: 子の札 (対を始めるなら 2 つの子に違う腕)。乱数はスレッドの種とノード番号から
@@ -20808,8 +20974,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         let lk: Option<super::domain::ProofLookup> = if conflict_proof_explain() || lit_explain() || lit_explain_auto() || lit_explain_sig() || orbitope_reason() { Some(&lookup) } else { None };
         let confs = self.dom.analyze_multi_bumps(self.p, start, max_len, reconv, hcs.then_some(&mut bumps), lk);
-        if hcs && !bumps.is_empty() {
+        // 試作 `ENOMOTO_MIP_CONFSCORE_LITS` (既定では使わない、analysis/bnatt_20261123): HiGHS 式の付け方のときも、SCIP の VSIDS と同じく
+        // できた衝突のリテラルの列の衝突スコアを上げる。`a` = HiGHS 式に足す、`o` = リテラルだけ (HiGHS 式の変更では上げない)
+        let csl = confscore_lits();
+        if hcs && !bumps.is_empty() && csl != Some('o') {
             self.pc.bump_conflict(&bumps);
+        }
+        if hcs && csl.is_some() {
+            for c in &confs {
+                self.pc.add_conflict(c);
+            }
         }
         self.hcs_diag[0] += 1;
         self.hcs_diag[1] += bumps.len() as u64;
@@ -27739,6 +27913,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if self.snap.is_none() && !self.params.submip {
                 print_basis_nb_diag();
+            }
+            if poolsel_on() {
+                eprintln!("MIP: pool selection (POOL_SEL): rounds {} cuts added {} violated {}; e: improved {} not improved {} cuts removed {}", self.poolsel_stats[0], self.poolsel_stats[1], self.poolsel_stats[2], self.poolsel_stats[3], self.poolsel_stats[4], self.poolsel_stats[5]);
             }
             if rowscope_on() {
                 eprintln!("MIP: node row scope (NODE_ROWSCOPE): moves {} rows removed {} re-added {} child links {}; path rows seen {} of which gone without the mark {}", self.rs_stats[0], self.rs_stats[1], self.rs_stats[2], self.rs_stats[3], self.rs_stats[5], self.rs_stats[4]);
