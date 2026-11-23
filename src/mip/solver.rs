@@ -6078,6 +6078,16 @@ fn highs_conflict_score() -> bool {
     env_str!("ENOMOTO_MIP_HIGHS_CONFLICT_SCORE").is_some()
 }
 
+/// 試作 `ENOMOTO_MIP_CONFSCORE_LITS` (既定では使わない): `a` か `o` ([`Solver::add_conflicts_multi`] の付け方)。ほかの値・未指定は None
+fn confscore_lits() -> Option<char> {
+    static F: std::sync::OnceLock<Option<char>> = std::sync::OnceLock::new();
+    *F.get_or_init(|| match env_str!("ENOMOTO_MIP_CONFSCORE_LITS") {
+        Some("a") => Some('a'),
+        Some("o") => Some('o'),
+        _ => None,
+    })
+}
+
 /// `ENOMOTO_MIP_PROOF_SIDE_REDUCE` ([`Solver::add_proof_from`]): 0 使わない、1 常に (`=1` など)、2 密すぎる証明だけ (`=dense`)。
 fn proof_side_reduce_mode() -> u8 {
     match env_str!("ENOMOTO_MIP_PROOF_SIDE_REDUCE") {
@@ -20620,8 +20630,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         let lk: Option<super::domain::ProofLookup> = if conflict_proof_explain() || lit_explain() || lit_explain_auto() || lit_explain_sig() || orbitope_reason() { Some(&lookup) } else { None };
         let confs = self.dom.analyze_multi_bumps(self.p, start, max_len, reconv, hcs.then_some(&mut bumps), lk);
-        if hcs && !bumps.is_empty() {
+        // 試作 `ENOMOTO_MIP_CONFSCORE_LITS` (既定では使わない、analysis/bnatt_20261123): HiGHS 式の付け方のときも、SCIP の VSIDS と同じく
+        // できた衝突のリテラルの列の衝突スコアを上げる。`a` = HiGHS 式に足す、`o` = リテラルだけ (HiGHS 式の変更では上げない)
+        let csl = confscore_lits();
+        if hcs && !bumps.is_empty() && csl != Some('o') {
             self.pc.bump_conflict(&bumps);
+        }
+        if hcs && csl.is_some() {
+            for c in &confs {
+                self.pc.add_conflict(c);
+            }
         }
         self.hcs_diag[0] += 1;
         self.hcs_diag[1] += bumps.len() as u64;
