@@ -7547,7 +7547,10 @@ fn prbwork_active(submip: bool) -> bool {
 /// 含意による境界をそのまま使う。行だけの変化 (冗長な行の削除・平行な行の併合・等式による疎化) は同じ実行可能集合の書き直しで、
 /// 列の定義域は同じなので、前の回が何も得なかったプロービングをやり直す理由がない (新しい閾値なし)。
 /// nursesched-sprint02 は根の前処理で、成果 0 の 1.3 秒のプロービングを疎化の後にもう一度回していた (固定 0・含意の数も同じ)。
-/// `ENOMOTO_MIP_PRBWORK` (再スタートの後、前の回が上限で打ち切られたら回さない) とは別で、再スタートの後は列が変わるのでここでは省かない
+/// 再スタートの問題は前の求解の問題 (前処理の後) を狭めたものなので、再スタートの前処理で列が 1 本も消えず境界も変わらなければ、
+/// 前の求解の最後の成果 0 の回の含意がそのまま成り立ち、ここでも省く (supportcase18 は再スタートで新たな固定が 0 で、3 回の再スタートの後を省く)。
+/// `ENOMOTO_MIP_PRBWORK` (再スタートの後、前の回が成果 0 のまま上限で打ち切られたら、列が変わっていても回さない) とは別の判定で、両方つければ
+/// どちらかが当てはまれば省く。`f` を含めば成果があった回も控える (fuzz 用の強制)
 pub(crate) fn probrep_on() -> bool {
     env_str!("ENOMOTO_MIP_PROBREP").is_some_and(|v| v != "0")
 }
@@ -7555,6 +7558,8 @@ pub(crate) fn probrep_on() -> bool {
 /// [`probrep_on`]: 成果 0 だったプロービングに渡した問題の列の状態と、その回の含意・含意による境界
 struct ProbRepSnap {
     n: usize,
+    /// 列の対応が変わっていないことの確かめに、境界・整数の印に加えて目的係数も比べる
+    cost: Vec<f64>,
     col_lo: Vec<f64>,
     col_up: Vec<f64>,
     is_int: Vec<bool>,
@@ -7572,7 +7577,7 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     // `ENOMOTO_MIP_PROBREP` ([`probrep_on`]): 前の回が成果 0 で、列の状態が同じなら回さない
     if probrep_on() && !submip && !PRESOLVE_IN_SUBMIP.with(|f| f.get()) {
         let same = PROBREP_LAST.with(|c| {
-            c.borrow().as_ref().filter(|sn| sn.n == prob.n && sn.col_lo == prob.col_lo && sn.col_up == prob.col_up && sn.is_int == prob.is_int).map(|sn| (sn.edges.clone(), sn.implied.clone()))
+            c.borrow().as_ref().filter(|sn| sn.n == prob.n && sn.cost == prob.cost && sn.col_lo == prob.col_lo && sn.col_up == prob.col_up && sn.is_int == prob.is_int).map(|sn| (sn.edges.clone(), sn.implied.clone()))
         });
         if let Some((edges, implied)) = same {
             if verbose {
@@ -8643,8 +8648,11 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
     // `ENOMOTO_MIP_PROBREP` ([`probrep_on`]): 成果 0 なら、この回に渡した問題の列の状態と含意を控える (成果があれば消す)
     if probrep_on() && !submip && !PRESOLVE_IN_SUBMIP.with(|f| f.get()) {
         let (gf, gt, ge) = PROBE_GAIN.with(|f| f.get());
-        let snap = (gf + gt + ge == 0).then(|| ProbRepSnap {
+        // `f` を含めば成果があっても控える (省く道を fuzz で通すための強制。含意は狭めた問題でもそのまま成り立つ)
+        let force = env_str!("ENOMOTO_MIP_PROBREP").is_some_and(|v| v.contains('f'));
+        let snap = (gf + gt + ge == 0 || force).then(|| ProbRepSnap {
             n: prob.n,
+            cost: prob.cost.clone(),
             col_lo: prob.col_lo.clone(),
             col_up: prob.col_up.clone(),
             is_int: prob.is_int.clone(),
