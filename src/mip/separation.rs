@@ -4751,7 +4751,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 本数を固定せずにノードの分離と同じ物差し ([`select_cuts`]: 質が最良の半分以上、平行度の上限、1 ラウンドの上限は
     /// `ENOMOTO_T_MIP_HCM_NODE_MAX_CUTS`) で選んで LP に加える (SCIP のプールの分離は、効き目の下限とカット選びで絞った違反カットを
     /// 毎ノード戻す)。呼び出し側は取り出したノードに限らず毎ノード呼ぶ。LP の行が増えすぎていれば先に効いていないカットを外す
-    /// ([`Self::pool_cut_round`] と同じ)。加えたら真
+    /// ([`Self::pool_cut_round`] と同じ)。加えたら真。値に `e` を含めると、戻したラウンドの解き直しで目的値が伸びなかったときは
+    /// 戻したカットを外し、そのノードと子では戻さない (呼び出し側の木のループで判定する)
     pub(super) fn pool_select_round(&mut self, x: &[f64]) -> bool {
         if self.cut_pool.is_empty() {
             return false;
