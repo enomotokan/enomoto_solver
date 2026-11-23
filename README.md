@@ -173,7 +173,7 @@ The solution returned is polished before it is reported: integer variables are r
 
 ### Reading MPS files (`readModel`)
 
-`Model.readModel(path)` reads an MPS file (free format; gzip-compressed if the name ends in `.gz`) into an empty Model. The Rust core (`src/mps.rs`) does the parsing. The variables appear in `M.variables` in column order, and `M.get_variable(column_name)` returns one by name.
+`Model.readModel(path)` reads an MPS file into an empty Model (gzip-compressed if the name ends in `.gz`). The Rust core (`src/mps.rs`) does the parsing. The variables appear in `M.variables` in column order, and `M.get_variable(column_name)` returns one by name.
 
 ```python
 M = Model()
@@ -182,14 +182,26 @@ sol = M.solve()
 print(sol.objective, M.get_variable("C0001").value)
 ```
 
+Format:
+
+- The file is first read as free format (fields separated by blanks). Fixed-format files whose names contain no blanks read the same way (MIPLIB and Mittelmann instances are written like this).
+- Only if that fails (for example a row defined twice, or a line with the wrong number of fields), the data lines are read again by fixed-format columns: 2–3, 5–12, 15–22, 25–36, 40–47 and from 50 on. Names may then contain blanks (Netlib `forplan` has rows such as `DEDO3 1R`). HiGHS falls back from free to fixed format in the same way. If the fixed-format reading fails too, the error of the free-format reading is reported.
+- Sections: `NAME`, `OBJSENSE` (`MAX`/`MAXIMIZE`/`MIN`/`MINIMIZE`, on the same line or the next; `OBJSENS` is accepted too), `ROWS` (`N`/`L`/`G`/`E`), `COLUMNS` (integer columns between `'MARKER'` `'INTORG'` and `'INTEND'`), `RHS`, `RANGES`, `BOUNDS` (`UP`/`LO`/`FX`/`FR`/`MI`/`PL`/`BV`/`LI`/`UI`) and `ENDATA`. Lines starting with `*` are comments.
+
 The conventions follow HiGHS:
 
-- The first `N` row is the objective. A right-hand side `v` on the objective row gives the objective constant `-v`.
-- Integer columns between `MARKER`s get bounds `[0, 1]` unless `BOUNDS` mentions them.
-- A row with `RANGES` becomes two constraints, `<=` and `>=`.
+- The first `N` row is the objective; further `N` rows are dropped. A right-hand side `v` on the objective row gives the objective constant `-v`.
+- Integer columns between `MARKER`s get bounds `[0, 1]` unless `BOUNDS` mentions them; if it does, a side that is not written stays at `0` / `+inf`.
+- `RANGES` on an `E` row widens it upward or downward by the sign of the value; on `L`/`G` rows by its absolute value. A row with a range becomes two constraints, `<=` and `>=`.
+- Repeated entries of the same column and row in `COLUMNS` are added up. A second `RANGES` value for the same row, or a second bound on the same side of the same column, is ignored.
 - References to undefined rows or columns are skipped with a warning.
 
-Unlike HiGHS, coefficients are read exactly as written: entries with absolute value at most 1e-9 are not dropped. Quadratic terms, semi-continuous variables and SOS are not supported and raise `ValueError`.
+Unlike HiGHS:
+
+- Coefficients are read exactly as written: entries with absolute value at most 1e-9 are not dropped.
+- A negative `UP` bound on a column whose lower bound is not written sets the lower bound to `-inf` (the convention of many readers; HiGHS keeps it at 0).
+
+Not supported (raise `ValueError`): quadratic terms (`QUADOBJ`, `QSECTION`, `QMATRIX`, `QCMATRIX`), `SOS`, `INDICATORS`, `GENCONS`, `PWLOBJ`, and semi-continuous / semi-integer bounds (`SC`, `SI`).
 
 ### Number of threads (`threads`)
 
