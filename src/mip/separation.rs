@@ -2813,6 +2813,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if super::sepalloc::active() && !self.params.submip && job.is_none() {
                 super::sepalloc::begin_round(&self.sl.st[0], self.lp.objective() + p.offset, self.params.verbose);
             }
+            // 試作 `ENOMOTO_MIP_HEUR1T` の `r` ([`super::solver::heur1t`]): ラウンドの初めの LP の被約費用を lurking bound としてためる
+            if super::solver::heur1t('r') && !self.params.submip && job.is_none() && self.snap.is_none() {
+                self.heur1t_collect_lurking();
+            }
             // 診断 (`ENOMOTO_MIP_CUTSTOP_LOG`、analysis/sepalloc_20261121/): ラウンドの初めの LP の値とループの手間 (同じ手間での伸びの比べ用)
             if !self.params.submip && job.is_none() && env_str!("ENOMOTO_MIP_CUTSTOP_LOG").is_some_and(|v| v != "0") {
                 // (analysis/cutstop_20261122: LP の行の数と非零・全体の手間も出す。ラウンドの損の見積り用)
