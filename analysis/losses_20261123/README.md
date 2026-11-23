@@ -103,7 +103,7 @@ analysis/buildopt_20261122 の pgo_v3 と同じ作り方 (LTO fat・codegen-unit
   (std の汎用関数 1216 個も) の学習結果を「function control flow change detected (hash mismatch)」として捨てていた
   (`-Cllvm-args=-pgo-warn-missing-function` つきで作り直して数えた。捨てた中には単体法の solve_slope_intercept_dual_impl も入る)。
   記号名は合っていて、関数の形 (制御の流れのハッシュ) が違う: 学習用と計測用で target-cpu が違うためと見る。
-- build.sh を直した (コミット 1f6e1c34c 以降): 学習用も `-C target-cpu=x86-64-v3` で作り、作業木と学習結果を固定の場所 (/tmp/enomoto_losses_build) に
+- build.sh を直した (コミット b03029409 以降): 学習用も `-C target-cpu=x86-64-v3` で作り、作業木と学習結果を固定の場所 (/tmp/enomoto_losses_build) に
   置く。build.txt に hash mismatch の数 (`pgo_hash_mismatch`) を書く。学習から作り直すと 0、コミットした新しい学習結果から作り直しても 0。
   ただし .so の sha1 は固定の場所でも作るたびに変わった (777dabbf… と 5bb2b826…)。sha1 で照合しない方針は変えない。
 - 時間の比べ (`pgo_check.py`、1 スレッド・決定的・種 1、学習と重ならない 6 問 × 2 回、速い方どうし、res_pgocheck.jsonl):
