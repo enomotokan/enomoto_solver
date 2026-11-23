@@ -6159,6 +6159,10 @@ pub(super) fn ncl_has(c: char) -> bool {
 }
 
 /// 試作 `ENOMOTO_MIP_NODE_ROWSCOPE` (既定では使わない、analysis/nodespeed_20261123/README.md): [`Solver::rowscope_sync`]
+pub(super) fn rowscope_has(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_NODE_ROWSCOPE").is_some_and(|v| v.contains(c))
+}
+
 pub(super) fn rowscope_on() -> bool {
     env_str!("ENOMOTO_MIP_NODE_ROWSCOPE").is_some()
 }
@@ -9537,7 +9541,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// (保存した基底を置く前) に、LP の木の行 (番号が木の始まり以降) をそのノードの道筋の行 `scope` に合わせる。SCIP と同じく、木の中で
     /// 加えた行は加えたノードの部分木の LP にだけ置く。道筋にない木の行は外し (プールには残る)、前に外した道筋の行は同じ番号で足し直す。
     /// 根で加えた行は今までどおり全体に残し、年齢で外す仕組みもそのまま (年齢で外れた道筋の行は足し直さない)。行の追加・削除は
-    /// `row_log` に残るので、置く基底はそれに合わせて直される (足し直した行は基底になる)
+    /// `row_log` に残るので、置く基底はそれに合わせて直される (足し直した行は基底になる)。値に `a` を含めると、行を外したノードでは
+    /// プールの破られたカットを本数の制限なしに戻す
     fn rowscope_sync(&mut self, scope: &Option<Rc<super::queue::RowScope>>) {
         if !rowscope_on() || self.params.submip {
             return;
@@ -9576,6 +9581,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 道筋の行のうち LP になく、外した印もないもの (年齢などで外れた) の数と、道筋の行の数
         self.rs_stats[4] += path.keys().filter(|id| !present.contains(id) && !self.rs_removed.contains(id)).count() as u64;
         self.rs_stats[5] += path.len() as u64;
+        // `a`: 行を外したノードでは、プールのラウンドで破られたカットを本数の制限なしに戻す (`NODE_CLEANUP` の `a` と同じ)
+        self.ncl_removed_now = cnt > 0 && rowscope_has('a');
         if cnt > 0 {
             self.delete_lp_rows(&remove);
             self.rs_stats[1] += cnt;
@@ -14760,10 +14767,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 40 問 (同時測定) 1 回目: 既定 10 本 18 問 27.75 に対し 100 本 18 問 26.86、2 回目: 19 問 27.19 に対し 18 問 27.63
                 // (neos-860300 が 58.7 秒 -> 時間切れ、nw04 17.7 -> 36.1 秒 (経路の揺れ)、misc07 11.3 -> 14.5 秒。mik-250・binkar10_1 は
                 // 2 回とも速い)。2 回の合計で解けた数が 37 -> 36 と減るので既定は 10 本のまま
-                } else if resolves < 2 && node.depth > 0 && (plunge_depth == 0 || (self.ncl_removed_now && ncl_has('a'))) && env_str!("ENOMOTO_MIP_NO_POOL_CUTS").is_none() && {
+                } else if resolves < 2 && node.depth > 0 && (plunge_depth == 0 || (self.ncl_removed_now && (ncl_has('a') || rowscope_has('a')))) && env_str!("ENOMOTO_MIP_NO_POOL_CUTS").is_none() && {
                     let r0 = self.lp.num_rows();
                     // 試作 `ENOMOTO_MIP_NODE_CLEANUP` の `a`: このノードへ移るときに行を外したなら、破られたカットを本数の制限なしに戻す
-                    let max_cuts = if self.ncl_removed_now && ncl_has('a') { usize::MAX } else { tunable!("ENOMOTO_T_MIP_POOL_CUTS_PER_NODE", 10usize, usize) };
+                    let max_cuts = if self.ncl_removed_now && (ncl_has('a') || rowscope_has('a')) { usize::MAX } else { tunable!("ENOMOTO_T_MIP_POOL_CUTS_PER_NODE", 10usize, usize) };
                     let added = self.pool_cut_round(&x, max_cuts);
                     if added && tree_log() && !self.params.submip {
                         eprintln!("EPOOL d={} rows {} -> {} lp={node_obj}", node.depth, r0, self.lp.num_rows());
