@@ -86,10 +86,10 @@
 
 ## 8. 既定にした (2026-11-23、利用者の判断)
 
-- 変更: `ENOMOTO_MIP_PROOFCOST` は未設定で `pa` (`env_def!`、`=0` で切る)。**サブ MIP には使わない**ように絞った (サブ MIP は 4 スレッドの求解の中でも
+- 変更: `ENOMOTO_MIP_PROOFCOST` は未設定で `pa` (`env_def!`、`=0` で切る)。**スレッドが 1 本の外側の求解だけ**に絞った (`params.threads <= 1` かつサブ MIP でない。2 スレッド以上の求解の根 (木を分け合う前) も `pool` がないので外す) (サブ MIP は 4 スレッドの求解の中でも
   1 スレッドで動き、既定でサブ MIP も双対証明を使う (`ENOMOTO_MIP_SUBMIP_HIGHS` の `f`) ので、そこにかけると 4 スレッドの動きが変わる)。
   P の計測はサブ MIP にもかけた形だったが、絞った後の 1 スレッドの mas76 は 38.5 → 27.4 秒・ノード 121235 (P の計測と同じ) で、得は外側の木から来ている。
   pk1 (種 1) は既定・`=0` とも 60 秒の境目で時間切れ (ノード 143870 → 191340)。
-- 確かめ (`adopt/`): cargo test 419 通過 (`cargo_test.txt`)。fuzz 7 本・lp_fuzz_vs_highs 300 × 3・mip_fuzz_symmetric 300 とも bad 0 (`fuzz.out`、サブ MIP を外した後に回し直した)。
+- 確かめ (`adopt/`): cargo test 419 通過 (`cargo_test.txt`)。fuzz 7 本・lp_fuzz_vs_highs 300 × 3・mip_fuzz_symmetric 300 とも bad 0 (`fuzz.out`、絞った後の版で回し直した。絞った後の 1 スレッドの mas76 もノード 121235)。
   Netlib 93 問 (`netlib.csv`・`netlib.out`): 92 問で最適、目的値は HiGHS と一致 (forplan は以前から crash)。4 スレッド (`t4.txt`): mas76・pk1 とも既定・`=0` で
   生きている証明が 604・344 本で同じ。1 スレッド (`t1_nosub.txt`)。

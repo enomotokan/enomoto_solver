@@ -3220,7 +3220,7 @@ fn pool_dse_nan() -> bool {
 /// - `p`: 本数の上限を max(200, `ENOMOTO_T_MIP_PROOF_POOL_PER_COL` (4) × 列数) 以下にする
 /// - `a`: 捨てるときに、前回から使われた (刈り込み・締め付けた) 印のある証明は印を消して後ろに回す (clock 法の年齢)
 /// 木を分け合う (2 スレッド以上) ときは、どちらも以前から既定で入っているので、4 スレッドの動きは変わらない。サブ MIP (4 スレッドの求解の中でも
-/// 1 スレッドで動く) には使わない。
+/// 1 スレッドで動く) と、2 スレッド以上の求解の根 (木を分け合う前) には使わない (`params.threads` が 1 のときだけ)。
 pub(super) fn proofcost(c: char) -> bool {
     env_def!("ENOMOTO_MIP_PROOFCOST", "pa").is_some_and(|v| v.contains(c))
 }
@@ -20145,8 +20145,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 消して後ろに回す (clock 法)。
     fn proof_evict(&mut self, cat: usize) {
         // `ENOMOTO_MIP_PROOFCOST` の `a` ([`proofcost`]、既定): 1 スレッドでも年齢 (clock 法) をかける
-        // サブ MIP には使わない (4 スレッドの求解の中のサブ MIP も 1 スレッドで、そこを変えると 4 スレッドの動きが変わるため)
-        let aging = (self.pool.is_some() || (proofcost('a') && !self.params.submip)) && env_str!("ENOMOTO_MIP_PROOF_NO_AGING").is_none();
+        // 1 スレッドの外側の求解だけ (サブ MIP は 4 スレッドの求解の中でも 1 スレッドで、4 スレッドの根 (木を分け合う前) も `pool` がないので、
+        // そこを変えると 4 スレッドの動きが変わる)
+        let aging = (self.pool.is_some() || (proofcost('a') && !self.params.submip && self.params.threads <= 1)) && env_str!("ENOMOTO_MIP_PROOF_NO_AGING").is_none();
         let mut turns = self.proof_fifo[cat].len();
         while let Some(id) = self.proof_fifo[cat].pop_front() {
             let k = (id - self.proof_first_id) as usize;
@@ -20289,7 +20290,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let per_col = tunable!("ENOMOTO_T_MIP_PROOF_POOL_PER_COL", 4usize, usize);
         // `ENOMOTO_MIP_PROOFCOST` の `p` ([`proofcost`]、既定): 1 スレッドでも同じ上限にする
         // (サブ MIP には使わない。`aging` と同じ)
-        let cap = if per_col > 0 && (self.pool.is_some() || (proofcost('p') && !self.params.submip)) { cap.min((per_col * self.p.n).max(200)) } else { cap };
+        let cap = if per_col > 0 && (self.pool.is_some() || (proofcost('p') && !self.params.submip && self.params.threads <= 1)) { cap.min((per_col * self.p.n).max(200)) } else { cap };
         if cap == 0 {
             return;
         }
