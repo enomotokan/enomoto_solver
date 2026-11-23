@@ -203,3 +203,4 @@ PROBE_PAR は閉じる (採らない)。試作のコードは既定オフのま�
   回し方はリポジトリの根で pip install -e . の後 `cd analysis/rootpar_20261122/wide && python run.py P K` (K = 0〜5)、集計 `python ci.py 60 def rp res_P_s*.jsonl`。
 - 分担 0 はこの子 (まとめ役)、1〜5 は親が割り当てる。
 - 回したビルド:
+  - P 0: 1602a3a65 (pip install -e .、0.1.10)。58 行・crash 0。ci 0.988 [0.966, 1.012]、解けた 23/23、食い違い 0。
