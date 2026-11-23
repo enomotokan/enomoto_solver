@@ -8318,13 +8318,13 @@ fn probe(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option<bool> {
         CLQPRB_SUPPRESS.with(|f| f.set(false));
         return r;
     }
-    // `ENOMOTO_MIP_ENUM_PRESOLVE` (試作): HiGHS の Enumeration 前処理 ([`enumerate_rows`])。`=impl` ならプロービングの含意も伝播に使う
+    // `ENOMOTO_MIP_ENUM_PRESOLVE` (試作): HiGHS の Enumeration 前処理 ([`enumerate_rows`])。`=impl` ならプロービングの含意も伝播に使う。`=all`・`=allimpl` は行の数・空振りの上限を外す ([`enumerate_rows`])
     // (行の数の上限と空振りでやめる規則を外して全部の候補の行に回す試作 `ENOMOTO_MIP_HO3_ENUM` は 2026-11-18 に削除。
     // analysis/highs_only_20261105/G3.md・analysis/gate2_20261117/ho3sl/README.md)
     if let Some(mode) = env_str!("ENOMOTO_MIP_ENUM_PRESOLVE").filter(|_| !submip) {
         let te = std::time::Instant::now();
         let (f0, t0n, e0) = (fixed, tightened, equiv.len());
-        let mut d2 = if mode == "impl" && !edges.is_empty() {
+        let mut d2 = if (mode == "impl" || mode == "allimpl") && !edges.is_empty() {
             let mut d = dom.clone();
             d.add_implications(n, &edges);
             Some(d)
@@ -8942,8 +8942,12 @@ fn quick_probe_fixings(prob: &mut MipProblem, verbose: bool, submip: bool) -> Op
 /// physiciansched6-2 では HiGHS の前処理のこの規則を切ると、HiGHS の前処理後の問題に対する ENOMOTO の根の LP が 48974 -> 48374 に下がる
 fn enumerate_rows(prob: &MipProblem, dom: &mut domain::Domain, bin0: &[bool], mut equiv: Option<&mut Vec<(usize, usize, bool)>>, mut edges: Option<&mut Vec<(u32, u32)>>) -> Option<(Vec<(usize, bool, f64)>, usize, usize)> {
     const MAX_ROW: usize = 8;
-    let max_rows = tunable!("ENOMOTO_T_MIP_ENUM_ROWS", 400usize, usize);
-    let max_fails = tunable!("ENOMOTO_T_MIP_ENUM_FAILS", 6usize, usize);
+    // `ENOMOTO_MIP_ENUM_PRESOLVE=all` (試作、analysis/cutgap_20261123 の 2 節): 行の数の上限と空振りでやめる規則を外し、候補の行を全部列挙する
+    // (止めるのは前処理の時間の止め [`presolve_stop`] だけ)。net12 は上限つきでは 30 行で空振り 6 回に当たって何も見つけず、全部 (953 行・0.05 秒) で
+    // 根の LP が 68.4 → 128.3 (HiGHS の Enumeration 前処理と同じ)
+    let all = env_str!("ENOMOTO_MIP_ENUM_PRESOLVE").is_some_and(|v| v.starts_with("all"));
+    let max_rows = if all { usize::MAX } else { tunable!("ENOMOTO_T_MIP_ENUM_ROWS", 400usize, usize) };
+    let max_fails = if all { usize::MAX } else { tunable!("ENOMOTO_T_MIP_ENUM_FAILS", 6usize, usize) };
     let row_vars = |dom: &domain::Domain, i: usize| -> Option<Vec<usize>> {
         let mut v = Vec::new();
         for &(j, _) in &prob.rows[i] {
