@@ -659,8 +659,11 @@ pub fn solve_mip(
     crate::simplex::mip_lp::set_cold_race_threads(prev_race);
     crate::simplex::mip_lp::set_seq_ipm(prev_seq);
     solver::MIP_THREADS_DEFAULT.store(prev_mt, std::sync::atomic::Ordering::Relaxed);
-    if env_str!("ENOMOTO_MIP_XPROF").is_some() {
+    // (サブ MIP の終わりでは出さない: 同じスレッドの外側の計時の途中の値になる。analysis/proofprop_20261123)
+    if env_str!("ENOMOTO_MIP_XPROF").is_some() && !params.submip {
         crate::simplex::slope_intercept_dual::xprof("tail");
+        // どのスレッドの計時か (スレッドごとに貯めるので、同じスレッドで 2 回出れば後の方が全部を含む)
+        eprintln!("XPROFBLOCK {:?}", std::thread::current().id());
         for (l, ns) in crate::simplex::slope_intercept_dual::xprof_take() {
             eprintln!("XPROF {l:10} {:10.1} ms", ns as f64 / 1e6);
         }

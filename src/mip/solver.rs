@@ -1401,20 +1401,16 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 列ごとの、その列を含む証明 (通し番号, 係数)。[0] は係数が正のもの (下限が変わると最小活動量が変わる)、[1] は
     /// それ以外 (上限が変わると変わる)。境界の変わった側だけをたどるように分けて持つ。
     proof_col_index: [Vec<Vec<(u64, f64)>>; 2],
-    /// [`Self::proof_absorb`] で、その呼び出しで差分が変わった証明の印 (`proof_chg_stamp` と同じなら印あり)。
-    proof_chg_mark: Vec<u32>,
+    /// [`Self::proof_absorb`] の呼び出しの番号 (証明ごとの印 [`ProofHot::mark`] と同じなら、その呼び出しで差分が変わった)。
     proof_chg_stamp: u32,
     proof_snap: Option<(Vec<f64>, Vec<f64>)>,
     proof_snap_nodes: u64,
     /// 基準を取ったときの打ち切り値 (暫定解が良くなったら取り直す)。
     proof_snap_limit: f64,
-    proof_delta: Vec<(f64, i32)>,
+    /// 証明ごとの差分・印・調べる列に入れたか ([`ProofHot`]。別々の配列だと差分の更新で 1 本の証明に 3 か所を読み書きしていた。
+    /// analysis/proofprop_20261123)
+    proof_hot: Vec<ProofHot>,
     proof_touched: Vec<usize>,
-    proof_in_touched: Vec<bool>,
-    /// 試作 `ENOMOTO_MIP_PROOFPROP` の `s` ([`proofprop`]): 証明ごとの「前回の評価から差分も右辺も変わらず、そのときに刈りも締めもしなかった」印と、
-    /// その印を付けたときの目的の証明の右辺の U
-    proof_clean: Vec<bool>,
-    proof_clean_lim: f64,
     /// 根の状態の境界でも締め付けが起こりうる (余裕が `max |a_j| (u_j - l_j)` 未満の) 証明の通し番号。
     /// 変えた列を含まなくても毎回調べる。
     proof_always: Vec<u64>,
@@ -2726,6 +2722,18 @@ struct SbSide {
     rc: f64,
 }
 
+/// 双対証明ごとの、差分の更新と走査でよく読み書きする値 ([`Solver::proof_absorb`])。
+#[derive(Clone, Copy, Default)]
+struct ProofHot {
+    /// 最小活動量の差分 (基準から今の境界まで) の有限な部分と、無限の項の数の差
+    d: f64,
+    dinf: i32,
+    /// その呼び出しで差分が変わったかの印 (`proof_chg_stamp` と同じなら変わった)
+    mark: u32,
+    /// 調べる列 (`proof_touched`) に入れたか
+    touched: bool,
+}
+
 /// 双対証明・衝突制約のプールの行の状態。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ProofState {
@@ -3247,11 +3255,12 @@ pub(super) fn proofcost(c: char) -> bool {
 }
 
 /// 試作 `ENOMOTO_MIP_PROOFPROP=<文字の並び>` (既定では使わない、analysis/proofprop_20261123): 木の中の LP の外の伝播の手間を減らす。
-/// - `s`: 双対証明の走査 ([`Solver::apply_dual_proofs`]) で、前回の評価から差分 (列の境界) も右辺 (目的の証明は打ち切り値) も変わらず、そのときに刈りも
-///   締めもしなかった証明を、最初の回で飛ばす。評価の結果は前回と同じ (刈らない・締めない) なので答えも道筋も変わらない (走査の順は保つ)。
-///   同じ回の中でほかの証明が締めた列は、締めた側の差分は次の回で取り込むまで古いままで、古い余裕で締める値は前回より強くならない。
-/// - `l`: リテラルの衝突の伝播 ([`super::conflict_pool::LitConflictPool`]) で、境界の変更と同じ向きのリテラルを持つ衝突だけを調べる
-///   (下限の変更で `x <= v` のリテラルは新たに成り立たない)。成り立つかの判定は変えないが、調べた回数で数える衝突の年齢が変わるので道筋は変わりうる。
+/// - `i`: 木を分け合う (2 スレッド以上の) とき、自前と取り込みの証明の合計も、自前と同じ上限 max(200, `ENOMOTO_T_MIP_PROOF_POOL_PER_COL` × 列数)
+///   までにする (今は自前と取り込みが別々の上限で、4 スレッドでは証明の本数が 1 スレッドのほぼ倍になる)。取り込みの古いものから捨てる。
+/// (`s` (変わらない双対証明の評価を飛ばす) は試して取り下げた: 証明がほぼ全部の列にかかり飛ばせる証明が少なく速くならず、
+/// pk1 の 1 スレッドでは道筋も変わった。analysis/proofprop_20261123 の 3 節)
+/// (`l` (リテラルの衝突の伝播で、境界の変更と同じ向きのリテラルを持つ衝突だけを調べる) も試して取り下げた: リテラルの衝突の時間は減らず
+/// (noswot 1 スレッド 2.7 → 3.7 秒)、衝突の年齢の数え方が変わって道筋が変わるだけだった。analysis/proofprop_20261123 の 4 節)
 pub(crate) fn proofprop(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     V.get_or_init(|| env_str!("ENOMOTO_MIP_PROOFPROP").map_or(String::new(), |v| v.to_string())).contains(c)
@@ -5949,16 +5958,12 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         proof_dead: 0,
         proof_ref: std::collections::VecDeque::new(),
         proof_col_index: [Vec::new(), Vec::new()],
-        proof_chg_mark: Vec::new(),
         proof_chg_stamp: 0,
         proof_snap: None,
         proof_snap_nodes: 0,
         proof_snap_limit: f64::INFINITY,
-        proof_delta: Vec::new(),
+        proof_hot: Vec::new(),
         proof_touched: Vec::new(),
-        proof_in_touched: Vec::new(),
-        proof_clean: Vec::new(),
-        proof_clean_lim: f64::NAN,
         proof_always: Vec::new(),
         proof_val_lo: Vec::new(),
         proof_val_up: Vec::new(),
@@ -20794,6 +20799,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
         while self.proof_fifo[cat].len() >= cap {
             self.proof_evict(cat);
         }
+        // 試作 `ENOMOTO_MIP_PROOFPROP` の `i` ([`proofprop`]): 木を分け合うとき、自前と取り込みの合計も同じ上限 (列数による上限) までにする
+        // (取り込みから、なければ自前の古いものから捨てる)
+        if proofprop('i') && self.pool.is_some() && per_col > 0 && cat <= 1 {
+            let total_cap = (per_col * self.p.n).max(200);
+            while self.proof_fifo[0].len() + self.proof_fifo[1].len() >= total_cap {
+                let c = if !self.proof_fifo[1].is_empty() { 1 } else { 0 };
+                if self.proof_fifo[c].is_empty() {
+                    break;
+                }
+                self.proof_evict(c);
+            }
+        }
         // 非零の上限: 取り込みから、なければ自前の古いものから捨てる
         while self.dual_proof_nnz + coefs.len() > nnz_cap {
             let c = if !self.proof_fifo[1].is_empty() { 1 } else if !self.proof_fifo[2].is_empty() { 2 } else if !self.proof_fifo[0].is_empty() { 0 } else { break };
@@ -20820,7 +20837,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.proof_fifo[cat].push_back(id);
         // 差分が今の基準で揃っていれば、この証明の差分だけを足す (全部を作り直さない)。基準の境界と、差分に反映済みの
         // 境界 (`proof_val_*`) の違いを足す ([`Self::proof_absorb`] と同じ計算)
-        if !self.proof_dirty && self.proof_delta.len() == self.dual_proofs.len() && self.proof_val_lo.len() == p.n {
+        if !self.proof_dirty && self.proof_hot.len() == self.dual_proofs.len() && self.proof_val_lo.len() == p.n {
             let (slo, sup) = self.proof_snap.as_ref().unwrap();
             let mut e = (0.0f64, 0i32);
             for &(j, a) in &coefs {
@@ -20841,10 +20858,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             let k = self.dual_proofs.len();
-            self.proof_delta.push(e);
-            self.proof_in_touched.push(false);
+            self.proof_hot.push(ProofHot { d: e.0, dinf: e.1, mark: 0, touched: false });
             if e != (0.0, 0) {
-                self.proof_in_touched[k] = true;
+                self.proof_hot[k].touched = true;
                 self.proof_touched.push(k);
             }
         } else {
@@ -23068,18 +23084,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let npool = self.dual_proofs.len();
         // 差分は各列の境界 `proof_val_*` までを反映している。前回から境界が変わった列だけを足す (ノードを移っても
         // 戻した列・積み直した列だけで済む)。証明や基準が変わったら作り直す
-        let cols: Vec<usize> = if self.proof_dirty || self.proof_delta.len() != npool {
-            self.proof_delta.clear();
-            self.proof_delta.resize(npool, (0.0, 0));
-            self.proof_clean.clear();
-            for &k in &self.proof_touched {
-                if k < self.proof_in_touched.len() {
-                    self.proof_in_touched[k] = false;
-                }
-            }
+        let cols: Vec<usize> = if self.proof_dirty || self.proof_hot.len() != npool {
+            // (印 `mark` も 0 に戻す。呼び出しの番号は 0 にならないので、前の印と同じ意味)
+            self.proof_hot.clear();
+            self.proof_hot.resize(npool, ProofHot::default());
             self.proof_touched.clear();
-            self.proof_in_touched.clear();
-            self.proof_in_touched.resize(npool, false);
             crate::simplex::slope_intercept_dual::xcount("c_dirty");
             self.proof_dirty = false;
             let (slo, sup) = self.proof_snap.as_ref().unwrap();
@@ -23103,8 +23112,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.proof_always.retain(|&id| id >= first);
             for &id in &self.proof_always {
                 let k = (id - first) as usize;
-                if k < npool && !self.proof_in_touched[k] {
-                    self.proof_in_touched[k] = true;
+                if k < npool && !self.proof_hot[k].touched {
+                    self.proof_hot[k].touched = true;
                     self.proof_touched.push(k);
                 }
             }
@@ -23116,25 +23125,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 目的の証明の右辺 `U - konst` の U (打ち切り値。調べる間は変わらないので 1 回だけ読む: 共有の最良値の読み込みを
         // 証明ごとにしない)
         let obj_lim = self.prune_limit() - self.p.offset;
-        // 試作 `ENOMOTO_MIP_PROOFPROP` の `s` ([`proofprop`]): 新しい証明は印なし、U が変われば全部の印を外す
-        let skip_clean = proofprop('s') && !full;
-        if skip_clean {
-            if self.proof_clean_lim.to_bits() != obj_lim.to_bits() {
-                self.proof_clean.clear();
-                self.proof_clean_lim = obj_lim;
-            }
-            self.proof_clean.resize(npool, false);
-        }
         for pass in 0..8 {
             let mut tightened_now = false;
             for &k in &scan {
-                if skip_clean {
-                    if pass == 0 && self.proof_clean[k] {
-                        continue;
-                    }
-                    // 評価の終わりに、刈らず締めなかったら印を付け直す (刈る・締めるところで外す)
-                    self.proof_clean[k] = true;
-                }
                 let rhs = {
                     let (_, konst, obj) = &self.dual_proofs[k];
                     if *obj {
@@ -23159,7 +23152,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     (minact, ninf)
                 } else {
                     let (bm, bi, _) = self.proof_base[k];
-                    let (dm, di) = self.proof_delta[k];
+                    let (dm, di) = (self.proof_hot[k].d, self.proof_hot[k].dinf);
                     (bm + dm, (bi as i64 + di as i64).max(0) as usize)
                 };
                 if ninf > 0 {
@@ -23173,9 +23166,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.tprof.proof[org][0] += 1;
                 }
                 if slack < -gap1_proof_tol(rhs) {
-                    if skip_clean {
-                        self.proof_clean[k] = false;
-                    }
                     if self.dbg_on || proof_diag() {
                         self.proof_diag_prune(k, rhs, minact, full);
                     }
@@ -23237,9 +23227,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         if super::cutconf::mode().is_some() { let (c, kk, _) = &self.dual_proofs[k]; super::cutconf::note_use(c, *kk, false); }
                     }
                     if self.dom.infeasible {
-                        if skip_clean {
-                            self.proof_clean[k] = false;
-                        }
                         self.tprof.proof[org][1] += 1;
                         if super::cutconf::mode().is_some() { let (c, kk, _) = &self.dual_proofs[k]; super::cutconf::note_use(c, *kk, true); }
                         self.proof_used(k);
@@ -23250,9 +23237,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
                 if used {
-                    if skip_clean {
-                        self.proof_clean[k] = false;
-                    }
                     self.proof_used(k);
                 }
             }
@@ -23380,17 +23364,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         });
     }
 
-    /// 列 `cols` の境界の変化 (`proof_val_*` から今の境界へ) を証明の差分 (`proof_delta`) に足し、差分が変わった
+    /// 列 `cols` の境界の変化 (`proof_val_*` から今の境界へ) を証明の差分 ([`ProofHot`]) に足し、差分が変わった
     /// 証明を返す (`proof_touched` にも加える)。基準の境界より根の状態が締まっている列は作り直しのときにその差も
     /// 入るので、見積もりは真の最小活動量以下のまま。
     fn proof_absorb(&mut self, cols: &[usize]) -> Vec<usize> {
         let mut changed: Vec<usize> = Vec::new();
-        if self.proof_chg_mark.len() < self.proof_delta.len() {
-            self.proof_chg_mark.resize(self.proof_delta.len(), 0);
-        }
         self.proof_chg_stamp = self.proof_chg_stamp.wrapping_add(1);
         if self.proof_chg_stamp == 0 {
-            self.proof_chg_mark.iter_mut().for_each(|m| *m = 0);
+            self.proof_hot.iter_mut().for_each(|h| h.mark = 0);
             self.proof_chg_stamp = 1;
         }
         let stamp = self.proof_chg_stamp;
@@ -23407,16 +23388,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 } else {
                     self.proof_val_lo[j] = new_v;
                 }
-                // 試作 `ENOMOTO_MIP_PROOFPROP` の `s`: 締め付けは反対側の境界 (幅) にもよるので、この側の境界が最小活動量に効かない証明も印を外す
-                if !self.proof_clean.is_empty() {
-                    for &(id, _) in &self.proof_col_index[!upper as usize][j] {
-                        if id >= self.proof_first_id {
-                            if let Some(c) = self.proof_clean.get_mut((id - self.proof_first_id) as usize) {
-                                *c = false;
-                            }
-                        }
-                    }
-                }
                 // この側の境界が最小活動量に効く証明だけをたどる (下限は係数が正、上限は係数が正でないもの)
                 for &(id, a) in &self.proof_col_index[upper as usize][j] {
                     if id < self.proof_first_id {
@@ -23428,28 +23399,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.tprof.proof[(self.proof_state[k] == ProofState::Imported) as usize][3] += 1;
                     }
                     let (old, new) = (a * old_v, a * new_v);
-                    if !self.proof_in_touched[k] {
-                        self.proof_in_touched[k] = true;
+                    let h = &mut self.proof_hot[k];
+                    if !h.touched {
+                        h.touched = true;
                         self.proof_touched.push(k);
                     }
-                    if self.proof_chg_mark[k] != stamp {
-                        self.proof_chg_mark[k] = stamp;
+                    if h.mark != stamp {
+                        h.mark = stamp;
                         changed.push(k);
-                        // 試作 `ENOMOTO_MIP_PROOFPROP` の `s`: 差分の変わった証明は印を外す
-                        if let Some(c) = self.proof_clean.get_mut(k) {
-                            *c = false;
-                        }
                     }
-                    let e = &mut self.proof_delta[k];
                     if old.is_finite() {
-                        e.0 -= old;
+                        h.d -= old;
                     } else {
-                        e.1 -= 1;
+                        h.dinf -= 1;
                     }
                     if new.is_finite() {
-                        e.0 += new;
+                        h.d += new;
                     } else {
-                        e.1 += 1;
+                        h.dinf += 1;
                     }
                 }
             }
