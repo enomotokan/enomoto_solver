@@ -201,6 +201,8 @@ HiGHS と違う点:
 - 係数はファイルどおりに読みます(絶対値 10⁻⁹ 以下の係数も捨てません)．
 - 下限が書かれていない列に負の `UP` を与えると，下限を `-inf` にします(多くの読み手の約束．HiGHS は下限 0 のまま)．
 
+読めるデータが無いファイル(空・注釈だけ・`NAME` だけ)は `ValueError` になります(変数 0 個の問題としては読みません)．
+
 扱えないもの(`ValueError` になります): 二次の項(`QUADOBJ`・`QSECTION`・`QMATRIX`・`QCMATRIX`)・`SOS`・`INDICATORS`・`GENCONS`・`PWLOBJ`・半連続と半整数の境界(`SC`・`SI`)．
 
 ### スレッド数(`threads`)
