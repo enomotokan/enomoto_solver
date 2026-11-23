@@ -106,6 +106,7 @@ pub struct LitConflictPool {
     next: usize,
     cap: usize,
     /// 列ごとの、その列を含む衝突の枠 (上書きで古くなった項目も残る。評価は衝突そのもので行うので害はない)。
+    /// 値は 枠 × 2 + (その列のリテラルが上限 (`x <= v`) なら 1) (試作 `ENOMOTO_MIP_PROOFPROP` の `l` で向きを見る)。
     col_index: Vec<Vec<u32>>,
     index_len: usize,
     live_lits: usize,
@@ -290,8 +291,8 @@ impl LitConflictPool {
                 g.relearn[1] += u64::from(u);
             }
         }
-        for &(j, _, _) in &l {
-            self.col_index[j].push(slot as u32);
+        for &(j, u, _) in &l {
+            self.col_index[j].push(((slot as u32) << 1) | u as u32);
         }
         self.index_len += l.len();
         self.live_lits += l.len();
@@ -309,8 +310,8 @@ impl LitConflictPool {
             self.index_len = 0;
             for (s, c) in self.slots.iter().enumerate() {
                 if let Some(c) = c {
-                    for &(j, _, _) in c {
-                        self.col_index[j].push(s as u32);
+                    for &(j, u, _) in c {
+                        self.col_index[j].push(((s as u32) << 1) | u as u32);
                     }
                     self.index_len += c.len();
                 }
@@ -395,10 +396,16 @@ impl LitConflictPool {
             }
             let mut fixes: Vec<(usize, bool, f64, usize, usize)> = Vec::new();
             let mut fix_age: Vec<u32> = Vec::new();
-            for (j, _, _) in changed {
+            // 試作 `ENOMOTO_MIP_PROOFPROP` の `l` ([`super::solver::proofprop`]): 境界の変更と同じ向きのリテラル (上限の変更なら `x <= v`) を持つ衝突だけを
+            // 調べる (違う向きのリテラルは、この変更では新たに成り立たない)。調べた回数で数える年齢が変わるので道筋は変わりうる
+            let side = super::solver::proofprop('l');
+            for (j, up, _) in changed {
                 crate::ticks::add(crate::ticks::PROP, self.col_index[j].len() as u64 + 1);
-                for &s in &self.col_index[j] {
-                    let s = s as usize;
+                for &e in &self.col_index[j] {
+                    if side && (e & 1 == 1) != up {
+                        continue;
+                    }
+                    let s = (e >> 1) as usize;
                     if self.seen[s] == self.stamp {
                         continue;
                     }
