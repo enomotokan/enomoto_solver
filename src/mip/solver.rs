@@ -13859,6 +13859,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let iter_limit = (10 * self.avg_node_iters()).max(20_000);
                 // 1 回の LP の時間の上限 (平均の 50 倍、最低 0.5 秒): 数値的に悪条件の LP が再分解を繰り返して
                 // 残り時間を使い切るのを防ぐ。超えたら全論理変数基底から解き直し、それも超えたら LP なしで分枝する
+                // 区間計時 (`ENOMOTO_MIP_XPROF`、analysis/lpiter_20261123): ノードの LP の前の木の処理をここで切る
+                xp("nl_start");
                 let t_lp = Instant::now();
                 let tk_lp = crate::ticks::total();
                 let cap = Duration::from_secs_f64((50.0 * self.node_lp_secs / self.node_lps.max(1) as f64).max(0.5));
@@ -13979,6 +13981,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let _nl_bg = nodelp_bfrt_group()
                     .is_some_and(|all| all || (node.depth > 0 && !self.params.submip))
                     .then(crate::simplex::slope_intercept_dual::BfrtGroupScope::new);
+                // 区間計時: LP を解く直前までの準備 (摂動・重み・書き出しなど)
+                xp("nl_pre");
                 let mut st = { let _g = det_l_guard(); self.lp.solve(&capped(self, iter_limit)) };
                 drop(_nl_sr);
                 drop(_nl_bg);
@@ -14070,6 +14074,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.pool_tid, self.nodes, node.depth, resolves, self.restored_now, self.tp_kind, self.lp.num_rows(), iter_limit, cap.as_secs_f64(), st0, i0, s0, ho4_retry, self.start.elapsed().as_secs_f64()
                     );
                 }
+                // 区間計時: LP の後の確かめ・解き直し・記録 (LP の中の最後の印 `after` からここまで)
+                xp("nl_post");
                 self.node_lp_secs += t_lp.elapsed().as_secs_f64();
                 self.node_lp_ticks += crate::ticks::total() - tk_lp;
                 if let Some(t) = node_cut_resolve.take() {
