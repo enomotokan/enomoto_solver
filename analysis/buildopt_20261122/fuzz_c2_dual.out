@@ -1,0 +1,12 @@
+core /home/user/enomoto_solver/analysis/buildopt_20261122/var/c2_dual/enomoto_solver/_core_v3.cpython-313-x86_64-linux-gnu.so
+== fuzz_tiny: env ENOMOTO_MIP_REL_GAP=1e-9 python3 benchmarks/equiv2_bug_20261022/fuzz_tiny.py 400 0
+rc=0
+Presolve: the problem is infeasible (0.00s)
+Result: optimal, objective -7.12, best bound -7.12, gap 0.00%, nodes 0 (0.01s)
+bad 0 of 400 time 3.8 (strict 9: 値の一致だけの以前の判定)
+== fuzz_highs: env ENOMOTO_MIP_REL_GAP=1e-9 python3 scripts/mip_fuzz_vs_highs.py 300
+rc=0
+Solving with the slope-intercept dual two-phase method
+Result: optimal, objective -78.37836523, best bound -78.37836523, gap 0.00%, nodes 0 (0.02s)
+bad 0 of 300 time 6.9
+== fuzz_objint: python3 analysis/objint_20261112/fuzz_objint.py 1000 0

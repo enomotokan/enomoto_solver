@@ -243,17 +243,19 @@ pgo の fuzz は回していない。pgo は pgo_v3 と同じ profile・同じ L
   - 2 本の wheel の名前 (版・タグ) が同じことを確かめる。
   - abi3 の `_core.abi3.so` と Windows の `_core.pyd` にも対応した。
 
-手元 (Linux x86_64、4 コア) で作った時間 (build_c.out):
+手元 (Linux x86_64、4 コア) で作った時間。1 回目 (build_c.out) は学習 1 回、作り直し (build_c2.out、下の訂正のあと) は学習 2 回:
 
-| 段 | 秒 |
-|---|---:|
-| 計測用の wheel (LTO + profile-generate) | 573 |
-| 学習 (pgo_train.py) | 114 |
-| base (LTO + PGO) | 468 |
-| v3 (LTO + PGO + x86-64-v3) | 479 |
-| 合わせて | 1641 (27 分) |
+| 段 | 1 回目 [秒] | 作り直し [秒] | 作り直しの hash mismatch |
+|---|---:|---:|---:|
+| 計測用の base (LTO + profile-generate) | 573 | 525 | 0 |
+| 学習 base (pgo_train.py) | 114 | 110 | — |
+| base (LTO + PGO) | 468 | 445 | 0 |
+| 計測用の v3 | — | 502 | 0 |
+| 学習 v3 | — | 109 | — |
+| v3 (LTO + PGO + x86-64-v3) | 479 | 450 | 0 (1 回目は 1282) |
+| 合わせて | 1641 (27 分) | 2152 (36 分) | |
 
-今の作り方は 128 秒。できた 2 本入りの wheel は 13,735,281 バイト。
+今の作り方は 128 秒。2 本入りの wheel は 13,735,281 バイト (1 回目)・13,672,554 バイト (作り直し)。
 
 **訂正 (2026-11-23、親の指摘。analysis/losses_20261123/README.md 3.1 節)**: 上の 1 回目の作り (build_c.out) では、v3 の作りで
 `function control flow change detected (hash mismatch)` が **1282 個** 出ていた (base の作りでは 0)。
@@ -269,16 +271,16 @@ pgo の fuzz は回していない。pgo は pgo_v3 と同じ profile・同じ L
 
 | 対象 | 機械 | PGO | dual | 見込みの時間 |
 |---|---|---|---|---|
-| Linux x86_64 | ubuntu-latest の上で manylinux_2_28 のコンテナ | する | する | 約 30 分 (手元と同じ 4 コア) |
+| Linux x86_64 | ubuntu-latest の上で manylinux_2_28 のコンテナ | する (2 回) | する | 約 40 分 (手元と同じ 4 コア) |
 | Linux aarch64 | ubuntu-24.04-arm (arm の機械で直に。今はクロス) + manylinux_2_28_aarch64 のコンテナ | する | しない | 約 20 分 (v3 の作りが無い) |
-| Windows x64 | windows-latest (Git Bash で台本) | する | する | 約 35〜45 分 (MSVC の LTO のリンクは遅め) |
+| Windows x64 | windows-latest (Git Bash で台本) | する (2 回) | する | 約 50〜60 分 (MSVC の LTO のリンクは遅め) |
 | macOS arm64 | macos-15 | する | しない | 約 15〜20 分 |
-| macOS x86_64 | macos-15-intel (Intel の機械で直に。今は arm からクロス) | する | する | 約 35〜45 分 |
+| macOS x86_64 | macos-15-intel (Intel の機械で直に。今は arm からクロス) | する (2 回) | する | 約 50〜60 分 |
 
 - 学習は作った wheel を動かすので、その機械で動く対象でしか PGO はできない。そのため今のクロスの 2 つ (Linux aarch64・macOS x86_64) は、ネイティブの機械に移す。
   - 移せない場合は、その job だけ `PGO=0` (LTO だけ) にする。macOS x86_64 なら、arm の機械でクロスで作り、v3 も作って dual にすることはできる。
 - profile は OS・対象ごとに取り直す (profraw は対象ごとのもの)。どの job も自分で学習する。
-- job は並んで動くので、全体の待ち時間は今の約 10 分から約 45 分になる見込み (一番遅い Windows・macOS Intel で決まる)。
+- job は並んで動くので、全体の待ち時間は今の約 10 分から約 60 分になる見込み (一番遅い Windows・macOS Intel で決まる)。x86_64 は学習が base と v3 の 2 回になる (下の訂正)。
 - Linux は、maturin の `--compatibility manylinux_2_28` が名札付けと確かめをする。2 本入りにしたあとで `auditwheel show` で両方の .so を見る。
 - test の job: 今の pytest を `ENOMOTO_CORE=auto` と `ENOMOTO_CORE=base` の 2 回流す。auto では `build_cpu_level()` を表示する。GitHub の x86 の機械は v3 があるので、2 本の両方が試される。
 - sdist は今のまま (ソースからの build は 1 本、LTO・PGO なし)。
@@ -296,7 +298,8 @@ pgo の fuzz は回していない。pgo は pgo_v3 と同じ profile・同じ L
   `model.py` が使う `_core` も読み替えた方になっている。`_core_v3` の無い wheel で v3 を指定すると、警告して base を使う。
 - `tests/test_model.py` (43 件) は auto・base・v3 のどれでも全部通る。`test_version.py`・`test_select_problem.py` (9 件) も通る。
 
-<!-- C_FUZZ -->
+1 回目の wheel の fuzz 7 本 (`fuzz_var.sh c_dual` は auto で v3、`ENOMOTO_CORE=base fuzz_var.sh c_base`): どれも bad 0・mismatches 0。
+cargo test (案 C のソース、LTO + PGO、base と v3 の設定): どちらも 420 通過・0 失敗。
 
 #### 1 スレッドの比べ (m2)
 
@@ -319,8 +322,34 @@ pgo の fuzz は回していない。pgo は pgo_v3 と同じ profile・同じ L
 - 道筋が base と同じ 11 問だけで、学習の中身を比べると: c_base/pgo 1.017、c_v3/pgo_v3 1.003。
   **生成問題で学習した PGO は、MIPLIB の 10 問で学習した PGO と同じだけ効く** (差は 2 回の揺れ 2.8〜4.7% の内)。
   計測の問題を学習に使わなくてよいことが確かめられた。
-- 案 C の wheel (c_v3、auto で読まれる方) は、同じソースを今の作り方で作ったものより 16% 速い。
+- c_plain は後から別に回した (交互でない) ので、c_*/c_plain は機械の揺れを含む。交互に回し直した値は 7.6 節 (m3)。
+- c_v3 は v3 の profile がほぼ捨てられた作り (下の訂正)。
 
+
+### 7.6 作り直した wheel (学習 2 回、hash mismatch 0)
+
+- 作り直し: build_c2.out。ソースは c_* と同じ 13aada96d で、台本だけ直したものを作業木に写した。
+  - 4 つの作り (計測用 base・base・計測用 v3・v3) のどれも hash mismatch 0。
+  - 1 回目の v3 の作りは 1282。
+- 1 スレッドの比べ (m3): `python run_var.py m3 c_plain c2_base c_v3 c2_v3`。4 版を交互に、15 問 × 2 回。解析は ana_m3.txt。
+  - 道筋: どれも c_plain と、状態・ノード数・目的値が全部同じ。
+  - 時間の比 (幾何平均):
+
+| 版/基準 | 幾何平均 |
+|---|---:|
+| c2_base / c_plain (base の LTO + PGO) | 0.941 |
+| c_v3 / c_plain (1 回目の v3。v3 の profile はほぼ捨てられていた) | 0.865 |
+| c2_v3 / c_plain (作り直した v3。v3 の計測用の版で学習) | 0.869 |
+| c2_v3 / c_v3 | 1.005 |
+
+  同じ版の 2 回の揺れは 4.6〜5.5%。
+- **profile が合うようにしても、1 スレッドの速さは変わらなかった** (c2_v3/c_v3 1.005、揺れの内)。
+  捨てられていた profile の関数は、この 15 問の時間にはほとんど効いていなかったことになる。
+  それでも、作りを正しく保つために学習 2 回と mismatch 0 の確かめは残す。ソースが変わると、どこに効くかが変わるため。
+- 案 C の wheel は、同じソースを今の作り方 (LTO・PGO なし、1 本) で作ったものより、v3 の CPU で 13% (0.869)、v3 の無い CPU で 6% (0.941) 速い。
+- 1〜6 節の pgo_v3 (前のソース、同じく profile が合っていなかった) の値も、この結果から見て、直しても大きくは変わらないと見る。
+
+<!-- C2_FUZZ -->
 
 ## 8. ファイル
 
