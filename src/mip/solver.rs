@@ -3212,6 +3212,15 @@ fn pool_dse_nan() -> bool {
     env_def!("ENOMOTO_MIP_POOL_DSE", "1").is_some_and(|v| v.contains('n'))
 }
 
+/// 試作 `ENOMOTO_MIP_PROOFCOST` (既定では使わない、analysis/proofcost_20261123): 双対証明のプールの差分の更新の手間を減らす。
+/// 1 スレッドでは証明が上限の 2000 本まで溜まり、列の少ない問題ではどの証明もほぼ全部の列にかかるので、境界が 1 本動くたびに
+/// 約 2000 本の差分を足していた (mas76 で全体の 42%、analysis/hotspot_20261122)。木を分け合うときだけにかけていた既存の仕組みを 1 スレッドにも使う:
+/// - `p`: 本数の上限を max(200, `ENOMOTO_T_MIP_PROOF_POOL_PER_COL` (4) × 列数) 以下にする
+/// - `a`: 捨てるときに、前回から使われた (刈り込み・締め付けた) 印のある証明は印を消して後ろに回す (clock 法の年齢)
+pub(super) fn proofcost(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_PROOFCOST").is_some_and(|v| v != "0" && v.contains(c))
+}
+
 fn prof_tree_par() -> bool {
     env_str!("ENOMOTO_PROF_TREE_PAR").is_some()
 }
@@ -20131,7 +20140,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 分類 `cat` の証明を 1 本捨てる: 古いものから。木を分け合うとき (`ENOMOTO_MIP_PROOF_NO_AGING` でなければ)、前回から使われた印のあるものは印を
     /// 消して後ろに回す (clock 法)。
     fn proof_evict(&mut self, cat: usize) {
-        let aging = self.pool.is_some() && env_str!("ENOMOTO_MIP_PROOF_NO_AGING").is_none();
+        // 試作 `ENOMOTO_MIP_PROOFCOST` の `a` ([`proofcost`]): 1 スレッドでも年齢 (clock 法) をかける
+        let aging = (self.pool.is_some() || proofcost('a')) && env_str!("ENOMOTO_MIP_PROOF_NO_AGING").is_none();
         let mut turns = self.proof_fifo[cat].len();
         while let Some(id) = self.proof_fifo[cat].pop_front() {
             let k = (id - self.proof_first_id) as usize;
@@ -20272,7 +20282,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 木を分け合うとき、`ENOMOTO_T_MIP_PROOF_POOL_PER_COL` = c (> 0、既定 4): 上限を max(200, c * 列数) 以下にする (小さい問題で証明のプールが問題より
         // ずっと大きくなり、ノードごとの伝播が重くなるのを避ける)
         let per_col = tunable!("ENOMOTO_T_MIP_PROOF_POOL_PER_COL", 4usize, usize);
-        let cap = if per_col > 0 && self.pool.is_some() { cap.min((per_col * self.p.n).max(200)) } else { cap };
+        // 試作 `ENOMOTO_MIP_PROOFCOST` の `p` ([`proofcost`]): 1 スレッドでも同じ上限にする
+        let cap = if per_col > 0 && (self.pool.is_some() || proofcost('p')) { cap.min((per_col * self.p.n).max(200)) } else { cap };
         if cap == 0 {
             return;
         }
