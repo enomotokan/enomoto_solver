@@ -1,0 +1,690 @@
+   Compiling autocfg v1.5.1
+   Compiling bytemuck v1.25.2
+   Compiling crossbeam-utils v0.8.22
+   Compiling crossbeam-epoch v0.9.20
+   Compiling version_check v0.9.5
+   Compiling libm v0.2.16
+   Compiling crossbeam-deque v0.8.7
+   Compiling num-traits v0.2.19
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.189
+   Compiling quote v1.0.47
+   Compiling reborrow v0.5.5
+   Compiling cfg-if v1.0.4
+   Compiling num-complex v0.4.6
+   Compiling rayon-core v1.13.0
+   Compiling bitflags v2.13.1
+   Compiling paste v1.0.15
+   Compiling raw-cpuid v11.6.0
+   Compiling either v1.18.0
+   Compiling dyn-stack-macros v0.1.3
+   Compiling target-lexicon v0.12.16
+   Compiling rayon v1.12.0
+   Compiling dyn-stack v0.13.2
+   Compiling once_cell v1.21.4
+   Compiling nano-gemm-codegen v0.2.1
+   Compiling seq-macro v0.3.6
+   Compiling nano-gemm-codegen v0.1.0
+   Compiling syn v2.0.119
+   Compiling pyo3-build-config v0.22.6
+   Compiling pulp v0.22.3
+   Compiling pulp-wasm-simd-flag v0.1.1
+   Compiling pulp v0.21.5
+   Compiling find-msvc-tools v0.1.13
+   Compiling jobserver v0.1.35
+   Compiling shlex v2.0.1
+   Compiling cc v1.4.7
+   Compiling syn v1.0.109
+   Compiling gemm-common v0.19.0
+   Compiling nano-gemm-core v0.1.0
+   Compiling nano-gemm-core v0.2.1
+   Compiling equator-macro v0.4.2
+   Compiling equator-macro v0.2.1
+   Compiling equator v0.4.2
+   Compiling pyo3-ffi v0.22.6
+   Compiling gemm-common v0.18.2
+   Compiling equator v0.2.2
+   Compiling pyo3-macros-backend v0.22.6
+   Compiling nano-gemm-c32 v0.1.0
+   Compiling nano-gemm-f64 v0.1.0
+   Compiling nano-gemm-f32 v0.1.0
+   Compiling nano-gemm-c64 v0.1.0
+   Compiling nano-gemm-c32 v0.2.1
+   Compiling nano-gemm-f32 v0.2.1
+   Compiling nano-gemm-c64 v0.2.1
+   Compiling nano-gemm-f64 v0.2.1
+   Compiling crossbeam-queue v0.3.14
+   Compiling crossbeam-channel v0.5.17
+   Compiling defer v0.2.1
+   Compiling libmimalloc-sys v0.1.49
+   Compiling atomic-wait v1.1.0
+   Compiling memoffset v0.9.1
+   Compiling crossbeam v0.8.5
+   Compiling heck v0.5.0
+   Compiling generativity v1.2.1
+   Compiling spindle v0.2.6
+   Compiling interpol v0.2.1
+   Compiling private-gemm-x86 v0.1.22
+   Compiling gemm-f64 v0.18.2
+   Compiling gemm-c32 v0.18.2
+   Compiling gemm-c64 v0.18.2
+   Compiling gemm-f32 v0.18.2
+   Compiling gemm-f32 v0.19.0
+   Compiling gemm-f64 v0.19.0
+   Compiling gemm-c32 v0.19.0
+   Compiling gemm-c64 v0.19.0
+   Compiling metis-sys v0.3.2
+   Compiling qd v0.8.0
+   Compiling num_cpus v1.17.0
+   Compiling pyo3 v0.22.6
+   Compiling pulp v0.18.22
+   Compiling matrixcompare-core v0.1.0
+   Compiling coe-rs v0.1.2
+   Compiling equator-macro v0.6.0
+   Compiling matrixcompare v0.3.0
+   Compiling equator v0.6.0
+   Compiling gemm v0.19.0
+   Compiling faer-traits v0.24.0
+   Compiling faer-entity v0.20.1
+   Compiling gemm v0.18.2
+   Compiling nano-gemm v0.2.2
+   Compiling nano-gemm v0.1.3
+   Compiling pyo3-macros v0.22.6
+   Compiling dyn-stack v0.11.0
+   Compiling unindent v0.2.4
+   Compiling dbgf v0.1.2
+   Compiling indoc v2.0.7
+   Compiling faer v0.20.2
+   Compiling mimalloc v0.1.52
+   Compiling faer v0.24.4
+   Compiling libloading v0.8.9
+   Compiling enomoto_core v0.1.10 (/home/user/bo_wt)
+warning: unused doc comment
+    --> src/mip/mod.rs:1262:1
+     |
+1262 | / /// `p` を (`use_presolve` なら MIP 前処理をかけてから) 分枝限定法で解き、解を `p` の空間に戻す。
+1263 | | /// 戻した解が `p` で実行可能でなければ (前処理の誤りの安全網)、前処理なしで解き直す。
+1264 | | /// サブ MIP (RENS/RINS) もこれで解く。
+     | |_--------------------------------------^
+     |   |
+     |   rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+     = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused doc comment
+    --> src/mip/mod.rs:2701:1
+     |
+2701 | / /// `ENOMOTO_MIP_FEAS_FJ_EARLY` (既定 `fl`、`=0` で使わない。flbgx として既定にした: analysis/flbgx_default_20261102.md): 実行...
+2702 | | /// ([`lp_probe`]) の前に、種を変えた FJ2 をスレッドの数だけ並べて回す ([`feas_fj_early`])。見つかればどの実行可能解も最適なので、
+2703 | | /// 残りの前処理 (LP による固定・プロービング・クリーク行の拡張・対称性) も根の LP も飛ばして最適で終える。
+2704 | | /// ns1116954 (4 スレッド・60 秒) は既定で 27〜33 秒のうち、前処理の LP による固定が 11〜13 秒 (固定 0)、根の LP の解き直しが 12...
+2705 | | /// FJ のスレッドは根の LP の途中で解を見つけているのに主が根の LP の終わりまで受け取らない (analysis/ns1116954_20261101.md)
+     | |_---------------------------------------------------------------------------------------------------------------------------^
+     |   |
+     |   rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+  --> src/mip/zerohalf.rs:37:1
+   |
+37 | / /// zerohalf カットを作る。`rows`/`row_lo`/`row_up` は元の行、`lo`/`up` は大域的な境界、`x` は LP 解。
+38 | | /// 戻り値のカットは構造変数だけの式。
+39 | | ///
+40 | | /// (Cgl012cut の前処理に寄せた試作 `ENOMOTO_MIP_ZH_PRE` は 2026-11-18 に削除。analysis/cleanup_20261118/)
+   | |_---------------------------------------------------------------------------------------------------------^
+   |   |
+   |   rustdoc does not generate documentation for macro invocations
+   |
+   = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+  --> src/presolve.rs:58:1
+   |
+58 | / /// 前処理の実行不能判定に使う許容誤差: `base * (1 + |scale|)` (相対形、既定) または `base` (従来の絶対形)。
+59 | | ///
+60 | | /// `scale` は判定に関わる量の大きさ (固定値、行の活動度の項の絶対値の和、境界の絶対値など)。
+61 | | /// 丸め誤差はその大きさに比例するため (`params::presolve::PRESOLVE_REL_TOL` 参照)。
+62 | | /// `ENOMOTO_T_PRESOLVE_REL_TOL=0` で従来の絶対判定に戻る。`scale` が有限でなければ `base`。
+   | |_-------------------------------------------------------------------------------------------^
+   |   |
+   |   rustdoc does not generate documentation for macro invocations
+   |
+   = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: `#[inline]` attribute cannot be used on macro calls
+  --> src/presolve.rs:63:1
+   |
+63 | #[inline]
+   | ^^^^^^^^^
+   |
+   = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+   = help: `#[inline]` can only be applied to functions
+   = note: `#[warn(unused_attributes)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused doc comment
+  --> src/presolve.rs:58:1
+   |
+58 | / /// 前処理の実行不能判定に使う許容誤差: `base * (1 + |scale|)` (相対形、既定) または `base` (従来の絶対形)。
+59 | | ///
+60 | | /// `scale` は判定に関わる量の大きさ (固定値、行の活動度の項の絶対値の和、境界の絶対値など)。
+61 | | /// 丸め誤差はその大きさに比例するため (`params::presolve::PRESOLVE_REL_TOL` 参照)。
+...  |
+64 | | /// 整数最適化の前処理で、整数列を示す印 (スレッドローカル)。設定中は、列を代入で消す縮約が整数列を
+65 | | /// 消さず、境界の伝播で得た整数列の境界を丸める (計画書 §7)。
+   | |_-------------------------------------------------------------^
+   |   |
+   |   rustdoc does not generate documentation for macro invocations
+   |
+   = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> src/simplex/lu.rs:2392:1
+     |
+2392 | / /// `m x m` の疎行列 (疎行 `(列, 値)` の並び) を LU 分解する。数値的に特異
+2393 | | /// (あるステップで許容できるピボットが残っていない) なら `None`。
+2394 | | /// 境界列が適量あれば [`factorize_bordered`]、稠密なら [`factorize_dense_faer`]、
+2395 | | /// それ以外は Markowitz 消去に振り分ける。
+     | |_------------------------------------------^
+     |   |
+     |   rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused import: `PdlrcBest`
+  --> src/simplex/mip_lp.rs:23:17
+   |
+23 | pub use pdlrc::{PdlrcBest, PdlrcJob};
+   |                 ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `super::lp_api::MipLp`
+  --> src/mip/tpre.rs:87:9
+   |
+87 |     use super::lp_api::MipLp;
+   |         ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `mem`
+   --> src/mip/fold.rs:216:32
+    |
+216 |                 for (gi, ((_q, mem), g)) in groups.iter().zip(gdata).enumerate() {
+    |                                ^^^ help: if this is intentional, prefix it with an underscore: `_mem`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `p`
+   --> src/mip/domain.rs:922:33
+    |
+922 |     fn dbg_check_explain(&self, p: &MipProblem, terms: &[(usize, f64)], m_req: f64, before: usize, skip: usize, chosen: &[usize], g...
+    |                                 ^ help: if this is intentional, prefix it with an underscore: `_p`
+
+warning: variable does not need to be mutable
+    --> src/mip/solver.rs:7759:17
+     |
+7759 |             let mut lap = |what: &str, tt: &mut Instant| {
+     |                 ----^^^
+     |                 |
+     |                 help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `shared_x_used` is never read
+     --> src/mip/solver.rs:11102:41
+      |
+11102 |                                         shared_x_used += 1;
+      |                                         ^^^^^^^^^^^^^^^^^^
+      |                                         |
+      |                                         this value is reassigned later and never used
+      |                                         `shared_x_used` is overwritten here before the previous value is read
+...
+11595 |                     heur!("trivial", self.trivial());
+      |                     -------------------------------- in this macro invocation
+      |
+      = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+      = note: this warning originates in the macro `heur` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: value assigned to `shared_x_used` is never read
+     --> src/mip/solver.rs:11102:41
+      |
+11102 |                                         shared_x_used += 1;
+      |                                         ^^^^^^^^^^^^^^^^^^
+...
+11598 |                     heur!("sub-MIP Local-MIP", self.subheur_local_mip());
+      |                     ---------------------------------------------------- in this macro invocation
+      |
+      = help: maybe it is overwritten before being read?
+      = note: this warning originates in the macro `heur` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: value assigned to `x` is never read
+     --> src/mip/solver.rs:11101:41
+      |
+11101 |                                         x = nx;
+      |                                         ^
+...
+11598 |                     heur!("sub-MIP Local-MIP", self.subheur_local_mip());
+      |                     ---------------------------------------------------- in this macro invocation
+      |
+      = help: maybe it is overwritten before being read?
+      = note: this warning originates in the macro `heur` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused variable: `vv`
+     --> src/mip/solver.rs:18065:46
+      |
+18065 | ...                   let (jj, vv, l0, u0) = batch_ref[k];
+      |                                ^^ help: if this is intentional, prefix it with an underscore: `_vv`
+
+warning: unused variable: `p`
+    --> src/mip/heuristics.rs:2483:13
+     |
+2483 |         let p = self.p;
+     |             ^ help: if this is intentional, prefix it with an underscore: `_p`
+
+warning: value assigned to `fr` is never read
+    --> src/mip/heuristics.rs:3035:22
+     |
+3035 |         let mut fr = 0.0;
+     |                      ^^^ this value is reassigned later and never used
+...
+3041 |                 fr = rate(self);
+     |                 --------------- `fr` is overwritten here before the previous value is read
+
+warning: unused variable: `p`
+    --> src/mip/heuristics.rs:3702:13
+     |
+3702 |         let p = self.p;
+     |             ^ help: if this is intentional, prefix it with an underscore: `_p`
+
+warning: value assigned to `need_lp` is never read
+   --> src/mip/heur_subfix.rs:340:17
+    |
+340 |                 need_lp = false;
+    |                 ^^^^^^^^^^^^^^^ this value is reassigned later and never used
+...
+421 |                     need_lp = true;
+    |                     -------------- `need_lp` is overwritten here before the previous value is read
+
+warning: variable does not need to be mutable
+   --> src/mip/symmetry.rs:143:9
+    |
+143 |     let mut upd = |cnt: &mut std::collections::HashMap<u64, u32>, old: u64, new: u64| {
+    |         ----^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/mip/separation.rs:2012:13
+     |
+2012 |         let mut obj_hist: Vec<f64> = vec![prev_obj];
+     |             ----^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `obj_hist`
+    --> src/mip/separation.rs:2012:13
+     |
+2012 |         let mut obj_hist: Vec<f64> = vec![prev_obj];
+     |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_obj_hist`
+
+warning: variable does not need to be mutable
+    --> src/mip/separation.rs:5687:25
+     |
+5687 | ...   let mut skip_col = |j: usize, arcs: &Vec<Vec<(usize, f64)>>, other: &Vec<Vec<(usize, f64)>>, try_neg: &mut bool, path: &Vec<...
+     |           ----^^^^^^^^
+     |           |
+     |           help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/mip/separation.rs:8548:9
+     |
+8548 |     let mut add = |j: usize, v: f64, scratch: &mut [f64], touched: &mut Vec<usize>, mag: &mut Vec<(usize, f64)>| {
+     |         ----^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `j`
+   --> src/mip/zerohalf.rs:301:46
+    |
+301 |         let act: f64 = c.coefs.iter().map(|&(j, a)| a * 0.5).sum();
+    |                                              ^
+    |
+help: you might have meant to pattern match on the similarly named constant `N`
+    |
+301 -         let act: f64 = c.coefs.iter().map(|&(j, a)| a * 0.5).sum();
+301 +         let act: f64 = c.coefs.iter().map(|&(mip::cutconf::st::N, a)| a * 0.5).sum();
+    |
+help: if this is intentional, prefix it with an underscore
+    |
+301 |         let act: f64 = c.coefs.iter().map(|&(_j, a)| a * 0.5).sum();
+    |                                              +
+
+warning: variable does not need to be mutable
+    --> src/mip/mod.rs:7681:9
+     |
+7681 |     let mut add_implied = |j: usize, v: bool, ch: &[(usize, bool, f64)], dom: &Domain, implied: &mut Vec<(u32, bool, u32, bool, f6...
+     |         ----^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/mip/mod.rs:7709:9
+     |
+7709 |     let mut add_edges = |j: usize, v: u32, ch: &[(usize, bool, f64)], edges: &mut Vec<(u32, u32)>| {
+     |         ----^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: value assigned to `spec_ver` is never read
+    --> src/mip/mod.rs:7862:36
+     |
+7862 |     let (mut spec, mut spec_start, mut spec_ver, mut spec_used): (Vec<Option<ProbeSpec>>, usize, u64, usize) = (Vec::new(), 0, u64...
+     |                                    ^^^^^^^^^^^^ this value is reassigned later and never used
+...
+7882 |         spec_ver = u64::MAX;
+     |         ------------------- `spec_ver` is overwritten here before the previous value is read
+
+warning: unused variable: `variables`
+     --> src/mip/mod.rs:10932:13
+      |
+10932 |         let variables = vec![
+      |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_variables`
+
+warning: variable does not need to be mutable
+   --> src/presolve/doubleton.rs:388:17
+    |
+388 |             let mut rand_row = |len: usize, rnd: &mut dyn FnMut() -> u64| -> Vec<(usize, f64)> {
+    |                 ----^^^^^^^^
+    |                 |
+    |                 help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/presolve/scaling.rs:345:17
+    |
+345 |             let mut rows_of = |count: usize, rnd: &mut dyn FnMut() -> u64| -> Vec<Vec<(usize, f64)>> {
+    |                 ----^^^^^^^
+    |                 |
+    |                 help: remove this `mut`
+
+warning: value assigned to `harris2_k` is never read
+    --> src/simplex/slope_intercept_dual.rs:6356:29
+     |
+6356 |         let mut harris2_k = 0usize;
+     |                             ^^^^^^ this value is reassigned later and never used
+...
+6502 |             harris2_k = if ban_active { 0 } else { k };
+     |             ------------------------------------------ `harris2_k` is overwritten here before the previous value is read
+
+warning: value assigned to `alpha_nnz` is never read
+    --> src/simplex/slope_intercept_dual.rs:7257:29
+     |
+7257 |         let mut alpha_nnz = m;
+     |                             ^ this value is reassigned later and never used
+...
+7293 |             alpha_nnz = a_nnz;
+     |             ----------------- `alpha_nnz` is overwritten here before the previous value is read
+
+warning: variable does not need to be mutable
+    --> src/simplex.rs:2560:9
+     |
+2560 |     let mut apply = |rows: &mut Vec<Vec<(usize, f64)>>, rs: &[f64], cs: &[f64], dr: &mut [f64], dc: &mut [f64]| {
+     |         ----^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: type `simplex::StdForm` is more private than the item `solve_simplex_block`
+    --> src/simplex.rs:2645:1
+     |
+2645 | pub(super) fn solve_simplex_block(std: &StdForm, opts: &crate::types::LpOptions) -> SimplexResult {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ function `solve_simplex_block` is reachable at visibility `pub(crate)`
+     |
+note: but type `simplex::StdForm` is only usable at visibility `pub(self)`
+    --> src/simplex.rs:312:1
+     |
+ 312 | struct StdForm {
+     | ^^^^^^^^^^^^^^
+     = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `simplex::StdForm` is more private than the item `simplex::slope_intercept_dual::solve_slope_intercept_dual`
+    --> src/simplex/slope_intercept_dual.rs:4275:1
+     |
+4275 | pub fn solve_slope_intercept_dual(std: &StdForm, opts: &crate::types::LpOptions) -> Option<SimplexResult> {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ function `simplex::slope_intercept_dual::solve_slope_intercept_dual` is reachable at visibility `pub(crate)`
+     |
+note: but type `simplex::StdForm` is only usable at visibility `pub(self)`
+    --> src/simplex.rs:312:1
+     |
+ 312 | struct StdForm {
+     | ^^^^^^^^^^^^^^
+
+warning: methods `matvec` and `solve_refined` are never used
+   --> src/interior_point/kkt.rs:673:12
+    |
+514 | impl AugKkt {
+    | ----------- methods in this implementation
+...
+673 |     pub fn matvec(&self, a: &FaerCsr, v: &[f64], out: &mut [f64]) {
+    |            ^^^^^^
+...
+688 |     pub fn solve_refined(&mut self, a: &FaerCsr, rhs: &mut [f64], refine: usize, work: &mut Vec<f64>) {
+    |            ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `available` is never used
+  --> src/interior_point/pardiso.rs:70:8
+   |
+70 | pub fn available() -> bool {
+   |        ^^^^^^^^^
+
+warning: method `factor_nnz` is never used
+   --> src/interior_point/pardiso.rs:205:12
+    |
+ 93 | impl Pardiso {
+    | ------------ method in this implementation
+...
+205 |     pub fn factor_nnz(&self) -> usize {
+    |            ^^^^^^^^^^
+
+warning: methods `delete_and_add_rows` and `adopt_two_stage` are never used
+  --> src/mip/lp_api.rs:29:8
+   |
+ 9 | pub trait MipLp: Clone + Send {
+   |           ----- methods in this trait
+...
+29 |     fn delete_and_add_rows(&mut self, remove: &[bool], rows: &[(Vec<(usize, f64)>, f64, f64)]) {
+   |        ^^^^^^^^^^^^^^^^^^^
+...
+91 |     fn adopt_two_stage(&mut self, _lp: TwoStageLp) -> bool {
+   |        ^^^^^^^^^^^^^^^
+
+warning: field `up_first` is never read
+  --> src/mip/replay.rs:19:9
+   |
+13 | pub struct Entry {
+   |            ----- field in this struct
+...
+19 |     pub up_first: bool,
+   |         ^^^^^^^^
+
+warning: field `max_seq` is never read
+  --> src/mip/replay.rs:26:9
+   |
+24 | pub struct Replay {
+   |            ------ field in this struct
+25 |     pub map: HashMap<Vec<(u32, bool)>, Entry>,
+26 |     pub max_seq: u64,
+   |         ^^^^^^^
+
+warning: field `0` is never read
+   --> src/mip/solver.rs:290:15
+    |
+290 |     DeleteIdx(usize, Vec<u32>),
+    |     --------- ^^^^^
+    |     |
+    |     field in this variant
+    |
+    = note: `RowEdit` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+    |
+290 -     DeleteIdx(usize, Vec<u32>),
+290 +     DeleteIdx((), Vec<u32>),
+    |
+
+warning: field `w` is never read
+    --> src/mip/solver.rs:4085:5
+     |
+4076 | struct TriggerEval {
+     |        ----------- field in this struct
+...
+4085 |     w: f64,
+     |     ^
+
+warning: method `generation` is never used
+    --> src/mip/solver.rs:4232:19
+     |
+4204 | impl Portfolio {
+     | -------------- method in this implementation
+...
+4232 |     pub(crate) fn generation(&self) -> u64 {
+     |                   ^^^^^^^^^^
+
+warning: method `crossover` is never used
+  --> src/mip/heur_scip.rs:49:19
+   |
+13 | impl<'a, L: MipLp> Solver<'a, L> {
+   | -------------------------------- method in this implementation
+...
+49 |     pub(super) fn crossover(&mut self) -> bool {
+   |                   ^^^^^^^^^
+
+warning: method `support_len` is never used
+    --> src/mip/symmetry.rs:1817:12
+     |
+1788 | impl OrbitalGens {
+     | ---------------- method in this implementation
+...
+1817 |     pub fn support_len(&self) -> usize {
+     |            ^^^^^^^^^^^
+
+warning: constant `NAMES` is never used
+    --> src/mip/cuts.rs:2952:15
+     |
+2952 |     pub const NAMES: [&str; N] = ["cmir", "lcover", "ecover", "flowcover"];
+     |               ^^^^^
+
+warning: field `ker` is never read
+  --> src/mip/hnflat.rs:30:9
+   |
+22 | pub(crate) struct LatReform {
+   |                   --------- field in this struct
+...
+30 |     pub ker: usize,
+   |         ^^^
+
+warning: constant `INT_TOL` is never used
+    --> src/params.rs:1255:22
+     |
+1255 |     pub(crate) const INT_TOL: f64 = 1e-6;
+     |                      ^^^^^^^
+
+warning: constant `OBJ_EPS` is never used
+    --> src/params.rs:1259:22
+     |
+1259 |     pub(crate) const OBJ_EPS: f64 = 1e-7;
+     |                      ^^^^^^^
+
+warning: constant `MAX_NODES` is never used
+    --> src/params.rs:1262:22
+     |
+1262 |     pub(crate) const MAX_NODES: usize = 20_000;
+     |                      ^^^^^^^^^
+
+warning: constant `BOUND_INFEAS_TOL` is never used
+    --> src/params.rs:1265:22
+     |
+1265 |     pub(crate) const BOUND_INFEAS_TOL: f64 = 1e-9;
+     |                      ^^^^^^^^^^^^^^^^
+
+warning: field `h` is never read
+  --> src/presolve/parallelrows.rs:32:9
+   |
+24 | pub struct ParallelRowsResult {
+   |            ------------------ field in this struct
+...
+32 |     pub h: Vec<f64>,
+   |         ^
+
+warning: method `paths` is never used
+   --> src/simplex/basis_kernel.rs:215:19
+    |
+176 | impl BasisKernel {
+    | ---------------- method in this implementation
+...
+215 |     pub(super) fn paths(&self) -> SparsePaths {
+    |                   ^^^^^
+
+warning: method `gt_zero` is never used
+   --> src/simplex/slope_intercept_dual.rs:604:8
+    |
+567 | impl Affine1 {
+    | ------------ method in this implementation
+...
+604 |     fn gt_zero(&self) -> bool {
+    |        ^^^^^^^
+
+warning: field `x1` is never read
+    --> src/simplex/slope_intercept_dual.rs:2337:23
+     |
+2337 |     NoFiniteOptimum { x1: Vec<f64> },
+     |     ---------------   ^^
+     |     |
+     |     field in this variant
+
+warning: methods `num_cols`, `set_row_bounds`, `delete_and_add_rows`, and `last_status` are never used
+    --> src/simplex/mip_lp.rs:840:12
+     |
+ 651 | impl TwoStageLp {
+     | --------------- methods in this implementation
+...
+ 840 |     pub fn num_cols(&self) -> usize {
+     |            ^^^^^^^^
+...
+ 935 |     pub fn set_row_bounds(&mut self, i: usize, lo: f64, up: f64) {
+     |            ^^^^^^^^^^^^^^
+...
+1047 |     pub fn delete_and_add_rows(&mut self, remove: &[bool], new_rows: &[(Vec<(usize, f64)>, f64, f64)]) {
+     |            ^^^^^^^^^^^^^^^^^^^
+...
+1584 |     pub fn last_status(&self) -> Option<LpStatus> {
+     |            ^^^^^^^^^^^
+
+warning: field `col_parts` is never read
+  --> src/simplex/lp_fold.rs:85:9
+   |
+79 | pub struct FoldStats {
+   |            --------- field in this struct
+...
+85 |     pub col_parts: usize,
+   |         ^^^^^^^^^
+   |
+   = note: `FoldStats` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: method `flip` is never used
+  --> src/types.rs:81:12
+   |
+66 | impl RowSense {
+   | ------------- method in this implementation
+...
+81 |     pub fn flip(self) -> Self {
+   |            ^^^^
+
+warning: the `col_entry_start:` in this pattern is redundant
+    --> src/simplex/slope_intercept_dual.rs:4825:17
+     |
+4825 |                 col_entry_start: ref col_entry_start,
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: use shorthand field pattern: `ref col_entry_start`
+     |
+     = note: `#[warn(non_shorthand_field_patterns)]` on by default
+
