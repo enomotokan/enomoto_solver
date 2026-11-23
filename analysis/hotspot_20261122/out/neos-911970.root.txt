@@ -1,0 +1,33 @@
+== neos-911970: {"status": "node_limit", "objective": 61.23, "bound": 47.26000000000009, "nodes": 1, "time": 1.5941141459998107, "root_b
+根のラウンド数 (CUTTK の行): 22、止まり方: "reason":"stall" 
+サンプル 2101、うち根のカットのループ 828 (39.4%)
+   36.5%  分離: その他 (cuts::)
+   30.2%  LP の解き直し
+   15.7%  分離: カットの仕上げ
+    7.1%  分離: 経路の集約 (cmir)
+    6.2%  その他 (ループの関数そのもの・ほか)
+    1.4%  カットの選び (平行度・点数)
+    1.3%  プールの管理
+    0.7%  分離: hnf・mixing など
+    0.5%  伝播・固定
+    0.2%  分離: クリーク・含意
+    0.1%  メモリ確保・複写
+サンプル 2101、根のカットのループ 828 (39.4%)
+   31.8%  separate > _core::cuts::generate_cuts
+   20.9%  (separate の外) mip_lp::TwoStageLp::solve
+   16.9%  separate > Solver::separate
+    7.2%  separate > Solver::path_aggregation::separate
+    5.0%  (separate の外) ループの関数そのもの
+    3.9%  (separate の外) Solver::optface_alt_ext
+    3.7%  separate > separate そのもの
+    3.5%  separate > mip_lp::TwoStageLp::basis_inverse_row
+    1.3%  (separate の外) _core::separation::select_cuts
+    1.1%  (separate の外) Solver::randomized_rounding
+    0.8%  (separate の外) Solver::probe_cut_mode
+    0.5%  (separate の外) io::stdio::_eprint
+    0.4%  separate > Solver::sep_lp_rows
+    0.2%  (separate の外) Solver::clique_sig_score
+    0.2%  (separate の外) Solver::remove_inactive_cuts
+    0.2%  (separate の外) Solver::separate_face_split
+    0.2%  separate > k4W9msRzi_5alloc7raw_vecINtB5_6RawVecjE8::n4lhLXD6::crossbeam_utils
+    0.2%  separate > slope_intercept_dual::Affine1::grow_one
