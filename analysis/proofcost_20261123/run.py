@@ -6,6 +6,8 @@ D = Path(__file__).resolve().parent; WT = D.parents[1]
 PROBS = ["mas76", "pk1", "noswot", "timtab1", "supportcase26", "neos5", "mas74"]
 CF = {"def": {}, "p": {"ENOMOTO_MIP_PROOFCOST": "p"}, "a": {"ENOMOTO_MIP_PROOFCOST": "a"}, "pa": {"ENOMOTO_MIP_PROOFCOST": "pa"}}
 seed = int(sys.argv[1]) if len(sys.argv) > 1 else 1
+# 2 つ目の引数で設定を絞る (例 def,pa)
+if len(sys.argv) > 2: CF = {k: v for k, v in CF.items() if k in sys.argv[2].split(",")}
 OUT = D / "res.jsonl"
 done = {(r["problem"], r["cfg"], r["seed"]) for r in map(json.loads, OUT.open())} if OUT.exists() else set()
 for p in PROBS:
