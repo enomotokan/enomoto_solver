@@ -37,7 +37,10 @@ def st(r):
 
 def solved(r): return st(r) in ("optimal", "infeasible")
 def t(r): return min(r["result"]["time"], r["tl"]) if solved(r) and r["result"].get("time") is not None else r["tl"]
-def obj(r): return r["result"].get("objective")
+def obj(r):
+    """目的値 (有限でなければ None。HiGHS は実行不能のときも目的値 inf を返す)"""
+    v = r["result"].get("objective")
+    return v if isinstance(v, (int, float)) and math.isfinite(v) else None
 def same(a, b): return abs(a - b) <= 1e-6 * max(1.0, abs(a), abs(b))
 
 
