@@ -267,7 +267,7 @@ pgo の fuzz は回していない。pgo は pgo_v3 と同じ profile・同じ L
 - 直し方: 台本を、base は base の計測用の版で、v3 は v3 の計測用の版で、別々に学習する形にした (学習 2 回)。
   さらに作りのたびに hash mismatch の数を数え、`MAX_MISMATCH` (既定 0) を超えたら止める。直した後の作りは 7.6 節。
 
-### 7.4 release の CI の設計 (変更案は release_proposed.yml、まだ .github には入れない)
+### 7.4 release の CI の設計 (変更案は release_proposed.yml。7.7 節で .github に入れた)
 
 | 対象 | 機械 | PGO | dual | 見込みの時間 |
 |---|---|---|---|---|
@@ -352,6 +352,31 @@ cargo test (案 C のソース、LTO + PGO、base と v3 の設定): どちら�
 作り直した 2 本入りの wheel の確かめ:
 - fuzz 7 本: `fuzz_var.sh c2_dual` (auto で v3) と `ENOMOTO_CORE=base fuzz_var.sh c2_base`。どれも bad 0・mismatches 0。
 - tests/test_model.py (43 件): auto・base・v3 のどれでも全部通る。
+
+### 7.7 入れたもの (2026-11-23、利用者の判断) と公開前の確かめ
+
+この分岐に入れた (main・develop・PyPI には触っていない):
+- .github/workflows/release.yml: release_proposed.yml の形。
+  - linux・windows・macos の job は scripts/build_dist_wheel.sh で作る (学習 2 回・hash mismatch 0 の確かめ込み)。各作りのログを成果物に残す。
+  - test の job は、pytest を ENOMOTO_CORE=auto と base で 2 回流す。
+- README.md・README.ja.md の「インストール」と「ソースからビルドする場合」: readme_install_draft.md の内容。
+  - 作る時間は約 35 分に直した。手順の 3 は学習 2 回に合わせた。
+
+CI が実際に動くのは develop に入れたとき (push で build と test が回る) なので、公開 (main) の前に次を確かめる:
+
+1. Windows (MSVC) で `-Cprofile-generate` の作りと学習が通り、profraw ができて llvm-profdata でまとまること。
+   台本はパスを cygpath で `C:/...` に直している。
+2. macOS (macos-15 の arm64、macos-15-intel の x86_64) で `-Cprofile-generate` の作りと学習が通ること。
+3. `macos-15-intel` と `ubuntu-24.04-arm` のラベルが、このリポジトリで使えること (job が待ち続けないこと)。
+   使えなければ、その対象は今までどおりクロスで作り、`PGO=0` にする。macOS x86_64 は `DUAL=1` のまま 2 本入りにはできる。
+4. abi3 (`--features pyo3/abi3-py39`) の wheel で、2 本入りが `_core.abi3.so` と `_core_v3.abi3.so` (Windows は `_core.pyd` と `_core_v3.pyd`) になること。
+   Python 3.9・3.13・3.14 の test で、auto が `x86-64-v3` を、base が `base` を読むこと。手元は cp313 の wheel でしか確かめていない。
+5. 各 job のログ (build-logs-*) で、全部の作りの hash mismatch が 0 であること。台本は 0 でなければ止まる。
+6. manylinux のコンテナ (manylinux_2_28) で、rustup の llvm-tools・venv・maturin の `--compatibility manylinux_2_28` が通ること。
+   `auditwheel show` が 2 本の .so をどちらも manylinux_2_28 と見ること。
+7. aarch64 (ubuntu-24.04-arm) で、PGO が通ること (DUAL=0、1 本)。
+8. 全体の時間 (見込み 約 60 分)。GitHub の job の上限 (6 時間) には十分収まるはず。
+9. 公開した wheel を、v3 の無い CPU (または ENOMOTO_CORE=base) と v3 の CPU の両方で import して解けること。test の job の 2 回で代わりに見る。
 
 ## 8. ファイル
 
