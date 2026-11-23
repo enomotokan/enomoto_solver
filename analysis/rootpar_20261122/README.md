@@ -232,3 +232,4 @@ PROBE_PAR は閉じる (採らない)。試作のコードは既定オフのま�
 - 終わったら `git add -f wide/res_M_sK.jsonl` で push し、下の「回したビルド (M)」に 1 行足す。報告は件数・crash・解けた数・食い違い・
   `python ci.py 600 def rp res_M_sK.jsonl`・1.25 倍超の遅速・時間切れの暫定解の差。集計は `python ci.py 600 def rp res_M_s*.jsonl` (まとめ役)。
 - 回したビルド (M):
+  - M 2: 8db0d861c (pip install -e .、_core .so 01:35 作成)。62 行・crash 0。分担 2 だけの集計 (`ci.py 600 def rp res_M_s2.jsonl`): 31 問、rp/def 0.974 [0.908, 1.046]、解けた def 16 / rp 16、食い違いなし。1.25 倍超の遅れ istanbul-no-cutoff 1.64 倍 (238.5→391.0 秒、節点 1875→3061)。1.25 倍超の速さ fiball 129.3→45.4、pg5_34 205.2→155.4、tr12-30 224.5→171.9。時間切れ 13 問の暫定解 (def→rp): markshare2 10→15、neos-2657525-crna 3.79→5.68、traininstance2 76890→77130、satellites2-60-fs 1→-3、sp97ar 6.703e8→6.686e8 ほか小差。
