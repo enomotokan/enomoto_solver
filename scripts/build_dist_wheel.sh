@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # 配る wheel を作る: LTO (fat、codegen-units 1) + PGO。x86_64 ではさらに x86-64-v3 向けの _core を同梱する (dual)。
+# PGO の学習は版ごと (base は base の、v3 は v3 の計測用の版で) に行う。
 # 手元の `maturin develop`・`maturin build` と Cargo.toml の既定は変えない (環境変数でだけ変える)。
 # 測った結果と設計は analysis/buildopt_20261122/README.md。
 #
@@ -13,6 +14,7 @@
 #   PGO           1 なら PGO する (既定 1)。0 なら LTO だけ (学習を回せない、クロスで作る対象など)
 #   DUAL          1 なら x86-64-v3 版も作って同梱する。既定は x86_64 の機械なら 1、それ以外は 0
 #   TRAIN_ARGS    scripts/pgo_train.py に渡す引数 (既定 "--time-limit 10 --threads 1,4")
+#   MAX_MISMATCH  PGO の profile と合わない関数の数の上限 (既定 0。超えたら止める)
 # 道具: maturin、rustup の llvm-tools (PGO のとき。`rustup component add llvm-tools`)。
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -34,40 +36,63 @@ rm -rf "$WORK"; mkdir -p "$WORK" "$OUT"
 W=$(cd "$WORK" && pwd)
 T0=$(now)
 
-# build 名前 追加のRUSTFLAGS → $W/名前/ に wheel 1 本
+# build 名前 追加のRUSTFLAGS → $W/名前/ に wheel 1 本、ログは $W/名前.log。
+# PGO の profile と合わない関数 ("function control flow change detected (hash mismatch)") の数を数え、
+# MAX_MISMATCH (既定 0) を超えたら止める (学習した版と target-cpu が違うと、関数の形が変わって profile が捨てられる)。
 build() {
-  local name=$1 flags=$2 t
+  local name=$1 flags=$2 t n
   t=$(now)
   echo "== build $name: RUSTFLAGS=$BASE_RUSTFLAGS $flags"
   RUSTFLAGS="$BASE_RUSTFLAGS $flags" CARGO_TARGET_DIR="$ROOT/target/dist-$name" \
-    maturin build --release $MATURIN_ARGS --out "$W/$name"
-  echo "== build $name: $(( $(now) - t )) 秒"
+    maturin build --release $MATURIN_ARGS --out "$W/$name" > "$W/$name.log" 2>&1 || { tail -50 "$W/$name.log"; exit 1; }
+  grep -E "Built wheel" "$W/$name.log" || true
+  n=$(grep -c "hash mismatch" "$W/$name.log" || true)
+  echo "== build $name: $(( $(now) - t )) 秒、hash mismatch $n"
+  if [ "$n" -gt "${MAX_MISMATCH:-0}" ]; then
+    grep "hash mismatch" "$W/$name.log" | head -5
+    echo "PGO の profile と合わない関数が $n 個 (MAX_MISMATCH=${MAX_MISMATCH:-0})" >&2; exit 1
+  fi
 }
 
-USE=""
+# train 名前 target-cpu の RUSTFLAGS → 計測用の版を作って学習し、$W/名前.profdata を作る。
+# base と v3 は命令が違うので関数の形 (CFG) も違い、profile は同じ target-cpu の計測用の版で取ったものしか合わない。
+# そのため学習は版ごとに行う (x86_64 の dual では 2 回)。
+train() {
+  local name=$1 cpu=$2 t vpy
+  mkdir -p "$W/raw-$name"
+  build "gen-$name" "-Cprofile-generate=$(native "$W/raw-$name") $cpu"
+  "$PY" -m venv "$W/venv-$name"
+  vpy=$(venv_py "$W/venv-$name")
+  "$vpy" -m pip install -q --no-index --no-deps "$W"/gen-$name/*.whl
+  if [ -n "$cpu" ]; then  # v3 の計測用の版を動かすので、この機械が v3 に対応している必要がある
+    (cd "$W" && "$vpy" -c "import enomoto_solver._core as c, sys; sys.exit(0 if c.cpu_x86_64_v3() else 'この機械は x86-64-v3 に対応していないので v3 の学習ができない (PGO=0 か DUAL=0 で作る)')")
+  fi
+  t=$(now)
+  echo "== train $name: scripts/pgo_train.py $TRAIN_ARGS"
+  (cd "$W" && "$vpy" "$ROOT/scripts/pgo_train.py" $TRAIN_ARGS > "$W/train-$name.out" 2> "$W/train-$name.err")
+  tail -1 "$W/train-$name.out"
+  echo "== train $name: $(( $(now) - t )) 秒"
+  "$PROFDATA" merge -o "$W/$name.profdata" "$W"/raw-$name/*.profraw
+}
+
+V3CPU="-Ctarget-cpu=x86-64-v3"
 if [ "$PGO" = 1 ]; then
   SYSROOT=$(rustc --print sysroot)
   HOST=$(rustc -vV | sed -n 's/^host: //p')
   PROFDATA="$SYSROOT/lib/rustlib/$HOST/bin/llvm-profdata"
   [ -x "$PROFDATA" ] || PROFDATA="$PROFDATA.exe"
   [ -x "$PROFDATA" ] || { echo "llvm-profdata が無い: rustup component add llvm-tools" >&2; exit 1; }
-  mkdir -p "$W/pgo-raw"
-  build gen "-Cprofile-generate=$(native "$W/pgo-raw")"
-  "$PY" -m venv "$W/venv"
-  VPY=$(venv_py "$W/venv")
-  "$VPY" -m pip install -q --no-index --no-deps "$W"/gen/*.whl
-  t=$(now)
-  echo "== train: scripts/pgo_train.py $TRAIN_ARGS"
-  (cd "$W" && "$VPY" "$ROOT/scripts/pgo_train.py" $TRAIN_ARGS 2> "$W/train.err")
-  echo "== train: $(( $(now) - t )) 秒"
-  "$PROFDATA" merge -o "$W/merged.profdata" "$W"/pgo-raw/*.profraw
-  ls -l "$W/merged.profdata"
-  USE="-Cprofile-use=$(native "$W/merged.profdata")"
+  train base ""
+  build base "-Cprofile-use=$(native "$W/base.profdata")"
+  if [ "$DUAL" = 1 ]; then
+    train v3 "$V3CPU"
+    build v3 "-Cprofile-use=$(native "$W/v3.profdata") $V3CPU"
+  fi
+else
+  build base ""
+  [ "$DUAL" = 1 ] && build v3 "$V3CPU"
 fi
-
-build base "$USE"
 if [ "$DUAL" = 1 ]; then
-  build v3 "$USE -Ctarget-cpu=x86-64-v3"
   "$PY" "$ROOT/scripts/make_dual_wheel.py" "$W"/base/*.whl "$W"/v3/*.whl "$OUT"
 else
   cp "$W"/base/*.whl "$OUT"/

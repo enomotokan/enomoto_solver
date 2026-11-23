@@ -79,22 +79,49 @@ analysis/buildopt_20261122 の pgo_v3 と同じ作り方 (LTO fat・codegen-unit
 - 学習 (PGO): 測る 48 問と重ならない P・M の 10 問 (neos17, binkar10_1, eil33-2, neos-827175, nu25-pr12, dcmulti, qiu, rout, mas76, neos-911970) を、
   学習用の版 (pgogen) で 1 スレッド・種 1・上限 30 秒で解く。buildopt の学習の 10 問のうち 4 問 (graph20-20-1rand・hypothyroid-k1・p200x1188c・misc07)
   は今回の 48 問に入るので入れ替えた。学習の結果は `pgo/merged.profdata.gz` (2.5 MB) としてコミットした。
-- 作った版 (この環境、`dist/build.txt`):
-  - commit df0d3c6b3、rustc 1.97.0 (2d8144b78 2026-07-07)、maturin 1.16.0、profdata の sha1 ad8d3f9b5fbb968bdeebc12ee71797c02a139f9b
-  - **.so の sha1 75f84cd62883f6452b4f9f638a1cf1b24cdcfbb7** (wheel enomoto_solver-0.1.10-cp313-cp313-manylinux_2_39_x86_64.whl)
-  - 学習から作って 15 分弱 (pgogen と pgo_v3 で各 6〜7 分、学習 2 分)。コミット済みの学習結果から pgo_v3 だけ作ると 7 分ほど。
-  - コミット済みの学習結果から作り直すと、.so の sha1 が同じになった (同じコミット・同じ rustc なら同じ .so)。wheel の sha1 は zip の時刻で変わるので、
-    照合は .so の sha1 で行う。
-- 各分担の手順 (同じ .so で測るため):
+- **.so の sha1 は作るたびに変わる** (2026-11-23 に分かった、親の指摘で調べた):
+  - 同じコミット (40be041e4)・rustc 1.97.0・学習結果 (sha1 ad8d3f9b…)・フラグで作っても、分担 0 は fd9e4a30…、分担 2 は 3432a101…、分担 5 は c988d5f2…、
+    この環境の作り直しは 38eea0d8… になった (最初に書いた 75f84cd6… は、依存を作り直さない 2 回目と一致しただけだった)。
+  - .so には依存クレートのソースの絶対パス (CARGO_HOME/registry/src/…、121 か所) が文字列として入る。RUSTFLAGS には学習結果のパス
+    (`-Cprofile-use=<リポジトリ>/analysis/losses_20261123/target/merged.profdata`) が入り、これだけでも .so が変わった。
+    `--remap-path-prefix` で CARGO_HOME の場所を消しても、それを足した RUSTFLAGS の違いで .so は変わった。cargo の trim-paths は 1.97 では使えない。
+  - なので **sha1 では照合しない**。同じ版の条件は、dist/build.txt の commit・rustc・maturin・profdata の sha1・env がそろうこと (各分担は build_sK.txt に残す)。
+  - 動きの照合: `python analysis/losses_20261123/check_build.py` (1 スレッド・決定的・種 1 で khb05250・air03・neos8 を解き、状態・目的値・ノード数を
+    ref_check.json と比べる)。作り方 (LTO・PGO・target-cpu) は buildopt で道筋を変えないと確かめてあるので、これはソースの照合になる。
+  - 集計は .so の sha1 ごとの行の数を出し、`summ.py --so <先頭 8 文字>` で当方の行を 1 つの .so に絞れる。
+- 各分担の手順 (同じ作り方で作るため):
   1. `git checkout 40be041e4` (この台本の最初のコミット。親が df0d3c6b3 でソースは同じ)。build.sh は HEAD を作るので、このコミットで作る。
-     ブランチの先端は後から他の変更 (e5eb72eaa で src/lib.rs・python/enomoto_solver/__init__.py) が入っているので、先端で作ると .so が変わる。
-     先端の既定で測ると決めたら、先端で学習から作り直し (`sh build.sh`)、新しい so_sha1 をこの README に書き足すこと。
-  2. `rustup component add llvm-tools` は学習から作るときだけ要る。学習結果から作るなら不要。
-  3. `pip install maturin highspy==1.15.1 pyscipopt psutil`
-  4. `PROF=analysis/losses_20261123/pgo/merged.profdata.gz sh analysis/losses_20261123/build.sh` → 最後に出る so_sha1 が 75f84cd6… と同じことを確かめる
-     (違えば rustc の版かソースが違う。その場合も dist/build.txt を結果と一緒に残せば、行の ours_so_sha1 でどの版か分かる)
-  5. `pip install --force-reinstall --no-deps analysis/losses_20261123/dist/enomoto_solver-*.whl`
-  - 1 本だけ作って配る形にするなら、上の 4 で作った wheel を各分担の機械に写して 5 だけをする (同じ Python の版 (cp313) と glibc 2.39 以上が要る)。
+     ブランチの先端は後から他の変更 (src/lib.rs・python/enomoto_solver/__init__.py) が入っているので、先端で作るとソースが変わる。
+  2. `pip install maturin highspy==1.15.1 pyscipopt psutil`
+  3. `PROF=analysis/losses_20261123/pgo/merged.profdata.gz sh analysis/losses_20261123/build.sh` (約 7 分) → dist/build.txt を build_sK.txt として残す
+  4. `pip install --force-reinstall --no-deps analysis/losses_20261123/dist/enomoto_solver-*.whl`
+  5. ブランチに戻り `python analysis/losses_20261123/check_build.py` が「一致」を出すことを確かめてから `run.py K`
+
+### 3.1 PGO が当たっているかの確かめ (2026-11-23、親の依頼)
+
+- 前の build.sh (学習用を x86-64-v3 なしで作り、作業木は mktemp の毎回違う場所) で計測用の版を作ると、LLVM が当方のクレートの関数 1281 個
+  (std の汎用関数 1216 個も) の学習結果を「function control flow change detected (hash mismatch)」として捨てていた
+  (`-Cllvm-args=-pgo-warn-missing-function` つきで作り直して数えた。捨てた中には単体法の solve_slope_intercept_dual_impl も入る)。
+  記号名は合っていて、関数の形 (制御の流れのハッシュ) が違う: 学習用と計測用で target-cpu が違うためと見る。
+- build.sh を直した (コミット b03029409 以降): 学習用も `-C target-cpu=x86-64-v3` で作り、作業木と学習結果を固定の場所 (/tmp/enomoto_losses_build) に
+  置く。build.txt に hash mismatch の数 (`pgo_hash_mismatch`) を書く。学習から作り直すと 0、コミットした新しい学習結果から作り直しても 0。
+  ただし .so の sha1 は固定の場所でも作るたびに変わった (777dabbf… と 5bb2b826…)。sha1 で照合しない方針は変えない。
+- 時間の比べ (`pgo_check.py`、1 スレッド・決定的・種 1、学習と重ならない 6 問 × 2 回、速い方どうし、res_pgocheck.jsonl):
+
+| 問題 | lto_v3 (PGO なし) [秒] | 前の版 (38eea0d8…) | 新しい版 (777dabbf…) | 前/lto_v3 | 新/lto_v3 |
+|---|---:|---:|---:|---:|---:|
+| air03 | 4.05 | 3.89 | 4.20 | 0.961 | 1.038 |
+| neos8 | 4.77 | 4.66 | 4.25 | 0.976 | 0.890 |
+| exp-1-500-5-5 | 4.79 | 4.53 | 4.65 | 0.945 | 0.971 |
+| qnet1 | 3.16 | 3.01 | 3.21 | 0.953 | 1.016 |
+| mik-250-20-75-4 | 10.28 | 10.35 | 10.26 | 1.007 | 0.998 |
+| markshare_4_0 | 6.07 | 5.49 | 5.38 | 0.904 | 0.887 |
+| **幾何平均** | | | | **0.957** | **0.965** |
+
+  - 道筋 (状態・ノード数・目的値) は 3 版とも全問で同じ。
+  - 前の版も新しい版も PGO なしより 4% ほど速い。2 つの差は揺れの内 (buildopt で同じ版の 2 回の揺れが 2〜4%)。
+    1281 関数の学習結果を捨てていても、残りの関数 (依存クレート・当たった当方の関数) の分で効いていた。
+  - **結論: 分担が前の build.sh で作った版でも、当方の行を取り直す必要はない**。次に作るときは直した build.sh を使う。
 
 ## 4. 分担と回し方 (plan.py → shards.json)
 
