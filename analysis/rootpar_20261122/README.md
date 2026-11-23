@@ -191,3 +191,15 @@ fuzz 7 本すべて bad 0 (内訳も以前と同じ形)。`cargo test --release 
   同値な組の巡) にある。プロービングを速くするなら、並列より、繰り返し (mzzv42z では前処理の中で 4 回 + 再スタート後 2 回、2 回目以降は
   固定 0) を減らす方が得が大きい見込み (例: 前の回で何も得られなかったプロービングを次の前処理のかけ直しで飛ばす。再スタートの後は
   既に `ENOMOTO_MIP_PRBWORK` で同じ考えの試作がある)。
+
+### 3 の結び (2026-11-23、親・利用者の判断)
+
+PROBE_PAR は閉じる (採らない)。試作のコードは既定オフのまま残す。
+
+## 4. RINS_PAR の広い計測 (2026-11-23、利用者の判断: 「RINS の並列化は得に見える」)
+
+- 台本は `wide/` (objstepcut_20261122/wide の写し): `cfg.py` (def・rp = `ENOMOTO_MIP_RINS_PAR=1`)・`plan.py`・`run.py` (not_solved・crash の回は stderr の最後を残す)・`ci.py`。
+- P: `python plan.py P 6 def,rp` → `shards_P.json` (58 問 × 種 1〜3 × {def, rp}、4 スレッド・60 秒、6 分担・各 0.47 時間の見積り)。
+  回し方はリポジトリの根で pip install -e . の後 `cd analysis/rootpar_20261122/wide && python run.py P K` (K = 0〜5)、集計 `python ci.py 60 def rp res_P_s*.jsonl`。
+- 分担 0 はこの子 (まとめ役)、1〜5 は親が割り当てる。
+- 回したビルド:
