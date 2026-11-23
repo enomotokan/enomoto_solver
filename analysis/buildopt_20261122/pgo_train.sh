@@ -3,7 +3,7 @@
 # pgo/raw の *.profraw を rustup の llvm-profdata (LLVM の版を rustc に合わせる) で pgo/merged.profdata にまとめる。
 set -e
 D=$(cd "$(dirname "$0")" && pwd)
-rm -rf "$D/pgo"; mkdir -p "$D/pgo/raw"
+rm -rf "$D/pgo"; mkdir -p "$D/pgo/raw"; rm -f "$D/res_pgotrain.jsonl"  # 再開させない (前の行が残ると学習を飛ばす)
 cd "$D"
 PROBS=neos17,misc07,binkar10_1,eil33-2,graph20-20-1rand,neos-827175,hypothyroid-k1,p200x1188c,nu25-pr12,dcmulti TL=30 REPS=1 python run_var.py pgotrain pgogen
 PD=$(ls ~/.rustup/toolchains/*/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-profdata | head -n 1)
