@@ -3250,7 +3250,9 @@ pub(super) fn proofcost(c: char) -> bool {
 /// - `s`: 双対証明の走査 ([`Solver::apply_dual_proofs`]) で、前回の評価から差分 (列の境界) も右辺 (目的の証明は打ち切り値) も変わらず、そのときに刈りも
 ///   締めもしなかった証明を、最初の回で飛ばす。評価の結果は前回と同じ (刈らない・締めない) なので答えも道筋も変わらない (走査の順は保つ)。
 ///   同じ回の中でほかの証明が締めた列は、締めた側の差分は次の回で取り込むまで古いままで、古い余裕で締める値は前回より強くならない。
-pub(super) fn proofprop(c: char) -> bool {
+/// - `l`: リテラルの衝突の伝播 ([`super::conflict_pool::LitConflictPool`]) で、境界の変更と同じ向きのリテラルを持つ衝突だけを調べる
+///   (下限の変更で `x <= v` のリテラルは新たに成り立たない)。成り立つかの判定は変えないが、調べた回数で数える衝突の年齢が変わるので道筋は変わりうる。
+pub(crate) fn proofprop(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     V.get_or_init(|| env_str!("ENOMOTO_MIP_PROOFPROP").map_or(String::new(), |v| v.to_string())).contains(c)
 }
