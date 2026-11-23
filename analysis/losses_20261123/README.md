@@ -86,7 +86,9 @@ analysis/buildopt_20261122 の pgo_v3 と同じ作り方 (LTO fat・codegen-unit
   - コミット済みの学習結果から作り直すと、.so の sha1 が同じになった (同じコミット・同じ rustc なら同じ .so)。wheel の sha1 は zip の時刻で変わるので、
     照合は .so の sha1 で行う。
 - 各分担の手順 (同じ .so で測るため):
-  1. `git checkout df0d3c6b3` 以降のこの台本のコミットで (build.sh は HEAD を作るので、**ソースが df0d3c6b3 と同じ**コミットで作ること)
+  1. `git checkout 40be041e4` (この台本の最初のコミット。親が df0d3c6b3 でソースは同じ)。build.sh は HEAD を作るので、このコミットで作る。
+     ブランチの先端は後から他の変更 (e5eb72eaa で src/lib.rs・python/enomoto_solver/__init__.py) が入っているので、先端で作ると .so が変わる。
+     先端の既定で測ると決めたら、先端で学習から作り直し (`sh build.sh`)、新しい so_sha1 をこの README に書き足すこと。
   2. `rustup component add llvm-tools` は学習から作るときだけ要る。学習結果から作るなら不要。
   3. `pip install maturin highspy==1.15.1 pyscipopt psutil`
   4. `PROF=analysis/losses_20261123/pgo/merged.profdata.gz sh analysis/losses_20261123/build.sh` → 最後に出る so_sha1 が 75f84cd6… と同じことを確かめる
