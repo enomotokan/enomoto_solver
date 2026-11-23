@@ -8,12 +8,16 @@ print("| 回 | 状態・秒・ノード | 目的 | 証明 作り直し | 証明 
 print("|---|---|" + "---:|" * 12)
 import sys
 for f in sorted(glob.glob(str(D / (sys.argv[1] if len(sys.argv) > 1 else "logs") / "*.log"))):
-    acc = {}; tot = 0.0; res = {}
+    accm, accw = {}, {}; res = {}
     for l in open(f):
         m = re.match(r"XPROFW? (\S+)\s+([\d.]+) ms", l)
         if m:
-            acc[m.group(1)] = acc.get(m.group(1), 0) + float(m.group(2))
-            if l.startswith("XPROF "): tot += float(m.group(2))
+            # 主のスレッドの XPROF は外側の求解の終わりに貯めた値を出す (再スタートで 2 回出れば後の方)。従の XPROFW は出すたびに空にするので足す
+            if l.startswith("XPROFW"):
+                accw[m.group(1)] = accw.get(m.group(1), 0) + float(m.group(2))
+            else:
+                accm[m.group(1)] = float(m.group(2))
         if l.startswith("{"): res = json.loads(l)
+    acc = {k: accm.get(k, 0) + accw.get(k, 0) for k in set(accm) | set(accw)}
     v = [acc.get(k, 0) / 1000 for k in KEYS]
     print(f"| {Path(f).stem} | {res.get('status')}・{res.get('time', 0):.1f}・{res.get('nodes')} | " + " | ".join(f"{x:.2f}" for x in v) + f" | {sum(v):.2f} | " + " | ".join(f"{acc.get(c, 0):.0f}" for c in CNT) + " |")

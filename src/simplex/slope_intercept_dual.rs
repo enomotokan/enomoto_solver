@@ -1499,7 +1499,16 @@ pub(crate) fn xprof_enable(on: bool) {
     if on {
         XPROF_ANY.store(true, std::sync::atomic::Ordering::Relaxed);
     }
-    XPROF.with(|x| *x.borrow_mut() = if on { Some((std::time::Instant::now(), Vec::new())) } else { None });
+    // 有効にするとき、すでに有効なら貯めた値を残す (このスレッドで新しい LP を作るたび (サブ MIP・再スタート) に 0 に戻していた。
+    // analysis/proofprop_20261123)
+    XPROF.with(|x| {
+        let mut x = x.borrow_mut();
+        if !on {
+            *x = None;
+        } else if x.is_none() {
+            *x = Some((std::time::Instant::now(), Vec::new()));
+        }
+    });
 }
 
 /// 診断用: 前回の印からここまでの時間を区間 `label` に足す。
