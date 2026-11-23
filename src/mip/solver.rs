@@ -3973,6 +3973,9 @@ pub(crate) fn divequota(c: char) -> bool {
 /// - `r`: 根の被約費用のサブ MIP ([`Solver::root_reduced_cost`]) の候補 (lurking bound) を、最後の LP だけでなく根のカットの各回の
 ///   LP からためる (HiGHS の `HighsRedcostFixing::addRootRedcost`)。並びは「固定が正しくなる打ち切り値 − 今の LP の値」の大きい順で、
 ///   今の LP の値以下のものは使わない。スレッドの数によらない。
+/// - `f`: 外側の根から出したサブ MIP (成果連動の打ち切りの対象) でも、根のヒューリスティクスの後に暫定解がなければ `ENOMOTO_MIP_ROBUST` の
+///   `g` の FJ・Local-MIP のやり直し ([`Solver::robust_fj_retry`]) を回す (今は外側だけ。10teams の被約費用のサブ MIP の近傍は
+///   単独で解くと FJ が 0.03 秒で最適解を出すが、サブ MIP の中では回らず 250〜500 ノードで解なし)。スレッドの数によらない。
 /// - `d`: 外側が 1 スレッドのとき、外側の根で前に解いたサブ MIP と同じ問題 (列の境界・行の数・打ち切り値が同じ) のサブ MIP は解かない
 ///   (10teams では暫定解のない根の被約費用のサブ MIP と LP face が同じ固定になり、同じ計算を 2 回する)。
 pub(crate) fn heur1t(c: char) -> bool {
@@ -11498,7 +11501,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 試作 `ENOMOTO_MIP_ROBUST` の `g` ([`robust`]): `f` の FJ・Local-MIP のやり直しを、安い根のヒューリスティクス
                 // (ダイビング・FP・locks・clique・vbounds) と並列のサブ MIP の後ろへ回す (`f` の位置では blend2・flugpl のように
                 // 後ろの安いものがすぐ見つける問題でも FJ が最大 6 秒空回りした)
-                if robust('g') && !self.params.submip && self.incumbent.is_none() {
+                // 試作 `ENOMOTO_MIP_HEUR1T` の `f` ([`heur1t`]): 外側の根から出したサブ MIP ([`submip_outcome_stop`] の対象) でも回す
+                if robust('g') && (!self.params.submip || (heur1t('f') && self.root_submip.is_some())) && self.incumbent.is_none() {
                     heur!("robust FJ", self.robust_fj_retry());
                 }
                 self.poll_find_thread();
