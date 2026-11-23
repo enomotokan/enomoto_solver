@@ -2133,11 +2133,21 @@ pub fn factorize_reusing(m: usize, rows_in: &[Vec<(usize, f64)>], prev: Option<&
 /// `diag(L,I) [I 0; R U^-1 I] diag(U,I)` と同じ形)。`fill_baseline` は直前の通常の分解の非ゼロ数 (fill の上限の基準、
 /// [`factorize_reusing`] と同じ倍率)。順が正しくない・数値的に使い果たした・fill が上限を超えたら `None` (呼び出し側は通常の分解に任せる)。
 pub fn factorize_with_order(m: usize, rows_in: &[Vec<(usize, f64)>], pivot_col: &[usize], pivot_row_hint: &[usize], fill_baseline: usize) -> Option<FtLu> {
-    if m == 0 || is_dense_input(m, rows_in) || border_wanted(m, detect_border_columns(m, rows_in).len()) {
+    // 診断 (`ENOMOTO_MIP_XPROF`): 断った理由ごとの数 (`n_lux_dense`・`n_lux_border`・`n_lux_replay`)
+    use crate::simplex::slope_intercept_dual::xcount;
+    if m == 0 || is_dense_input(m, rows_in) {
+        xcount("n_lux_dense");
+        return None;
+    }
+    if border_wanted(m, detect_border_columns(m, rows_in).len()) {
+        xcount("n_lux_border");
         return None;
     }
     let max_nnz = (reuse_fill_limit() * fill_baseline as f64) as usize + m;
-    let lu = factorize_reusing_order(m, rows_in, pivot_col, pivot_row_hint, max_nnz)?;
+    let Some(lu) = factorize_reusing_order(m, rows_in, pivot_col, pivot_row_hint, max_nnz) else {
+        xcount("n_lux_replay");
+        return None;
+    };
     let mut ft = FtLu::new(lu);
     ft.fill_baseline = fill_baseline.max(1);
     Some(ft)

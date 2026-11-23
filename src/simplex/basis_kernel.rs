@@ -836,6 +836,7 @@ pub(super) fn factorize_basis(
 pub(super) fn factorize_basis_order(std: &StdForm, basis_pos: &[Option<usize>], pivot_col: &[usize], pivot_row_hint: &[usize], fill_baseline: usize) -> Option<sparse_lu::FtLu> {
     let m = std.n_rows;
     if pivot_col.len() != m || pivot_row_hint.len() != m {
+        super::slope_intercept_dual::xcount("n_lux_basis");
         return None;
     }
     let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
@@ -843,12 +844,14 @@ pub(super) fn factorize_basis_order(std: &StdForm, basis_pos: &[Option<usize>], 
     for j in 0..std.n_total {
         if let Some(col) = basis_pos[j] {
             if col >= m || basis_of[col] != usize::MAX {
+                super::slope_intercept_dual::xcount("n_lux_basis");
                 return None;
             }
             basis_of[col] = j;
         }
     }
     if basis_of.contains(&usize::MAX) {
+        super::slope_intercept_dual::xcount("n_lux_basis");
         return None;
     }
     for (col, &j) in basis_of.iter().enumerate() {
