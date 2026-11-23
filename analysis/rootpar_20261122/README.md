@@ -179,6 +179,10 @@ fuzz 7 本すべて bad 0 (tiny 400・highs 300・objint 1000・slack 1000・tin
 pre の秒 (種 1〜3): mzzv42z 12.5・13.2・13.1 → 15.4・15.3・15.7、mzzv11 15.7・17.0・15.1 → 20.2・20.0・19.1 (どちらも遅くなる)、
 ほか 7 問はほぼ同じ (nw04 5.7・6.3・5.6 → 5.8・6.4・4.9 など)。1.25 倍超の遅れ: 30n20b8 種 2・mzzv42z 種 3・physiciansched6-2 種 1、速さ: mzzv11 種 2。
 
+### 正しさ (`bash fuzz.sh pp` → fuzz_pp.out、`ENOMOTO_MIP_PROBE_PAR=1 ENOMOTO_MIP_THREADS=4`)
+
+fuzz 7 本すべて bad 0 (内訳も以前と同じ形)。`cargo test --release --lib`: PROBE_PAR・既定とも 419 通過・0 失敗。
+
 ### 見立て
 
 - 含意を使うプロービングは、固定が多い (窓がすぐ崩れる) うえ、1 回の試しが軽い (0.2 ミリ秒前後) ので、投機的な窓の並列は得にならず、
