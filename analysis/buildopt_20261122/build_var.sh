@@ -13,7 +13,7 @@ case $N in
   v2|v3) export RUSTFLAGS="-C target-cpu=x86-64-$N" ;;
   lto_v2|lto_v3) export CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 RUSTFLAGS="-C target-cpu=x86-64-${N#lto_}" ;;
   pgogen) export CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 RUSTFLAGS="-Cprofile-generate=$D/pgo/raw" ;;
-  pgo) export CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 RUSTFLAGS="-Cprofile-use=$D/pgo/merged.profdata -Cllvm-args=-pgo-warn-mismatch" ;;
+  pgo) export CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 RUSTFLAGS="-Cprofile-use=$D/pgo/merged.profdata" ;;
   pgo_v3) export CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 RUSTFLAGS="-C target-cpu=x86-64-v3 -Cprofile-use=$D/pgo/merged.profdata" ;;
   *) echo "unknown $N"; exit 1 ;;
 esac
