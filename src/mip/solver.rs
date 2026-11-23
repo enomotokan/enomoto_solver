@@ -883,6 +883,11 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) submip_node_mult: f64,
     /// 直近の (旧来の) RENS のサブ MIP がノード上限で止まったか。
     pub(super) rens_node_limited: bool,
+    /// 試作 `ENOMOTO_MIP_HEUR1T` の `d` ([`heur1t`]): この求解の外側の根で主のスレッドで解いたサブ MIP の問題の指紋
+    pub(super) heur1t_seen: Vec<u64>,
+    /// 試作 `ENOMOTO_MIP_HEUR1T` の `r` ([`heur1t`]): 外側の根のカットの各回の LP の被約費用からためた lurking bound
+    /// (列ごとに [上限を下限に締める, 下限を上限に締める] の「その固定が正しくなる打ち切り値」= LP の値 + |被約費用| の最大。なければ -inf)
+    pub(super) heur1t_lurk: Vec<[f64; 2]>,
     /// 試作 `ENOMOTO_MIP_RENS_BIGGAP` (P2-HEUR): この求解で既定の RENS (LP で整数値の列を全部固定) をもう回したか
     pub(super) rens_biggap_done: bool,
     /// 直近に主のスレッドで解いたサブ MIP が、ノード上限まで進んだか (停滞・成果連動の打ち切りでなく。[`rens_more_nodes_real`])
@@ -3962,6 +3967,24 @@ pub(crate) fn divequota(c: char) -> bool {
     V.get_or_init(|| env_str!("ENOMOTO_MIP_DIVEQUOTA").map_or(String::new(), |v| v.to_string())).contains(c)
 }
 
+/// 試作 `ENOMOTO_MIP_HEUR1T=<文字の並び>` (既定では使わない、analysis/heur1t_20261123): 1 スレッドの外側の根のサブ MIP の扱いを 4 スレッドに揃える。
+/// - `n`: 外側が 1 スレッドのとき、根のサブ MIP (主のスレッドで解く) にも「解のないまま `ENOMOTO_T_MIP_SUBMIP_NOSOL_CAP` ノードで止める」を
+///   効かせない (4 スレッドでは根のサブ MIP は別スレッドで解くので `ENOMOTO_MIP_SUBMIP_NOSOL_CAP_SERIAL` の既定で効かず、ノード上限まで進む)。
+/// - `r`: 根の被約費用のサブ MIP ([`Solver::root_reduced_cost`]) の候補 (lurking bound) を、最後の LP だけでなく根のカットの各回の
+///   LP からためる (HiGHS の `HighsRedcostFixing::addRootRedcost`)。並びは「固定が正しくなる打ち切り値 − 今の LP の値」の大きい順で、
+///   今の LP の値以下のものは使わない。スレッドの数によらない。
+/// - `f`: 外側の根から出したサブ MIP (成果連動の打ち切りの対象) でも、根のヒューリスティクスの後に暫定解がなければ `ENOMOTO_MIP_ROBUST` の
+///   `g` の FJ・Local-MIP のやり直し ([`Solver::robust_fj_retry`]) を回す (今は外側だけ。10teams の被約費用のサブ MIP の近傍は
+///   単独で解くと FJ が 0.03 秒で最適解を出すが、サブ MIP の中では回らず 250〜500 ノードで解なし)。スレッドの数によらない。
+/// - `l`: 外側が 1 スレッドのとき、木の中の大近傍探索の時間の割合 (既定 2〜10%) を、4 スレッドでヒューリスティクス役に回る割合
+///   (`ENOMOTO_T_MIP_HEUR_ROLE_FRAC`、既定 0.25 = 4 本のうち 1 本) まで上げる (暫定解があるときだけ)。
+/// - `d`: 外側が 1 スレッドのとき、外側の根で前に解いたサブ MIP と同じ問題 (列の境界・行の数・打ち切り値が同じ) のサブ MIP は解かない
+///   (10teams では暫定解のない根の被約費用のサブ MIP と LP face が同じ固定になり、同じ計算を 2 回する)。
+pub(crate) fn heur1t(c: char) -> bool {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| env_str!("ENOMOTO_MIP_HEUR1T").map_or(String::new(), |v| v.to_string())).contains(c)
+}
+
 pub(crate) fn subcap(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     V.get_or_init(|| env_str!("ENOMOTO_MIP_SUBCAP").map_or(String::new(), |v| v.to_string())).contains(c)
@@ -4470,6 +4493,8 @@ pub(crate) struct SubmipCtl {
     pub(crate) found_at: std::sync::atomic::AtomicU64,
     /// 改良 (11-08) の `T`: 時間の上限 (秒、0 なら使わない)
     pub(crate) cap_t: f64,
+    /// 試作 `ENOMOTO_MIP_HEUR1T` の `n` ([`heur1t`]): 外側が 1 スレッドで、このサブ MIP を主のスレッドで解く
+    pub(crate) outer_t1: bool,
 }
 
 /// `ENOMOTO_MIP_TREE3_JOINCAP` (試作、既定では使わない。analysis/tree_close3_20261104.md): 外側の根で並列のサブ MIP の終わりを全部待つ
@@ -4527,7 +4552,7 @@ pub(crate) fn erwait_diag() -> bool {
 
 impl SubmipCtl {
     pub(crate) fn new(z: f64) -> Self {
-        SubmipCtl { outer_best: std::sync::atomic::AtomicU64::new(z.to_bits()), nosol_deadline: None, abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)), abort_at: std::sync::atomic::AtomicU64::new(u64::MAX), outer_lb: None, cap_leaves: 0, cap_node_secs: 0.0, t0: Instant::now(), found_at: std::sync::atomic::AtomicU64::new(u64::MAX), cap_t: 0.0 }
+        SubmipCtl { outer_best: std::sync::atomic::AtomicU64::new(z.to_bits()), nosol_deadline: None, abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)), abort_at: std::sync::atomic::AtomicU64::new(u64::MAX), outer_lb: None, cap_leaves: 0, cap_node_secs: 0.0, t0: Instant::now(), found_at: std::sync::atomic::AtomicU64::new(u64::MAX), cap_t: 0.0, outer_t1: false }
     }
     /// [`subcap`] の `n`・`w` の上限を付ける (`root_lp_secs` は外側の根の LP の秒)
     /// 改良 (11-08) の `T` の上限を付ける (`tl` は外側の時間の上限)
@@ -4589,6 +4614,11 @@ impl SubmipCtl {
         lb.is_finite() && z <= lb + 1e-9 * z.abs().max(1.0)
     }
     /// 解のないうちの時間の上限 ([`Self::nosol_deadline`]) を今から `secs` 秒にする (`None` なら付けない)。
+    /// 試作 `ENOMOTO_MIP_HEUR1T` の `n` の印を付ける
+    pub(crate) fn with_outer_t1(mut self, t1: bool) -> Self {
+        self.outer_t1 = t1;
+        self
+    }
     pub(crate) fn with_nosol(mut self, secs: Option<f64>) -> Self {
         self.nosol_deadline = secs.filter(|s| s.is_finite() && *s >= 0.0).map(|s| Instant::now() + std::time::Duration::from_secs_f64(s));
         self
@@ -5583,6 +5613,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         noinc_rens_done: false,
         submip_node_mult: 1.0,
         rens_node_limited: false,
+        heur1t_seen: Vec::new(),
+        heur1t_lurk: Vec::new(),
         rens_biggap_done: false,
         submip_full_nodes: false,
         rens_spawn_node_limit: 0,
@@ -11471,7 +11503,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 試作 `ENOMOTO_MIP_ROBUST` の `g` ([`robust`]): `f` の FJ・Local-MIP のやり直しを、安い根のヒューリスティクス
                 // (ダイビング・FP・locks・clique・vbounds) と並列のサブ MIP の後ろへ回す (`f` の位置では blend2・flugpl のように
                 // 後ろの安いものがすぐ見つける問題でも FJ が最大 6 秒空回りした)
-                if robust('g') && !self.params.submip && self.incumbent.is_none() {
+                // 試作 `ENOMOTO_MIP_HEUR1T` の `f` ([`heur1t`]): 外側の根から出したサブ MIP ([`submip_outcome_stop`] の対象) でも回す
+                if robust('g') && (!self.params.submip || (heur1t('f') && self.root_submip.is_some())) && self.incumbent.is_none() {
                     heur!("robust FJ", self.robust_fj_retry());
                 }
                 self.poll_find_thread();
@@ -12739,6 +12772,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     && self.nodes >= k
                     && (self.root_submip.is_some() || env_str!("ENOMOTO_MIP_SUBMIP_NOSOL_CAP_ROOT").is_none())
                     && !(SUBMIP_IN_THREAD.with(|f| f.get()) && env_def!("ENOMOTO_MIP_SUBMIP_NOSOL_CAP_SERIAL", "1").is_some())
+                    && !self.root_submip.as_ref().is_some_and(|c| c.outer_t1)
                 {
                     self.dbg_submip_stop("no solution");
                     return self.finish_limit(MipStatus::NodeLimit, plunge.as_ref());
@@ -14071,6 +14105,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         super::secs_since_last_incumbent().is_some_and(|d| d >= need)
                     };
                     let frac = if stalled { frac.max(tunable!("ENOMOTO_T_MIP_ROBUST_LNSFREQ_TIME", 0.1, f64)) } else { frac };
+                    // 試作 `ENOMOTO_MIP_HEUR1T` の `l` ([`heur1t`]): 1 スレッドの外側の木では、時間の割合を 4 スレッドのヒューリスティクス役の
+                    // 割合 (`ENOMOTO_T_MIP_HEUR_ROLE_FRAC`、[`heur_role_count`]) まで上げる (暫定解があるときだけ。役も暫定解があるときだけ就く)
+                    let frac = if heur1t('l') && !self.params.submip && self.pool.is_none() && self.params.threads <= 1 && self.incumbent.is_some() {
+                        frac.max(tunable!("ENOMOTO_T_MIP_HEUR_ROLE_FRAC", 0.25, f64))
+                    } else {
+                        frac
+                    };
                     // 既定は時間の予算で 50 ノードおき。`ENOMOTO_MIP_LNS_ITERS` なら以前の、ヒューリスティクス共通の反復の
                     // 予算の中で 100 ノードおき (根のサブ MIP の反復を数えるので、根で数万反復使った問題では木の中で
                     // 一度も呼ばれなかった: h80x6320d・timtab1・assign1-5-8・graph20)

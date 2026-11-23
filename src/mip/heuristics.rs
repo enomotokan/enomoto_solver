@@ -1873,6 +1873,31 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 sub = s2;
             }
         }
+        // 試作 `ENOMOTO_MIP_HEUR1T` の `d` ([`super::solver::heur1t`]): 1 スレッドの外側の根で、前と同じ問題のサブ MIP は解かない
+        if super::solver::heur1t('d') && !self.params.submip && self.snap.is_none() && self.pool.is_none() && self.params.threads <= 1 && self.nodes <= 1 && !self.parallel_submips {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for j in 0..sub.n {
+                // (+ 0.0 で -0.0 を 0.0 にそろえる: 10teams の被約費用のサブ MIP と LP face は同じ固定でも 0 の符号が違う)
+                (sub.col_lo[j] + 0.0).to_bits().hash(&mut h);
+                (sub.col_up[j] + 0.0).to_bits().hash(&mut h);
+                sub.is_int[j].hash(&mut h);
+            }
+            (sub.n, sub.m).hash(&mut h);
+            sub.cost.iter().for_each(|c| (c + 0.0).to_bits().hash(&mut h));
+            cutoff.unwrap_or_else(|| self.prune_limit()).to_bits().hash(&mut h);
+            let key = h.finish();
+            if self.heur1t_seen.contains(&key) {
+                if self.params.verbose {
+                    eprintln!("MIP:   HEUR1T d: the sub-MIP ({}) is the same as an earlier root sub-MIP; skipped", self.heur_label);
+                }
+                return Some((super::solver::MipStatus::NotSolved, false));
+            }
+            if self.params.verbose {
+                eprintln!("MIP:   HEUR1T d: sub-MIP ({}) key {key:016x}", self.heur_label);
+            }
+            self.heur1t_seen.push(key);
+        }
         // 診断用 `ENOMOTO_MIP_SUBMIP_DUMP=<接頭辞>`: 根 (外側の求解) のサブ MIP を `<接頭辞><番号>.mps` に書き出す
         if let Some(pre) = env_str!("ENOMOTO_MIP_SUBMIP_DUMP") {
             if !self.params.submip && self.nodes <= 1 {
@@ -2042,7 +2067,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 成果連動の打ち切り (`ENOMOTO_MIP_NO_SUBMIP_OUTCOME_STOP` で使わない): 根の (主のスレッドで解く) サブ MIP も成果で打ち切る ([`super::solver::submip_outcome_stop`])
         // 試作 `ENOMOTO_MIP_HEUR4` の `o`: `r` で足した既定の形の RENS だけは成果連動で打ち切らない ([`heur4_on`])
         if super::solver::submip_outcome_stop() && !self.params.submip && self.snap.is_none() && self.nodes <= 1 && !HEUR4_NO_OUTCOME.with(|c| c.get()) {
-            let c = super::solver::SubmipCtl::new(self.prune_limit()).with_nosol(nosol).with_subcap(self.root_lp_secs).with_subcap_t(self.params.time_limit);
+            let c = super::solver::SubmipCtl::new(self.prune_limit()).with_nosol(nosol).with_subcap(self.root_lp_secs).with_subcap_t(self.params.time_limit)
+                .with_outer_t1(super::solver::heur1t('n') && self.params.threads <= 1 && self.pool.is_none());
             // 試作 `ENOMOTO_MIP_LOSE6_2_SUBLB`: 目的関数を変えないサブ MIP に外側の下界を渡す
             let c = if super::solver::lose6_2_sublb() && cutoff.is_none() { c.with_outer_lb(self.root_lb_now(), self.bg_watch_job()) } else { c };
             super::solver::ROOT_SUBMIP_CTL.with(|s| *s.borrow_mut() = Some(std::sync::Arc::new(c)));
@@ -3712,6 +3738,28 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.root_reduced_cost_inner()
     }
 
+    /// 試作 `ENOMOTO_MIP_HEUR1T` の `r`: 今の LP の被約費用を lurking bound ([`super::solver::Solver::heur1t_lurk`]) に足す
+    pub(super) fn heur1t_collect_lurking(&mut self) {
+        // (ラウンドの初めの LP は最適に解けている: 解けなければカットのループを抜ける。候補は解を確かめるサブ MIP の近傍にだけ使う)
+        let p = self.p;
+        if self.heur1t_lurk.len() != p.n {
+            self.heur1t_lurk = vec![[f64::NEG_INFINITY; 2]; p.n];
+        }
+        let z = self.lp.objective();
+        let b = self.lp.basis();
+        let d = self.lp.reduced_costs();
+        for j in 0..p.n {
+            if !p.is_int[j] || self.dom.lo[j] >= self.dom.up[j] {
+                continue;
+            }
+            match b.col[j] {
+                super::lp::VarStatus::Lower if d[j] > 1e-7 => self.heur1t_lurk[j][0] = self.heur1t_lurk[j][0].max(z + d[j]),
+                super::lp::VarStatus::Upper if d[j] < -1e-7 => self.heur1t_lurk[j][1] = self.heur1t_lurk[j][1].max(z - d[j]),
+                _ => {}
+            }
+        }
+    }
+
     fn root_reduced_cost_inner(&mut self) -> bool {
         let p = self.p;
         if self.params.submip {
@@ -3747,6 +3795,33 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if self.params.verbose {
                 eprintln!("MIP:   HEURGAP d: root reduced cost: {} lurking bounds from reduced costs, {} from degenerate duals ({} to the upper bound)", ndeg0, lurking.len() - ndeg0, lurking[ndeg0..].iter().filter(|t| !t.2).count());
+            }
+        }
+        // 試作 `ENOMOTO_MIP_HEUR1T` の `r`: 根のカットの各回の LP からためた候補を足す (同じ列・向きは大きい方)
+        if super::solver::heur1t('r') && self.heur1t_lurk.len() == p.n && self.nodes <= 1 {
+            let z = self.lp.objective();
+            let mut best: std::collections::HashMap<(usize, bool), usize> = std::collections::HashMap::new();
+            for (k, t) in lurking.iter().enumerate() {
+                best.insert((t.1, t.2), k);
+            }
+            let n0 = lurking.len();
+            for &j in &ints {
+                for (side, upper) in [(0usize, true), (1usize, false)] {
+                    let v = self.heur1t_lurk[j][side] - z;
+                    if !(v > 1e-7) {
+                        continue;
+                    }
+                    match best.get(&(j, upper)) {
+                        Some(&k) => lurking[k].0 = lurking[k].0.max(v),
+                        None => {
+                            best.insert((j, upper), lurking.len());
+                            lurking.push((v, j, upper, if upper { self.dom.lo[j] } else { self.dom.up[j] }));
+                        }
+                    }
+                }
+            }
+            if self.params.verbose {
+                eprintln!("MIP:   HEUR1T r: root reduced cost: {n0} lurking bounds from the last LP, {} after adding the cut rounds' LPs", lurking.len());
             }
         }
         // HiGHS は lurking bound が整数列の 1 割未満なら使わない
