@@ -57,6 +57,11 @@ pub trait MipLp: Clone + Send {
     fn solve_from_point(&mut self, _xo: &[f64], _lim: &SolveLimits) -> Option<LpStatus> {
         None
     }
+    /// 試作 `ENOMOTO_MIP_ROOTLP_PRESOLVE=d`: 元の空間の最適解と元の行の双対からクロスオーバーで最適基底を作って採る
+    /// ([`TwoStageLp::solve_from_primal_dual`])。対応しない実装は `None`。
+    fn solve_from_primal_dual(&mut self, _xo: &[f64], _pi: &[f64], _lim: &SolveLimits) -> Option<LpStatus> {
+        None
+    }
     /// 根の LP の安全網: 尺度を調整した写しを基底なしで解いて元の LP を解き直す ([`TwoStageLp::solve_scaled_rescue`])。
     /// 試さない (係数の幅が狭い・対応しない実装) なら `None`。
     fn solve_scaled_rescue(&mut self, _lim: &SolveLimits) -> Option<LpStatus> {
@@ -240,6 +245,9 @@ forward_impl!(
     },
     fn solve_from_point(&mut self, xo: &[f64], lim: &SolveLimits) -> Option<LpStatus> {
         TwoStageLp::solve_from_point(self, xo, lim)
+    },
+    fn solve_from_primal_dual(&mut self, xo: &[f64], pi: &[f64], lim: &SolveLimits) -> Option<LpStatus> {
+        TwoStageLp::solve_from_primal_dual(self, xo, pi, lim)
     },
     fn request_scale_once(&mut self) {
         TwoStageLp::request_scale_once(self)

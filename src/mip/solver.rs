@@ -9310,6 +9310,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 return None;
             }
         };
+        // `=d`: 双対の問題も LP の経路で解き、元の行の双対からクロスオーバーで最適基底を作る ([`MipLp::solve_from_primal_dual`])
+        if env_str!("ENOMOTO_MIP_ROOTLP_PRESOLVE").is_some_and(|v| v.contains('d')) {
+            let t1 = Instant::now();
+            if let Some(pi) = self.rootlp_dual_by_lp_path(&cost) {
+                let t_dual = t1.elapsed().as_secs_f64();
+                let it0 = self.lp.total_iterations();
+                if let Some(st) = self.lp.solve_from_primal_dual(&x, &pi, &SolveLimits { deadline: self.deadline, ..Default::default() }) {
+                    if self.params.verbose {
+                        eprintln!(
+                            "MIP: ROOTLP_PRESOLVE=d: primal LP path {t_lp:.2}s, dual LP path {t_dual:.2}s; {st:?} after {} iters ({:.2}s in all)",
+                            self.lp.total_iterations() - it0,
+                            t0.elapsed().as_secs_f64()
+                        );
+                    }
+                    return Some(st);
+                }
+            } else if self.params.verbose {
+                eprintln!("MIP: ROOTLP_PRESOLVE=d: the dual LP path failed ({:.2}s); using the point only", t1.elapsed().as_secs_f64());
+            }
+        }
         let it0 = self.lp.total_iterations();
         let st = self.lp.solve_from_point(&x, &SolveLimits { deadline: self.deadline, ..Default::default() });
         if self.params.verbose {
@@ -9322,6 +9342,88 @@ impl<'a, L: MipLp> Solver<'a, L> {
             );
         }
         st
+    }
+
+    /// 試作 `ENOMOTO_MIP_ROOTLP_PRESOLVE=d`: 根の LP (min c x、行 lo <= a x <= up、列 l <= x <= u) の双対の問題
+    /// max Σ lo p - up q + Σ l zl - u zu (s.t. 各列 Σ_i a_ij (p_i - q_i) + zl_j - zu_j = c_j、p・q・zl・zu >= 0。等式の行は自由な π) を
+    /// LP の経路 (前処理つき) で解き、元の行の双対 `π = p - q` (LP の符号) を返す。
+    fn rootlp_dual_by_lp_path(&self, cost: &[f64]) -> Option<Vec<f64>> {
+        use crate::types::{ConstraintRow, LinearExpr, Objective, RowSense, Sense, VarType, VariableData};
+        let n = self.p.n;
+        let m = self.lp.num_rows();
+        let mut vars: Vec<VariableData> = Vec::new();
+        let mut obj: Vec<(usize, f64)> = Vec::new();
+        // 各列の制約の係数
+        let mut colrows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+        // 行 i の (p の番号, q の番号) (等式なら (π の番号, MAX))
+        let mut rv: Vec<(usize, usize)> = Vec::with_capacity(m);
+        let cont = |lb: f64, ub: f64| VariableData { vtype: VarType::Continuous, lb, ub };
+        for i in 0..m {
+            let (lo, up) = self.lp.row_bounds(i);
+            let row = self.lp.row_ref(i);
+            if lo.is_finite() && up.is_finite() && lo == up {
+                let k = vars.len();
+                vars.push(cont(f64::NEG_INFINITY, f64::INFINITY));
+                obj.push((k, -lo));
+                for &(j, a) in row.iter() {
+                    colrows[j].push((k, a));
+                }
+                rv.push((k, usize::MAX));
+                continue;
+            }
+            let (mut kp, mut kq) = (usize::MAX, usize::MAX);
+            if lo.is_finite() {
+                kp = vars.len();
+                vars.push(cont(0.0, f64::INFINITY));
+                obj.push((kp, -lo));
+                for &(j, a) in row.iter() {
+                    colrows[j].push((kp, a));
+                }
+            }
+            if up.is_finite() {
+                kq = vars.len();
+                vars.push(cont(0.0, f64::INFINITY));
+                obj.push((kq, up));
+                for &(j, a) in row.iter() {
+                    colrows[j].push((kq, -a));
+                }
+            }
+            rv.push((kp, kq));
+        }
+        let mut cons: Vec<ConstraintRow> = Vec::with_capacity(n);
+        for j in 0..n {
+            let (l, u) = self.lp.col_bounds(j);
+            let mut coeffs = std::mem::take(&mut colrows[j]);
+            if l.is_finite() {
+                let k = vars.len();
+                vars.push(cont(0.0, f64::INFINITY));
+                if l != 0.0 {
+                    obj.push((k, -l));
+                }
+                coeffs.push((k, 1.0));
+            }
+            if u.is_finite() {
+                let k = vars.len();
+                vars.push(cont(0.0, f64::INFINITY));
+                if u != 0.0 {
+                    obj.push((k, u));
+                }
+                coeffs.push((k, -1.0));
+            }
+            cons.push(ConstraintRow { expr: LinearExpr { coeffs: coeffs.into_iter().collect(), constant: 0.0 }, sense: RowSense::Eq, rhs: cost[j] });
+        }
+        // 最大化を最小化 (目的の符号を反転) で解く
+        let objective = Objective { expr: LinearExpr { coeffs: obj.into_iter().collect(), constant: 0.0 }, sense: Sense::Minimize };
+        let r = crate::cancel::with_deadline(self.deadline, || crate::simplex::solve_lp_dual_with(&vars, &objective, &cons, crate::types::LpOptions::default()));
+        let y = match (&r.status, r.x) {
+            (crate::types::Status::Optimal, Some(y)) => y,
+            _ => return None,
+        };
+        Some(
+            rv.iter()
+                .map(|&(kp, kq)| (if kp != usize::MAX { y[kp] } else { 0.0 }) - (if kq != usize::MAX { y[kq] } else { 0.0 }))
+                .collect(),
+        )
     }
 
     fn rootlp_simplex_diag(&mut self) {

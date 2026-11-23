@@ -2708,6 +2708,45 @@ impl TwoStageLp {
         Some(st)
     }
 
+    /// 試作 `ENOMOTO_MIP_ROOTLP_PRESOLVE=d` (analysis/highsonly_20261123): 元の空間の最適解 `xo` と元の行の双対 `pi` (LP の符号:
+    /// 被約費用 `c - A^T pi`。LP の経路で双対の問題を解いて得たもの) を、この LP の標準形の点 (行は `σ_i` 倍) に直して
+    /// クロスオーバーに与え ([`super::crossover::XoOptions::given_point`])、得た最適基底を採る ([`Self::adopt_ipm_vertex`])。
+    /// クロスオーバーが失敗したら点だけから始める ([`Self::warm_from_point`])。長さが合わなければ `None`。
+    pub fn solve_from_primal_dual(&mut self, xo: &[f64], pi: &[f64], lim: &SolveLimits) -> Option<LpStatus> {
+        let n = self.n;
+        let m = self.rows.len();
+        if xo.len() != n || pi.len() != m {
+            return None;
+        }
+        let t0 = std::time::Instant::now();
+        let mut xs = vec![0.0; n + m];
+        for j in 0..n {
+            xs[j] = (xo[j] - self.shift[j]).clamp(self.std.lb[j], self.std.ub[j]);
+        }
+        for i in 0..m {
+            xs[n + i] = self.slack_value(i, xo).clamp(self.std.lb[n + i], self.std.ub[n + i]);
+        }
+        // 標準形の行 i は σ_i x (元の行) + s なので、LP の符号の双対は σ_i π_i。内点法 (クロスオーバー) の符号は `c + A^T y` なので負にする
+        let y: Vec<f64> = (0..m).map(|i| -self.sigma[i] * pi[i]).collect();
+        sid::request_duals(true);
+        let r = crate::cancel::with_deadline(lim.deadline, || {
+            super::crossover::solve_ipm_crossover_with(&self.std, &super::crossover::XoOptions { given_point: Some((&xs, &y, 0.0)), ..Default::default() })
+        });
+        let duals = sid::take_duals();
+        sid::request_duals(false);
+        let t_xo = t0.elapsed().as_secs_f64();
+        let got = r.filter(|r| r.status == Status::Optimal).and_then(|r| r.x);
+        eprintln!("MIP: ROOTLP_PRESOLVE=d: crossover from the primal-dual point: {} ({t_xo:.2}s)", if got.is_some() { "optimal" } else { "failed" });
+        let it0 = self.iters;
+        let st = match got {
+            Some(x) => self.adopt_ipm_vertex(&x, duals, lim, true, t0),
+            None => self.warm_from_point(xo.to_vec(), lim, true, t0),
+        };
+        eprintln!("MIP: ROOTLP_PRESOLVE=d: {st:?} after {} more iters ({:.2}s)", self.iters - it0, t0.elapsed().as_secs_f64() - t_xo);
+        self.status = Some(st);
+        Some(st)
+    }
+
     /// 直前の求解が非有界 (段階 A が `z^1 < 0`、段階 B で実行可能) だったときの切片問題 (論文の式 (8)) の境界を、元の
     /// 空間の (列の下限, 列の上限, 行の下限, 行の上限) で返す。行列は同じ。切片問題の実行可能解 `x^0` と段階 A の傾き
     /// `x^1` (`A x^1 = 0`、目的値を下げる) から `x^0 + M x^1` (M → ∞) が元の問題の実行可能解になるので、切片問題を整数に
