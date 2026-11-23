@@ -97,3 +97,40 @@ RINS 33 / 43、RENS 81 / 29 (4T は並列のサブ MIP)、interior rounding 6 / 
   clique) は、カットのループの中の大きな部分ではない。残りは LP の解き直し・カットの選び・既に並列の分離 (表の行・経路集約) の待ち。
   全体は中立なので、P 58 問の通しは見送り (1 の得は小さい)。カットのループを縮めるには、1 ラウンドの中の LP の解き直しとカットの選びの内訳を
   測るのが先 (ログの `sep X s` と `LP Y iters` から分離と LP の秒を分けられる)。
+
+## 2. 試作 `ENOMOTO_MIP_RINS_PAR` (根の RINS を並列のサブ MIP にして待たずに木へ、既定オフ)
+
+### 作り (src/mip/solver.rs)
+
+- 外側の根の RINS の呼び出しで、`ENOMOTO_MIP_RINS_PAR` があり `mip_threads() > 1`・サブ MIP でない・写しでないとき、並列モード
+  (`parallel_submips`) で RINS を出し (RENS と同じ並列のサブ MIP の形)、出たものをすぐ後回しの列 `subcap_deferred` (改良 (11-08) の `B` の列) に移す。
+  木の中で終わったら受け取り (木の主のループの `subcap_poll_deferred`)、再スタート・終わりの前に止めて受け取る (`subcap_drain_deferred`)。
+  `ENOMOTO_MIP_INCUMB` の `a` の RINS の繰り返しは試作では行わない。1 スレッドでは何も変わらない。
+- サブ MIP の止め方は既存の並列のサブ MIP と同じ (ノードの上限と時間の上限)。手間だけの上限 (決定的な形) にはまだしていない
+  (4 スレッドの根は今の既定でも並列のサブ MIP・裏のスレッドで揺れる。1 スレッドの再現 (DET1T) には触れない)。
+- ログ: `MIP: RINS_PAR: deferring the parallel sub-MIP ...`、受け取りは `MIP: SUBCAP B: deferred sub-MIP (...) done at node N`、
+  再スタートでは `MIP: SUBCAP B: stopping 1 deferred sub-MIPs (restart, node 0)`。h80x6320d 種 2 で 3 つとも出ることを確かめた。
+
+### 正しさ (fuzz.sh → fuzz_rp.out、`ENOMOTO_MIP_RINS_PAR=1 ENOMOTO_MIP_THREADS=4`)
+
+fuzz 7 本すべて bad 0 (tiny 400・highs 300・objint 1000・slack 1000・tiny2 400・objint2 1000・slack2 1000)。`cargo test --release --lib`: RINS_PAR・既定とも 419 通過・0 失敗。
+(fuzz の小さい問題は根の RINS まで行かない回が多く、試作の道をどれだけ通ったかは数えていない。)
+
+### 少数問題での比べ (plan_rp.json → res_rp.jsonl、`python summ_sp.py res_rp.jsonl rp > summ_rp.txt`)
+
+根の RINS が 4 スレッドで 0.3 秒以上かかっていた 11 問 × 種 1〜3、4 スレッド、120 秒、ビルド 85137a105 以降 (pip install -e .)。
+
+| 比 (rp/def) | 値 |
+|---|---|
+| 全体の秒 | 0.979 [0.924, 1.036] |
+| 根の秒 (shift 0.1) | **0.814** [0.717, 0.917] |
+| カットのループの秒 | 0.959 [0.903, 1.027] |
+| 合計 | 根 203 → 181 秒、カットのループ 65 → 62 秒 |
+
+- 解けた数は同じ (30/33、supportcase26 の 3 回は両方時間切れ)、食い違い 0。
+- 1.25 倍超の遅れ: mc11 種 3 (18.7 → 30.3)・neos-911970 種 3 (7.7 → 13.7)・pk1 種 2 (13.3 → 18.6)・timtab1 種 1 (15.1 → 19.9)。
+  速さ: h80x6320d 種 2 (22.5 → 16.8)・neos-911970 種 1 (16.3 → 12.5)・pk1 種 3 (15.2 → 11.9)・rout 種 1 (4.7 → 3.4)。どれも 4 スレッドの揺れの大きい問題。
+- supportcase26 (根の RINS 34 秒): 根 12.8 / 21.4 / 15.5 → 8.3 / 17.6 / 11.8 秒。時間切れの暫定解 (def/rp) は 1745.12 / 1745.12、1745.12 / 1755.85、
+  1785.25 / 1781.00、下界は 1448.1 / 1444.1、1451.2 / 1473.1、1468.3 / 1454.6 で、どちらとも言えない。
+- 見立て: 根は確かに 2 割縮むが、RINS の解が木の始めに間に合わない分 (根の RINS の解は再スタートの判定・被約費用の固定にも使われる) と相殺され、
+  全体は中立に近い (0.979、CI は 1 をまたぐ)。
