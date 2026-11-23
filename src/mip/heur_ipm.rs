@@ -32,10 +32,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return;
         };
         let (mut nlo, mut nup, mut nlt, mut nut) = (0usize, 0usize, 0usize, 0usize);
-        // LP の境界が大域の境界と同じときだけ (違えば、示せるのは今の LP の領域の中での固定)
+        // LP の境界が大域の境界を含むときだけ (LP の境界が狭い列があれば、示せるのは今の LP の領域の中での固定)。証明は LP の境界で
+        // 書かれる (`x_j - LP の下限 <= -L / d_j`) ので、固定・締めも LP の境界から測る (大域の境界より広くても正しい)
         let same = (0..p.n).all(|j| {
             let (l, u) = self.lp.col_bounds(j);
-            l == self.dom.global_lo[j] && u == self.dom.global_up[j]
+            l <= self.dom.global_lo[j] && u >= self.dom.global_up[j]
         });
         let mut gap = f64::NAN;
         if let (true, Some((l, d))) = (same, ip.acdual.as_ref()) {
@@ -47,18 +48,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if !p.is_int[j] || lo >= up {
                         continue;
                     }
-                    if d[j] > 0.0 && lo.is_finite() {
-                        // 整数の幅: x_j - lo <= g / d_j。丸めの余裕 1e-9 (相対) を足す
-                        let w = (g / d[j] * (1.0 + 1e-9) + 1e-9).floor();
-                        if w < up - lo {
-                            self.dom.tighten_global(p, j, true, lo + w);
-                            if w == 0.0 { nlo += 1 } else { nlt += 1 }
+                    let (llo, lup) = self.lp.col_bounds(j);
+                    if d[j] > 0.0 && llo.is_finite() {
+                        // 整数の幅: x_j - llo <= g / d_j。丸めの余裕 1e-9 (相対) を足す
+                        let v = llo + (g / d[j] * (1.0 + 1e-9) + 1e-9).floor();
+                        if v < up {
+                            self.dom.tighten_global(p, j, true, v.max(lo));
+                            if self.dom.global_up[j] <= lo { nlo += 1 } else { nlt += 1 }
                         }
-                    } else if d[j] < 0.0 && up.is_finite() {
-                        let w = (g / -d[j] * (1.0 + 1e-9) + 1e-9).floor();
-                        if w < up - lo {
-                            self.dom.tighten_global(p, j, false, up - w);
-                            if w == 0.0 { nup += 1 } else { nut += 1 }
+                    } else if d[j] < 0.0 && lup.is_finite() {
+                        let v = lup - (g / -d[j] * (1.0 + 1e-9) + 1e-9).floor();
+                        if v > lo {
+                            self.dom.tighten_global(p, j, false, v.min(up));
+                            if self.dom.global_lo[j] >= up { nup += 1 } else { nut += 1 }
                         }
                     }
                 }
