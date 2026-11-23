@@ -349,7 +349,9 @@ cargo test (案 C のソース、LTO + PGO、base と v3 の設定): どちら�
 - 案 C の wheel は、同じソースを今の作り方 (LTO・PGO なし、1 本) で作ったものより、v3 の CPU で 13% (0.869)、v3 の無い CPU で 6% (0.941) 速い。
 - 1〜6 節の pgo_v3 (前のソース、同じく profile が合っていなかった) の値も、この結果から見て、直しても大きくは変わらないと見る。
 
-<!-- C2_FUZZ -->
+作り直した 2 本入りの wheel の確かめ:
+- fuzz 7 本: `fuzz_var.sh c2_dual` (auto で v3) と `ENOMOTO_CORE=base fuzz_var.sh c2_base`。どれも bad 0・mismatches 0。
+- tests/test_model.py (43 件): auto・base・v3 のどれでも全部通る。
 
 ## 8. ファイル
 
