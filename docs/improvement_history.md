@@ -11302,3 +11302,13 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
   mip_fuzz_symmetric 300 bad 0。Netlib 93 問 (`python -m enomoto_solver.benchmark_highs`、単体法): 92 問で最適・目的値は HiGHS と一致、forplan は以前から crash。
 - 戻し方: `ENOMOTO_MIP_PROOFCOST=0` (`p`・`a` の片方だけも可)。
 - 記録: analysis/proofcost_20261123/README.md。
+
+## 2026-11-23: MPS の読み込みで、自由形式で読めないときは固定欄の桁で読み直す (Netlib forplan が読めるように)
+
+- 直した (既定、環境変数なし): `src/mps.rs` の `parse_mps` は、自由形式 (空白区切り) で読めなかったとき (名前の重複・欄の数の不一致など) だけ、データの行を
+  固定欄の桁 (2〜3・5〜12・15〜22・25〜36・40〜47・50〜) で読み直す。HiGHS も自由形式の `HMpsFF` で読めなければ固定形式の `HMPSIO` に戻る。
+  自由形式で読めるファイルは何も変わらない。
+- 原因 (analysis/forplan_20261123): Netlib の forplan は名前に空白を含む固定欄形式 (`DEDO3 1R` など) で、自由形式では名前が切れて重複になり読めなかった。
+  2026-11-20 に計測の台本の読み込みを HiGHS 経由から当方の MPS 読み込みに切り替えた (a7e9d28e8) ときから、Netlib の表で forplan が `nan` になっていた。求解は正しい。
+- 確かめ: 単体テストを足して cargo test 420 通過。`.miplib_cache` 203 本・Netlib 93 本の読みの結果は forplan 以外すべて直す前と同じ。Netlib 93 / 93 で最適・目的値は HiGHS と一致
+  (forplan −664.2189612722)。
