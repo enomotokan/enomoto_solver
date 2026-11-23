@@ -2726,8 +2726,10 @@ impl TwoStageLp {
         for i in 0..m {
             xs[n + i] = self.slack_value(i, xo).clamp(self.std.lb[n + i], self.std.ub[n + i]);
         }
-        // 標準形の行 i は σ_i x (元の行) + s なので、LP の符号の双対は σ_i π_i。内点法 (クロスオーバー) の符号は `c + A^T y` なので負にする
-        let y: Vec<f64> = (0..m).map(|i| -self.sigma[i] * pi[i]).collect();
+        // 標準形の行 i は σ_i x (元の行) + s なので、LP の符号の双対は σ_i π_i。クロスオーバーに渡す向き: 診断 `ENOMOTO_T_MIP_ROOTLP_DUAL_SIGN`
+        // (既定 1 = LP の符号のまま、-1 = 負にする。neos-873061 では -1 だと非 D の列のほぼすべてが双対実行不能と判定された)
+        let sgn = tunable!("ENOMOTO_T_MIP_ROOTLP_DUAL_SIGN", 1.0, f64);
+        let y: Vec<f64> = (0..m).map(|i| sgn * self.sigma[i] * pi[i]).collect();
         sid::request_duals(true);
         let r = crate::cancel::with_deadline(lim.deadline, || {
             super::crossover::solve_ipm_crossover_with(&self.std, &super::crossover::XoOptions { given_point: Some((&xs, &y, 0.0)), ..Default::default() })
