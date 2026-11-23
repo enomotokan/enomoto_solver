@@ -830,6 +830,38 @@ pub(super) fn factorize_basis(
     r
 }
 
+/// 試作 `ENOMOTO_MIP_LU_EXTEND` (analysis/lpiter_20261123、既定では使わない): [`factorize_basis`] と同じ入力を作り、与えた列順・行順の
+/// 手がかりで分解する ([`sparse_lu::factorize_with_order`])。順で分解できなければ `None` (通常の分解はしない。呼び出し側は次の求解の
+/// 普通の分解に任せる)。
+pub(super) fn factorize_basis_order(std: &StdForm, basis_pos: &[Option<usize>], pivot_col: &[usize], pivot_row_hint: &[usize], fill_baseline: usize) -> Option<sparse_lu::FtLu> {
+    let m = std.n_rows;
+    if pivot_col.len() != m || pivot_row_hint.len() != m {
+        super::slope_intercept_dual::xcount("n_lux_basis");
+        return None;
+    }
+    let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
+    let mut basis_of = vec![usize::MAX; m];
+    for j in 0..std.n_total {
+        if let Some(col) = basis_pos[j] {
+            if col >= m || basis_of[col] != usize::MAX {
+                super::slope_intercept_dual::xcount("n_lux_basis");
+                return None;
+            }
+            basis_of[col] = j;
+        }
+    }
+    if basis_of.contains(&usize::MAX) {
+        super::slope_intercept_dual::xcount("n_lux_basis");
+        return None;
+    }
+    for (col, &j) in basis_of.iter().enumerate() {
+        for &(i, v) in std.cols.col(j) {
+            rows[i].push((col, v));
+        }
+    }
+    sparse_lu::factorize_diagonal(m, &rows).map(sparse_lu::FtLu::new).or_else(|| sparse_lu::factorize_with_order(m, &rows, pivot_col, pivot_row_hint, fill_baseline))
+}
+
 /// [`factorize_basis`] の、数値的に特異な基底を救済する版。まず普通に分解し、成功すれば何も変えない (経路は同じ)。
 /// 失敗したら、疎な Markowitz 分解でピボットの取れなかった基底の位置を、残りの行のスラックに差し替えて分解し直す
 /// (HiGHS の rank deficiency の扱いと同じ)。`basis`・`basis_pos` を書き換え、差し替えた `(基底の位置, 外れた列)` を返す。

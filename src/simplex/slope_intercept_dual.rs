@@ -1536,6 +1536,30 @@ pub(crate) fn xcount(label: &'static str) {
 }
 
 /// 診断用: 累計を取り出す。
+/// 診断用 (analysis/proofprop_20261123): 木を分け合う従のスレッドの区間計時を終わりに足し合わせる置き場
+static XPROF_WORKERS: std::sync::Mutex<Vec<(&'static str, u128)>> = std::sync::Mutex::new(Vec::new());
+
+/// 診断用: このスレッドの区間計時を従のスレッドの置き場に足す (従のスレッドの終わりに呼ぶ)
+pub(crate) fn xprof_flush_workers() {
+    if !XPROF_ANY.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let mine = xprof_take();
+    if let Ok(mut g) = XPROF_WORKERS.lock() {
+        for (l, ns) in mine {
+            match g.iter_mut().find(|(k, _)| *k == l) {
+                Some(e) => e.1 += ns,
+                None => g.push((l, ns)),
+            }
+        }
+    }
+}
+
+/// 診断用: 従のスレッドの置き場を取り出して空にする
+pub(crate) fn xprof_workers_take() -> Vec<(&'static str, u128)> {
+    XPROF_WORKERS.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default()
+}
+
 pub(crate) fn xprof_take() -> Vec<(&'static str, u128)> {
     XPROF.with(|x| x.borrow().as_ref().map(|(_, a)| a.clone()).unwrap_or_default())
 }
@@ -8581,6 +8605,8 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
     // 可能になるようにする (cont1 分析の策5 前半)。`ENOMOTO_POLISH_PERTURB_SLACK=1` で旧動作
     // (`super::perturb_costs` をそのまま使い、スラック列も摂動する。A/B 用)。
     let active_cost = if tunable!("ENOMOTO_POLISH_PERTURB_SLACK", 0u8, u8) != 0 { super::perturb_costs(std) } else { dual_active_costs(std) };
+    // 区間計時 (`ENOMOTO_MIP_XPROF`、analysis/lpiter_20261123): 仕上げの段の費用の用意
+    xprof("pol_cost");
 
     let mut lu = lu;
     // 入る列の FTRAN・ピボット行の BTRAN・FT 更新・再分解トリガ (主単体法と共有する部品)。
@@ -8612,6 +8638,8 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
             d[j] = dj;
         }
     }
+    // 区間計時: 作業領域の確保と被約費用 `d` の計算し直し
+    xprof("pol_d");
     if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
         // 開始時の (この段の費用での) 双対実行不能列数。固定列は除く。
         let n_bad = (0..n_total)
@@ -8667,6 +8695,8 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
     // 主実行不能な基底行の集合(超疎 chuzr 用)。
     let mut infeasible_rows = InfeasibleRows::new(m);
     infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i, tol_floor));
+    // 区間計時: 作業領域の確保と `x_B` の解き直し・主実行不能な行の集合 (この後のループと終わりは `polish` に入る)
+    xprof("pol_xb");
     if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
         // 診断: 仕上げの始めの主実行不能 (真の境界、許容 `tol_floor`) の行の数・最大・和
         let (mut mx, mut sum) = (0.0f64, 0.0f64);
