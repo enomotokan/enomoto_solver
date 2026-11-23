@@ -87,7 +87,53 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let acfix = !self.params.submip && self.snap.is_none() && env_str!("ENOMOTO_MIP_HO4_ACFIX").is_some();
         if (mode != 0 || acfix) && !past() {
             if let Some(ip) = self.lp.interior_point(true, false, deadline) {
-                if acfix {
+                // `ENOMOTO_MIP_HO4_ACFIX=d` (analysis/highsonly_20261123): 中心の点の値ではなく、費用 0 の内点法の双対 `y` で固定を
+                // 確かめる。どの `y` でも、LP (カット込み) の実行可能な点は `Σ_j d_j (x_j - 境界) = -L(y)` (`d = -A^T y`、各項は 0 以上) を
+                // 満たすので、`d_j > 0` の整数列は `x_j - 下限 <= -L / d_j`、これが 1 未満なら下限に固定してよい (上限側も同じ)。
+                // 費用 0・上界 0 の被約費用の固定で、LP を解かずに正しい。中心が正確なら (強相補性) 境界に張り付く列すべてを一度に示せる
+                if acfix && env_str!("ENOMOTO_MIP_HO4_ACFIX").is_some_and(|v| v.contains('d')) {
+                    let (mut nlo, mut nup, mut nlt, mut nut) = (0usize, 0usize, 0usize, 0usize);
+                    // LP の境界が大域の境界と同じときだけ (違えば、示せるのは今の LP の領域の中での固定)
+                    let same = (0..p.n).all(|j| {
+                        let (l, u) = self.lp.col_bounds(j);
+                        l == self.dom.global_lo[j] && u == self.dom.global_up[j]
+                    });
+                    let mut gap = f64::NAN;
+                    if let (true, Some((l, d))) = (same, ip.acdual.as_ref()) {
+                        let g = -l;
+                        gap = g;
+                        if g.is_finite() && g >= 0.0 {
+                            for j in 0..p.n {
+                                let (lo, up) = (self.dom.global_lo[j], self.dom.global_up[j]);
+                                if !p.is_int[j] || lo >= up {
+                                    continue;
+                                }
+                                if d[j] > 0.0 && lo.is_finite() {
+                                    // 整数の幅: x_j - lo <= g / d_j。丸めの余裕 1e-9 (相対) を足す
+                                    let w = (g / d[j] * (1.0 + 1e-9) + 1e-9).floor();
+                                    if w < up - lo {
+                                        self.dom.tighten_global(p, j, true, lo + w);
+                                        if w == 0.0 { nlo += 1 } else { nlt += 1 }
+                                    }
+                                } else if d[j] < 0.0 && up.is_finite() {
+                                    let w = (g / -d[j] * (1.0 + 1e-9) + 1e-9).floor();
+                                    if w < up - lo {
+                                        self.dom.tighten_global(p, j, false, up - w);
+                                        if w == 0.0 { nup += 1 } else { nut += 1 }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if self.params.verbose {
+                        eprintln!(
+                            "MIP:   interior rounding: ENOMOTO_MIP_HO4_ACFIX=d: LP bounds global {same}, dual {}, -L {gap:.3e}; fixed {nlo} integer columns at the lower bound and {nup} at the upper bound, tightened {nlt}+{nut} (newly fixed {}, {:.2}s)",
+                            ip.acdual.is_some(),
+                            self.newly_fixed_ints(),
+                            t0.elapsed().as_secs_f64()
+                        );
+                    }
+                } else if acfix {
                     let tol = tunable!("ENOMOTO_T_MIP_HO4_ACFIX_TOL", 1e-6, f64);
                     // 候補: 中心で大域の境界から tol 以内の整数列 (true = 下限側)
                     let mut cands: Vec<(usize, bool)> = Vec::new();
