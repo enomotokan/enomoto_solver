@@ -1,6 +1,6 @@
 """書き出したノードの LP (dumps/<問題>/index.txt) を、同じ出発の基底から当方 (cut_lp_debug テスト、ENOMOTO_PROF_PHASES_EXT つき、
 重みを引き継ぐ) と HiGHS (analysis/node_lp_20261106/highs_warm.py) で解き直し、反復数・時間・当方の段階別の時間を res_<問題>.jsonl に書く。
-使い方 (リポジトリの根から): python analysis/lpiter_20261123/cmp.py <問題> [名札] [K=V;K=V]   (名札・追加の環境変数は当方の回だけ)
+使い方 (リポジトリの根から): python analysis/lpiter_20261123/cmp.py <問題> [名札] [K=V;K=V]   (名札・追加の環境変数は当方の回だけ。値 UNSET でその変数を外す)
 TEST_BIN でテストの実行ファイル (既定 target/test-py/release/deps/_core-* の最新)。CMP_NO_HIGHS で HiGHS を解かない。"""
 import glob, json, os, re, subprocess, sys
 from pathlib import Path
@@ -18,7 +18,9 @@ for line in open(D / "dumps" / p / "index.txt"):
     rec = dict(zip(t[1::2], t[2::2]))
     row = {"tag": tag, "extra": extra, "prefix": Path(prefix).name, "depth": int(rec["depth"]), "rows": int(rec["rows"]), "tree_iters": int(rec["iters"]),
            "tree_secs": float(rec["secs"])}
-    e = dict(os.environ, CUTLP=prefix, LD_LIBRARY_PATH="/usr/local/lib", CUTLP_TIME="60", CUTLP_DSE="1", ENOMOTO_WARM_DSE="1", ENOMOTO_PROF_PHASES_EXT="1", **extra)
+    e = dict(os.environ, CUTLP=prefix, LD_LIBRARY_PATH="/usr/local/lib", CUTLP_TIME="60", CUTLP_DSE="1", ENOMOTO_WARM_DSE="1", ENOMOTO_PROF_PHASES_EXT="1")
+    e.update(extra)
+    e = {k: v for k, v in e.items() if v != "UNSET"}  # 値 UNSET でその変数を外す
     r = subprocess.run([tb, "cut_lp_debug", "--ignored", "--nocapture"], env=e, capture_output=True, text=True)
     m = re.search(r"CUTLP: rep=0 status=(\w+) iters=(\d+) time=([\d.]+)s", r.stderr)
     row["ours"] = (m.group(1), int(m.group(2)), float(m.group(3))) if m else None
