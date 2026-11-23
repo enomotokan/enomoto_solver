@@ -1536,6 +1536,30 @@ pub(crate) fn xcount(label: &'static str) {
 }
 
 /// 診断用: 累計を取り出す。
+/// 診断用 (analysis/proofprop_20261123): 木を分け合う従のスレッドの区間計時を終わりに足し合わせる置き場
+static XPROF_WORKERS: std::sync::Mutex<Vec<(&'static str, u128)>> = std::sync::Mutex::new(Vec::new());
+
+/// 診断用: このスレッドの区間計時を従のスレッドの置き場に足す (従のスレッドの終わりに呼ぶ)
+pub(crate) fn xprof_flush_workers() {
+    if !XPROF_ANY.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let mine = xprof_take();
+    if let Ok(mut g) = XPROF_WORKERS.lock() {
+        for (l, ns) in mine {
+            match g.iter_mut().find(|(k, _)| *k == l) {
+                Some(e) => e.1 += ns,
+                None => g.push((l, ns)),
+            }
+        }
+    }
+}
+
+/// 診断用: 従のスレッドの置き場を取り出して空にする
+pub(crate) fn xprof_workers_take() -> Vec<(&'static str, u128)> {
+    XPROF_WORKERS.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default()
+}
+
 pub(crate) fn xprof_take() -> Vec<(&'static str, u128)> {
     XPROF.with(|x| x.borrow().as_ref().map(|(_, a)| a.clone()).unwrap_or_default())
 }

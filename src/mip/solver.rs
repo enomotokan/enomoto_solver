@@ -13649,6 +13649,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if !prop_ok && rp_stage.is_empty() {
                 rp_stage = "p_obj";
             }
+            // 区間計時 (`ENOMOTO_MIP_XPROF`、analysis/proofprop_20261123): m_proof の内訳 (目的・双対証明・リテラル・カットプール)
+            xp("m_pobj");
             self.dbg_trace("after objective propagation");
             // 双対証明による枝刈りと境界の締め付け
             let prop_ok = prop_ok && {
@@ -13680,6 +13682,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if !prop_ok && rp_stage.is_empty() {
                 rp_stage = "p_proof";
             }
+            xp("m_pdual");
             // 境界リテラルの衝突による伝播
             let prop_ok = prop_ok && {
                 // 前回調べた後の変更だけを調べる (巻き戻しでそれより短くなっていればそこから、衝突が増えていれば最初から)
@@ -13709,6 +13712,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if !prop_ok && rp_stage.is_empty() {
                 rp_stage = "p_lit";
             }
+            xp("m_plit");
             let prop_ok = prop_ok && (!cutpool_prop() || self.propagate_cut_pool());
             if !prop_ok && rp_stage.is_empty() {
                 rp_stage = "p_cpool";
@@ -25691,6 +25695,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     set_thread_portfolio(Some(shared));
                     DEBUG_SOL.with(|d| *d.borrow_mut() = dbg);
                     let r = crate::cancel::with_halt(halt, || solve_worker(snap, Some(pool), params));
+                    crate::simplex::slope_intercept_dual::xprof_flush_workers();
                     set_thread_portfolio(None);
                     r
                 })

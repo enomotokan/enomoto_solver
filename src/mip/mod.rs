@@ -664,6 +664,10 @@ pub fn solve_mip(
         for (l, ns) in crate::simplex::slope_intercept_dual::xprof_take() {
             eprintln!("XPROF {l:10} {:10.1} ms", ns as f64 / 1e6);
         }
+        // 木を分け合う従のスレッドの合計 (analysis/proofprop_20261123)
+        for (l, ns) in crate::simplex::slope_intercept_dual::xprof_workers_take() {
+            eprintln!("XPROFW {l:10} {:10.1} ms", ns as f64 / 1e6);
+        }
     }
     let s = p.sense_sign;
     let mut r = r;
