@@ -22952,7 +22952,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if obj.is_empty() {
             return true;
         }
-        self.propagate_le_row(&obj, u, conflicts)
+        // 試作 `ENOMOTO_MIP_OBJ_PROP_INT=1`: 連続列の境界は締めない (刈りの判定と整数列の締め付けだけ)。打ち切り値を連続の目的の列の
+        // 境界に言い直すと LP に害 (analysis/objprobehull_20261124 1.2 節の mas76、analysis/objprop_20261124 3 節)
+        self.propagate_le_row_ex(&obj, u, conflicts, obj_prop_int())
     }
 
     /// [`prop_fixpoint`] の本体: ノードの伝播の各段を、境界の変更の記録が伸びなくなるまで回し直す。矛盾なら偽。
@@ -23657,6 +23659,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 1 本の行 `sum a_j x_j <= u` を定義域で伝播する ([`Self::propagate_objective_with`] の本体。根のプロービングの
     /// 被約費用の行にも使う)。矛盾なら偽。
     pub(super) fn propagate_le_row(&mut self, obj: &[(usize, f64)], u: f64, conflicts: bool) -> bool {
+        self.propagate_le_row_ex(obj, u, conflicts, false)
+    }
+
+    /// [`Self::propagate_le_row`] の本体。`int_only` なら整数列の境界だけを締める (連続列は最小活動量にだけ入れる)
+    fn propagate_le_row_ex(&mut self, obj: &[(usize, f64)], u: f64, conflicts: bool, int_only: bool) -> bool {
         let p = self.p;
         for _ in 0..3 {
             let mut minact = 0.0f64;
@@ -23686,6 +23693,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let cc_pos0 = self.dom.stack_len();
             self.dom.set_external_tag(6);
             for &(j, c) in obj.iter() {
+                if int_only && !p.is_int[j] {
+                    continue;
+                }
                 let (lo, up) = (self.dom.lo[j], self.dom.up[j]);
                 let rest_gap = if ninf == 0 {
                     // c x_j <= gap + c * (x_j の最小の側の境界)
@@ -29475,6 +29485,12 @@ pub(crate) fn objprop_redo(c: char) -> bool {
 /// (`ENOMOTO_MIP_SB_PROP`・`SB_PROBEBD`) で、`ENOMOTO_MIP_OBJ_PROP` が切でも目的の行を伝播する
 fn sb_objprop() -> bool {
     env_str!("ENOMOTO_MIP_SB_OBJPROP").is_some()
+}
+
+/// 試作 `ENOMOTO_MIP_OBJ_PROP_INT=1`: 目的の行の伝播 ([`Solver::propagate_objective_with`]) で連続列の境界を締めない
+fn obj_prop_int() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_MIP_OBJ_PROP_INT").is_some_and(|v| v != "0"))
 }
 
 pub(crate) fn objprobe_flags() -> Option<&'static str> {
