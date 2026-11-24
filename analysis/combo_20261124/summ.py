@@ -24,6 +24,10 @@ for f in files:
 PJ = json.loads((D / "problems.json").read_text())
 SETS = [("M 186 問", set(PJ["M"])), ("240 問全部", set(PJ["all"])), ("残りの 54 問", set(PJ["rest"]))]
 SOLU = json.loads((D / "solu.json").read_text())
+# 害・得の原因の部品 (分かっていれば)。cause.json: {"問題": "部品 (出どころ)"} または {"問題 t1": …, "問題 t4": …} (スレッド別が優先)。
+# 中身は害の切り分け (analysis/comboharm_20261124 など) で分かったものを手で写す。ファイルがなければ欄は空
+CAUSE = json.loads((D / "cause.json").read_text()) if (D / "cause.json").exists() else {}
+def cause(p, th): return CAUSE.get(f"{p} {th}") or CAUSE.get(p) or ""
 def st(r): return str(r["result"].get("status") or "").lower()
 def solved(r): return st(r) in ("optimal", "infeasible")
 def t(r): return min(r["result"].get("time") or TL, TL) if solved(r) else TL
@@ -93,7 +97,7 @@ for th, name in (("t1", "1 スレッド"), ("t4", "4 スレッド")):
     if "240 問全部" in detail:
         lr, ob, oc, slow, good = detail["240 問全部"]
         tag = lambda p: "M" if p in SETS[0][1] else "残り"
-        f = lambda p: f"{p} ({tag(p)}) {math.exp(lr[p]):.2f}: combo {desc(R[(p, cmb, 1)])} / 既定 {desc(R[(p, base, 1)])}"
+        f = lambda p: f"{p} ({tag(p)}) {math.exp(lr[p]):.2f}: combo {desc(R[(p, cmb, 1)])} / 既定 {desc(R[(p, base, 1)])}" + (f" [原因: {cause(p, th)}]" if cause(p, th) else "")
         print(f"\n既定だけ解けた {len(ob)}: " + "; ".join(f(p) for p in ob))
         print(f"combo だけ解けた {len(oc)}: " + "; ".join(f(p) for p in oc))
         print(f"\n1.25 倍超の遅れ {len(slow)} 問 (240 問全部、比の大きい順):")
