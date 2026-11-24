@@ -17,7 +17,10 @@ for f in files:
     for g in glob.glob(f):
         for l in open(g, encoding="utf-8"):
             if l.strip():
-                r = json.loads(l); R[(r["problem"], r["cfg"], r["seed"])] = r
+                r = json.loads(l); key = (r["problem"], r["cfg"], r["seed"])
+                # 同じ回の行が複数あれば (やり直し・組み替えの重なり)、crash・取得失敗でない行を優先し、その中では後の行
+                if key not in R or str(r["result"].get("status") or "").lower() not in ("crash", "fetch_error"):
+                    R[key] = r
 PJ = json.loads((D / "problems.json").read_text())
 SETS = [("M 186 問", set(PJ["M"])), ("240 問全部", set(PJ["all"])), ("残りの 54 問", set(PJ["rest"]))]
 SOLU = json.loads((D / "solu.json").read_text())
