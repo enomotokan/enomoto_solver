@@ -620,6 +620,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 根の面の頂点の分離 (面の LP とその頂点での分離) に使った時間の合計と、使った面の頂点の数 (`ENOMOTO_MIP_DEBUG_FACETIME`)
     pub(super) face_secs: f64,
     pub(super) face_used: usize,
+    /// 試作 `ENOMOTO_MIP_CUTROBUST`: このラウンドの面の頂点の分離で解いた面の頂点 ([`super::separation`] の `cutrobust_rescore` で使う)
+    pub(super) face_pts: Vec<Vec<f64>>,
     /// (削除した試作 `ENOMOTO_MIP_FACE_ADAPT` が立てていた。今は立たない) このカットのループでは面の頂点の分離をもうしない (面の LP が解けなかった)
     pub(super) face_off_loop: bool,
     /// 試作 `ENOMOTO_MIP_MPSEP` (既定では使わない、analysis/mpsep_20261106.md): 分離する点が LP の頂点でないとき、[`Self::separate`] が
@@ -5516,6 +5518,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         fc_network: false,
         face_secs: 0.0,
         face_used: 0,
+        face_pts: Vec::new(),
         face_off_loop: false,
         sep_act_override: None,
         tab_calls: 0,
@@ -6935,7 +6938,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// [`Self::optface_alt`] の本体。入れ替えの上限 `k`、時間の上限 `cap` 秒 (そのまま使う)、`verbose` なら 1 行の記録を出す。
     pub(super) fn optface_alt_ext(&self, tag: &str, mode: char, seed: u64, cap: f64, k: usize, verbose: bool) -> (Option<L>, usize) {
         let mut alt = self.lp.clone();
-        let sample = tunable!("ENOMOTO_T_MIP_OPTFACE_SAMPLE", 8usize, usize);
+        // `q` (試作 `ENOMOTO_MIP_CUTVERT`) は候補を全部比べる
+        let sample = if mode == 'q' { usize::MAX } else { tunable!("ENOMOTO_T_MIP_OPTFACE_SAMPLE", 8usize, usize) };
         // 試作 `ENOMOTO_MIP_TICKS` の `m` ([`super::ticks_on`]): 移動の時間の上限 `cap` 秒を同じ量の手間の期限にし、時間は 10 倍の安全網にする
         // (`ENOMOTO_MIP_TICKS` の `m` は、呼び手 (`mpsep_extra`) が入れ替えの数で止めるので、ここでは手間の期限を付けない)
         let tk_m = false;

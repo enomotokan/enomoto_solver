@@ -3751,14 +3751,43 @@ impl TwoStageLp {
                         let mv: f64 = alpha.iter().enumerate().filter(|&(p, _)| basis[p] < n).map(|(_, a)| a.abs()).sum::<f64>() + if q < n { 1.0 } else { 0.0 };
                         (t * mv).min(1e12) + if t > 1e-9 { 1e6 } else { 0.0 } + noise
                     }
+                    // 試作 `ENOMOTO_MIP_CUTVERT=q` (analysis/cutrobust_20261124): 整数列の分数の度合い Σ min(f, 1 − f) の増え
+                    // (入る変数と基底の整数列の値の動きから計算する。増えない入れ替えは選ばず、局所最大で止まる)
+                    'q' => {
+                        let phi = |v: usize, zv: f64| -> f64 {
+                            if v >= n || !is_int.get(v).copied().unwrap_or(false) {
+                                return 0.0;
+                            }
+                            let xv = zv + self.shift[v];
+                            let f = xv - xv.floor();
+                            if f < 1e-6 || f > 1.0 - 1e-6 { 0.0 } else { f.min(1.0 - f) }
+                        };
+                        let mut g = phi(q, z[q] + dir * t) - phi(q, z[q]);
+                        if t > 0.0 {
+                            for (p, &a) in alpha.iter().enumerate() {
+                                if a != 0.0 {
+                                    let v = basis[p];
+                                    g += phi(v, z[v] - dir * a * t) - phi(v, z[v]);
+                                }
+                            }
+                        }
+                        g
+                    }
                     _ => noise,
                 };
+                if mode == 'q' && score <= 1e-9 {
+                    continue;
+                }
                 if best.as_ref().is_none_or(|b| score > b.5) {
                     best = Some((q, dir, t, r, alpha, score));
                 }
                 if mode == 'r' && best.is_some() {
                     break;
                 }
+            }
+            if mode == 'q' && best.is_none() {
+                // 分数の度合いを増やす入れ替えがない (局所最大)
+                break;
             }
             let Some((q, dir, t, r, alpha, _)) = best else {
                 // 引いた候補がどれも動けない: 引いた分を除いて続ける
