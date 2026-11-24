@@ -9266,7 +9266,7 @@ fn fixed_charge_network_with(p: &MipProblem, row_frac: f64) -> bool {
 }
 
 /// 試作 `ENOMOTO_MIP_NODECNT` の `r`: カットの指紋 (係数・右辺のビットのハッシュ、非零だけ)
-fn cut_fingerprint(coefs: &[(usize, f64)], rhs: f64) -> u64 {
+pub(super) fn cut_fingerprint(coefs: &[(usize, f64)], rhs: f64) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     for &(j, a) in coefs {
