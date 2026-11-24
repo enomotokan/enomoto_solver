@@ -158,6 +158,22 @@ pub fn act_work() -> u64 {
     ACT_WORK.with(|w| w.get())
 }
 
+/// 診断 `ENOMOTO_MIP_DIAG_GLOBALAUDIT` (analysis/globalaudit_20261124、既定では使わない。解き方は変えない): 大域的に分かった情報を
+/// 捨てている量を数えて `ENOMOTO_MIP_LOG` に出す
+pub(crate) fn globalaudit_on() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| env_str!("ENOMOTO_MIP_DIAG_GLOBALAUDIT").is_some_and(|v| v != "0"))
+}
+
+/// [`globalaudit_on`] の数え (全スレッドの合計): [保留中の大域的な締め付けを置いた根への戻りの回数, 置いた締め付けの数,
+/// 捨てた待ち行列を伝播すると締まる整数列の境界の数 (大域的な境界にない), そのうち固定になる整数列の数, その伝播が矛盾した回数,
+/// 締まる連続列の境界の数]
+pub(crate) static GA_RESET: [std::sync::atomic::AtomicU64; 6] = [const { std::sync::atomic::AtomicU64::new(0) }; 6];
+
+/// [`globalaudit_on`] の数え (全スレッドの合計): [リテラルの衝突をプールに足した数, そのうち (大域的に成り立つリテラルを除いて) 長さ 1 のもの
+/// (= 大域的な固定だが、プールに入れるだけで大域的な境界には置かない), 長さ 1 のうち取り込み (ほかのスレッドから) のもの]
+pub(crate) static GA_CONF: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+
 impl Domain {
     /// これまでに伝播で走査した行の長さの合計 (スレッドごと。ヒューリスティクスの手間の上限に使う)。
     pub fn debug_work(&self) -> u64 {
@@ -527,11 +543,18 @@ impl Domain {
     pub fn reset_to_root(&mut self, p: &MipProblem) {
         self.backtrack_to(p, 0);
         let pend = std::mem::take(&mut self.pending_global);
+        let mut applied = 0u64;
         for (j, upper, v) in pend {
             let tighter = if upper { v < self.up[j] } else { v > self.lo[j] };
             if tighter {
                 self.set_bound(p, j, upper, v, false);
+                applied += 1;
             }
+        }
+        // 診断 `ENOMOTO_MIP_DIAG_GLOBALAUDIT` (analysis/globalaudit_20261124): 下で伝播の待ち行列を捨てるので、置いた締め付けから行を通して
+        // 締まるはずの境界は大域的な境界に入らない。写しで伝播してその量を数える (解き方は変えない)
+        if applied > 0 && globalaudit_on() {
+            self.globalaudit_dropped(p, applied);
         }
         self.resets += 1;
         if self.resets % 64 == 0 {
@@ -539,6 +562,36 @@ impl Domain {
         }
         self.queue.iter().for_each(|&i| self.in_queue[i] = false);
         self.queue.clear();
+    }
+
+    /// [`globalaudit_on`] 用: 保留中の大域的な締め付けを置いた直後 (待ち行列を捨てる前) の定義域の写しを伝播し、締まる境界を数える。
+    /// 写しの伝播の手間はこのスレッドの数え (手間の期限・時計) から差し引く (解き方を変えない)
+    fn globalaudit_dropped(&self, p: &MipProblem, applied: u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (t0, a0, c0, d0, w0) = (crate::ticks::raw(), act_work(), chg_count(), DEBUG_WORK.with(|w| w.get()), work_cuts());
+        let mut d = self.clone();
+        let ok = d.propagate(p);
+        let (mut ti, mut fi, mut tc) = (0u64, 0u64, 0u64);
+        if ok {
+            for j in 0..p.n {
+                let t = (d.lo[j] > self.lo[j]) as u64 + (d.up[j] < self.up[j]) as u64;
+                if p.is_int[j] {
+                    ti += t;
+                    fi += (d.lo[j] == d.up[j] && self.lo[j] < self.up[j]) as u64;
+                } else {
+                    tc += t;
+                }
+            }
+        }
+        let t1 = crate::ticks::raw();
+        crate::ticks::add_raw(&std::array::from_fn(|k| t0[k].wrapping_sub(t1[k])));
+        ACT_WORK.with(|w| w.set(a0));
+        CHG_COUNT.with(|w| w.set(c0));
+        DEBUG_WORK.with(|w| w.set(d0));
+        WORK_CUTS.with(|w| w.set(w0));
+        for (k, v) in [1u64, applied, ti, fi, (!ok) as u64, tc].into_iter().enumerate() {
+            GA_RESET[k].fetch_add(v, Relaxed);
+        }
     }
 
     /// 大域的に (すべてのノードで) 有効な締め付け。根にいればすぐ、そうでなければ次に根へ戻ったときに適用する。

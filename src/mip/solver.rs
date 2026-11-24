@@ -15647,6 +15647,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             };
             let basis = keep_basis.then_some(basis);
             let prot = if keep_basis { self.basis_protected_cuts() } else { None };
+            // 診断 `ENOMOTO_MIP_DIAG_GLOBALAUDIT` (analysis/globalaudit_20261124、解き方は変えない): 根のノードを分枝するときに、根の定義域が
+            // 大域的な境界より締まっている (子に引き継がれず、根へ戻ると捨てる) 列を理由ごとに数える
+            if node.depth == 0 && super::domain::globalaudit_on() && self.params.verbose && !self.params.submip && self.snap.is_none() {
+                self.globalaudit_root();
+            }
             // 強分岐で子の LP が最適まで解けていれば、その値を子の下界にする
             let sb_bounds = self.last_sb.filter(|&(j, _, _)| j == col && env_str!("ENOMOTO_MIP_NO_SB_CHILD_BOUND").is_none());
             let mut of_fixes = std::mem::take(&mut self.of_node_fixes);
@@ -23418,6 +23423,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return false;
         }
         let ok = self.lit_conflicts.add(&l, self.importing);
+        // 診断 `ENOMOTO_MIP_DIAG_GLOBALAUDIT` (analysis/globalaudit_20261124): 長さ 1 の衝突 (大域的な固定) を数える
+        if ok && super::domain::globalaudit_on() {
+            use std::sync::atomic::Ordering::Relaxed;
+            let g = &super::domain::GA_CONF;
+            g[0].fetch_add(1, Relaxed);
+            if l.len() == 1 {
+                g[1].fetch_add(1, Relaxed);
+                g[2].fetch_add(self.importing as u64, Relaxed);
+            }
+        }
         if ok {
             self.lit_stats[0] += 1;
             // 作ったときには知らせず、刈り込み・締め付けに使われたときに知らせる (`ENOMOTO_MIP_TREE_SHARE_LITS_AT_ONCE` なら作ったときに)
@@ -24039,6 +24054,75 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP: RSTCRIT t: newly fixed columns hold {nnz_new} of {nnz_free} nonzeros ({:.1}%) at node {}; node limit of the tree restart ignored", 100.0 * s, self.nodes);
         }
         big
+    }
+
+    /// 診断 `ENOMOTO_MIP_DIAG_GLOBALAUDIT` (analysis/globalaudit_20261124): 根のノード (深さ 0) を分枝する時点で、定義域が大域的な境界より
+    /// 締まっている列を、その境界を最後に変えた記録の理由ごとに数えて出す。深さ 0 の変更はすべて根で (打ち切り値より良い解について)
+    /// 成り立つが、子には分枝だけが渡り、`reset_to_root` で巻き戻すので、大域的な境界に入れていない分は木では捨てることになる。
+    /// 理由の文字は [`Domain::reason_counts_int`] と同じ (B 決定・含意 (-1)、R 行、L 局所の被約費用、S 強分枝、O オービトープ、P 双対証明、
+    /// F リテラルの衝突、J 目的の伝播、E その他、C カットプール。P・C は通し番号つきの理由も含む)
+    fn globalaudit_root(&self) {
+        let p = self.p;
+        let d = &self.dom;
+        let len = d.stack_len();
+        // (列, 上限か) ごとの最後の記録の位置と理由
+        let mut last: std::collections::HashMap<(usize, bool), (usize, i32)> = std::collections::HashMap::new();
+        for k in 0..len {
+            let (j, upper, _, r) = d.trail_entry(k);
+            last.insert((j, upper), (k, r));
+        }
+        let cls = |r: i32| -> usize {
+            match r {
+                r if super::domain::proof_reason_id(r).is_some() => 5,
+                r if super::domain::cut_reason_id(r).is_some() => 9,
+                -1 => 0,
+                r if r >= 0 => 1,
+                -3 => 2,
+                -4 => 3,
+                -5 => 4,
+                -6 => 5,
+                -7 => 6,
+                -8 => 7,
+                -9 => 9,
+                _ => 8,
+            }
+        };
+        let (mut tight, mut fixed, mut cont) = ([0usize; 10], [0usize; 10], 0usize);
+        let mut no_rec = 0usize;
+        for j in 0..p.n {
+            let lo_t = d.lo[j] > d.global_lo[j];
+            let up_t = d.up[j] < d.global_up[j];
+            if !(lo_t || up_t) {
+                continue;
+            }
+            if !p.is_int[j] {
+                cont += 1;
+                continue;
+            }
+            let a = if lo_t { last.get(&(j, false)).copied() } else { None };
+            let b = if up_t { last.get(&(j, true)).copied() } else { None };
+            let Some((_, r)) = [a, b].into_iter().flatten().max_by_key(|e| e.0) else {
+                no_rec += 1;
+                continue;
+            };
+            tight[cls(r)] += 1;
+            if d.lo[j] == d.up[j] && d.global_lo[j] < d.global_up[j] {
+                fixed[cls(r)] += 1;
+            }
+        }
+        let nm = ['B', 'R', 'L', 'S', 'O', 'P', 'F', 'J', 'E', 'C'];
+        let fmt = |c: &[usize; 10]| nm.iter().zip(c).filter(|(_, &v)| v > 0).map(|(n, v)| format!("{n}{v}")).collect::<Vec<_>>().join(",");
+        let (nt, nf) = (tight.iter().sum::<usize>(), fixed.iter().sum::<usize>());
+        eprintln!(
+            "MIP: GLOBALAUDIT root: at the root branching (restart {}, trail {len}): integer columns tighter than the global bounds {nt} [{}], of which fixed {nf} [{}] (no trail entry {no_rec}); continuous columns tighter {cont}; globally newly fixed integers {}, restart expected now {} / with the local fixes {} ({:.2}s)",
+            self.params.restarts,
+            fmt(&tight),
+            fmt(&fixed),
+            self.newly_fixed_ints(),
+            self.restart_expected(0),
+            self.restart_expected(nf),
+            self.start.elapsed().as_secs_f64()
+        );
     }
 
     /// 根の LP を解く前から新たに大域固定された整数列の数 ([`Self::maybe_restart`] の判定と同じ数え方)。
@@ -28510,6 +28594,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 LPINF_HIST.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect::<Vec<_>>()
             );
             eprintln!("MIP: sibling backtracks {}; basis restores {} (basic count mismatch {}), first LP iterations after a restore {}", self.sibling_backtracks, self.restore_stats.0, self.restore_stats.1, self.restore_stats.2);
+            if super::domain::globalaudit_on() {
+                let g: Vec<u64> = super::domain::GA_RESET.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
+                eprintln!(
+                    "MIP: GLOBALAUDIT reset: returns to the root with pending global tightenings {} (tightenings applied {}); dropped propagation would tighten integer bounds {} (fixing {} integer columns), continuous bounds {}, infeasible {} (all threads, cumulative)",
+                    g[0], g[1], g[2], g[3], g[5], g[4]
+                );
+                let c: Vec<u64> = super::domain::GA_CONF.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
+                eprintln!("MIP: GLOBALAUDIT conflicts: literal conflicts added {}, of length 1 (global fixings kept only in the pool) {} (imported {}) (all threads, cumulative)", c[0], c[1], c[2]);
+            }
             if super::separation::hl2_d2_any() {
                 let d = &self.d2_stats;
                 eprintln!("MIP: HL2_D2: protected inactive cuts kept {} (dropped by the D2a limits {}); D2b: rows stored {}, restores with re-added rows {} ({} rows), failed for missing rows {}, protection count mismatch {}, still mismatched {}", d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]);
