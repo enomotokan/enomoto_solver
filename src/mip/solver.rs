@@ -13548,13 +13548,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 得のあった問題は r ≥ 0.76 (多くは ≥ 0.8) だったので、真ん中を両者の間 0.69 に、幅を「害の側の多く (≤ 0.46) で 1 割以下、得の側の多く (≥ 0.8)
             // で 7 割以上」になる 0.1 にした。HiGHS 式の衝突スコア (付け方の切り替えで連続には混ぜられない) は σ ≥ 0.5 の間だけ入れる
             // 部分 MIP (RINS など) では上げない (主の木だけ。部分 MIP で上がると、その結果を通して上がらない問題でも主の道筋が変わった)
+            // 試作 `ENOMOTO_MIP_SB_ADAPT`: 衝突の重みの床を 0.01 x f_B にする (主の木だけ)
+            if sb_adapt_on() && !self.params.submip {
+                self.pc.cw_floor = tunable!("ENOMOTO_T_MIP_SBAD_CW", 0.01, f64) * self.sbad_f().1;
+            }
             // 診断 `ENOMOTO_MIP_SBADAPT_DIAG` (analysis/sbadapt_20261124、解き方は変えない): 主の木で 200 ノードごとに、強分枝の試作の効き方を分ける
             // 特徴の候補 (大きさによらない比) を出す: 双対退化で強分枝を省いた割合、閉じた葉のうち実行不能で閉じた割合、1 ノードあたりに作った
             // 衝突の数、強分枝の LP の数 / ノード、子の伝播で実行不能になった強分枝の子 / 強分枝の LP
             if !self.params.submip && self.nodes > 0 && self.nodes % 200 == 0 && env_str!("ENOMOTO_MIP_SBADAPT_DIAG").is_some() {
                 let leaves = (self.pc.objlim_leaves + self.pc.infeasible_leaves).max(1) as f64;
                 eprintln!(
-                    "SBADAPT_FEAT nodes {} t {:.2} deg {:.4} infl {:.4} cpn {:.4} sbpn {:.4} sbinf {:.4} leaves {} sel {}",
+                    "SBADAPT_FEAT nodes {} t {:.2} deg {:.4} infl {:.4} cpn {:.4} sbpn {:.4} sbinf {:.4} leaves {} sel {} fa {:.4} fb {:.4}",
                     self.nodes,
                     self.start.elapsed().as_secs_f64(),
                     self.sb_degen_stats[1] as f64 / self.sb_degen_stats[0].max(1) as f64,
@@ -13563,7 +13567,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.sb_lps as f64 / self.nodes as f64,
                     self.sb_prop_stats[0] as f64 / self.sb_lps.max(1) as f64,
                     self.pc.objlim_leaves + self.pc.infeasible_leaves,
-                    self.sb_degen_stats[0]
+                    self.sb_degen_stats[0],
+                    self.sbad_f().0,
+                    self.sbad_f().1
                 );
             }
             if let Some(w) = cw_ramp().filter(|_| !self.params.submip) {
@@ -16261,6 +16267,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 打ち切り値に使える解の目的値があるか (自分の暫定解、または木を分け合うときはほかのスレッドの解の共有の最良値)。
     /// 目的値しか使わない処理 (被約費用による固定・ノードの選び方) の条件に使う。木を分け合わないときは自分の暫定解だけ
     /// (ポートフォリオ並列の挙動は変えない)。
+    /// 試作 `ENOMOTO_MIP_SB_ADAPT` ([`sb_adapt_on`]) の強さ (f_A, f_B)。どちらも解いている途中で測る大きさによらない比のシグモイド:
+    /// - f_A = σ(a_A (cpn - b_A)): cpn は 1 ノードあたりに作った衝突の数 (作った衝突 / (ノード + 1))。退化したノードで強分岐をする確率と、強分岐の
+    ///   予算を既定から HiGHS の大きさに寄せる割合に使う。
+    /// - f_B = σ(a_B (b_B - deg)): deg は強分岐の判断のうち双対退化で省いた割合 ((省いた数 + 1) / (判断の数 + 2)、ラプラスの継続則で、判断が少ない
+    ///   うちは 0.5 から始まる)。子の伝播をする確率と、衝突の重みの床 (0.01 x f_B) に使う。
+    ///
+    /// 係数は analysis/sbadapt_20261124 の 6 問の 200 ノードでの値から決めた: cpn は効いた satellites2-60-fs が 2.15、害の出た 30n20b8 が 1.28 なので
+    /// b_A = 1.7 (中点)、両者が 0.9・0.1 になる a_A = ln 9 / 0.435 = 5.05。deg は効いた dano3_5・mcsched・swath1 が 0、30n20b8 が 0.37 なので
+    /// b_B = 0.185、a_B = ln 9 / 0.185 = 11.9 (`ENOMOTO_T_MIP_SBAD_{AA,AB,BA,BB}` で変えられる)
+    fn sbad_f(&self) -> (f64, f64) {
+        let sig = |z: f64| 1.0 / (1.0 + (-z).exp());
+        let cpn = self.multi_stats[1] as f64 / (self.nodes + 1) as f64;
+        let deg = (self.sb_degen_stats[1] + 1) as f64 / (self.sb_degen_stats[0] + 2) as f64;
+        let fa = sig(tunable!("ENOMOTO_T_MIP_SBAD_AA", 5.05, f64) * (cpn - tunable!("ENOMOTO_T_MIP_SBAD_AB", 1.7, f64)));
+        let fb = sig(tunable!("ENOMOTO_T_MIP_SBAD_BA", 11.9, f64) * (tunable!("ENOMOTO_T_MIP_SBAD_BB", 0.185, f64) - deg));
+        (fa, fb)
+    }
+
     fn has_cutoff_value(&self) -> bool {
         // `ENOMOTO_MIP_TREE_OWN_INC_ONLY`: 以前の形 (自分の暫定解があるときだけ)
         self.incumbent.is_some()
@@ -18423,6 +18447,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let sb_highs = !self.params.submip && env_str!("ENOMOTO_MIP_SB_BUDGET_HIGHS").is_some();
         let quot = if sb_highs { tunable!("ENOMOTO_T_MIP_SB_HIGHS_QUOT", 0.5, f64) } else { tunable!("ENOMOTO_T_MIP_SB_QUOT", 0.125, f64) } * self.node_iters as f64;
         let maxsb = quot + if sb_highs { tunable!("ENOMOTO_T_MIP_SB_HIGHS_BASE", 100_000.0, f64) } else { 25_000.0 };
+        // 試作 `ENOMOTO_MIP_SB_ADAPT` ([`sb_adapt_on`]): 強さ f_A ([`Self::sbad_f`]) で、予算を既定から HiGHS の大きさまで連続に寄せる
+        let sbad = (sb_adapt_on() && !self.params.submip).then(|| self.sbad_f());
+        let (quot, maxsb) = match sbad {
+            Some((fa, _)) if !sb_highs => {
+                let qh = tunable!("ENOMOTO_T_MIP_SB_HIGHS_QUOT", 0.5, f64) * self.node_iters as f64;
+                let mh = qh + tunable!("ENOMOTO_T_MIP_SB_HIGHS_BASE", 100_000.0, f64);
+                (quot + fa * (qh - quot), maxsb + fa * (mh - maxsb))
+            }
+            _ => (quot, maxsb),
+        };
         let sb = self.sb_iters as f64;
         // 双対退化の強いノードでは強分岐をしない (根以外)
         // `ENOMOTO_MIP_SB_NO_DEGEN_SKIP`: 双対退化でも強分岐を止めない
@@ -18434,6 +18468,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         self.sb_degen_stats[0] += 1;
         self.sb_degen_stats[1] += degenerate as u64;
+        // 試作 `ENOMOTO_MIP_SB_ADAPT`: 双対退化でも、強さ f_A の確率で強分岐する (ノード番号から決まる擬似乱数、種ごとに再現)
+        let degenerate = degenerate && !sbad.is_some_and(|(fa, _)| sbad_u(self.nodes, 1) < fa);
         // `ENOMOTO_MIP_SB_AGREE` (試作): 擬似費用の選び方が強分岐と十分に一致するようになったら (根以外)、強分岐を省いて
         // 擬似費用だけで分枝する。学び続けるため、省いたノードの `ENOMOTO_T_MIP_SB_AGREE_PROBE` 回に 1 回は強分岐する
         let agree_skip = depth > 0 && self.sb_agree_learned() && {
@@ -18531,6 +18567,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             && !self.params.submip
             && env_str!("ENOMOTO_MIP_SB_PROP").is_none()
             && env_str!("ENOMOTO_MIP_SB_PROBEBD").is_none()
+            && !sb_adapt_on()
             && env_str!("ENOMOTO_MIP_PAR_SB").is_some()
             && self.pool.as_ref().is_none_or(|pl| pl.idle.load(std::sync::atomic::Ordering::Relaxed) + 1 >= pl.threads);
         let mut pre: std::collections::HashMap<usize, [SbSide; 2]> = std::collections::HashMap::new();
@@ -18575,7 +18612,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 試作 `ENOMOTO_MIP_SB_PROBEBD` (既定では使わない、analysis/treegap_20261123): 強分岐の子の伝播 (`ENOMOTO_MIP_SB_PROP` と同じ)
             // で締まった境界を子ごとに覚え、両方の子が残ったら、両方で締まった列の境界の和 (下限は小さい方、上限は大きい方) をこのノードの
             // 定義域に置く (どちらの子でも成り立つのでノードで成り立つ)。SCIP の relpscost の `probingbounds` (既定で有効) に当たる
-            let sb_probebd = env_str!("ENOMOTO_MIP_SB_PROBEBD").is_some();
+            // 試作 `ENOMOTO_MIP_SB_ADAPT`: 強さ f_B の確率でこのノードの強分岐で子の伝播をする
+            let sb_probebd = env_str!("ENOMOTO_MIP_SB_PROBEBD").is_some() || sbad.is_some_and(|(_, fb)| sbad_u(self.nodes, 2) < fb);
             let mut side_bd: [std::collections::HashMap<usize, (f64, f64)>; 2] = Default::default();
             // 試作 `ENOMOTO_MIP_PCL` の `a`: 子の LP が反復上限で途中の値になった側があるか
             let mut sb_capped = false;
@@ -28604,4 +28642,21 @@ pub(super) fn conflict_proof_explain() -> bool {
 pub(super) fn cutoff_user_tree() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_str!("ENOMOTO_MIP_CUTOFF_USER_TREE").is_some_and(|v| v != "0"))
+}
+
+/// 試作 `ENOMOTO_MIP_SB_ADAPT` (analysis/sbadapt_20261124、既定では使わない、`=1` で使う): 強分岐まわりの 3 つの試作 (退化でも強分岐 +
+/// HiGHS の予算 (`SB_NO_DEGEN_SKIP`・`SB_BUDGET_HIGHS`)、強分岐の子の伝播 (`SB_PROBEBD`)、衝突の重みの床 0.01) を、使う・使わないの 2 択でなく、
+/// 解いている途中で測る特徴のシグモイドで強さを連続に変えて使う ([`Solver::sbad_f`])。主の木だけ (サブ MIP では使わない)
+pub(super) fn sb_adapt_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_MIP_SB_ADAPT").is_some_and(|v| v != "0"))
+}
+
+/// 試作 `ENOMOTO_MIP_SB_ADAPT` の確率の判定に使う [0, 1) の擬似乱数 (ノード番号 `k` と用途 `salt` から決まる。同じ種なら同じ値)
+fn sbad_u(k: u64, salt: u64) -> f64 {
+    let mut h = k.wrapping_add(salt.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    h = (h ^ (h >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    h = (h ^ (h >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    h ^= h >> 31;
+    (h >> 11) as f64 / (1u64 << 53) as f64
 }
