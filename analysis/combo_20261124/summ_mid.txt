@@ -1,0 +1,66 @@
+行 433、設定ごと {'def_t1': 103, 'combo_t1': 98, 'combo_t4': 117, 'def_t4': 115}、コミット {'8e6cc38eb': 272, 'ad6fcbb52': 11, '4a20864f9': 12, '1a915ce53': 12, '0031cf803': 12, 'e4c2fc6b6': 12, 'df2104213': 12, '1d6417c20': 12, 'edccdc058': 26, '3155ab3c0': 14, 'fa66f8ac7': 15, '9597ded22': 12, 'b600f41bc': 11}
+crash・killed・取得失敗 5: [('rail02', 'def_t4', 1, 'crash'), ('neos-3402454-bohle', 'def_t1', 1, 'killed'), ('neos-3402454-bohle', 'combo_t1', 1, 'killed'), ('neos-3402454-bohle', 'combo_t4', 1, 'killed'), ('neos-3402454-bohle', 'def_t4', 1, 'crash')]
+
+== 食い違い 0 件
+
+== 1 スレッド (combo_t1 / def_t1、1 より小さければ combo が速い)
+
+| 集合 | 組 | 比 | 95% 区間 | 解けた数 既定 → combo | 既定だけ | combo だけ | 1.25 倍超の遅れ | 0.8 倍未満 | 目安 |
+|---|---:|---:|---|---|---:|---:|---:|---:|---|
+| M 186 問 | 45 | 0.991 | [0.935, 1.050] | 5 → 5 | 2 | 2 | 4 | 3 | 外れ (区間上端・遅れ) |
+| 240 問全部 | 98 | 0.964 | [0.891, 1.043] | 10 → 12 | 3 | 5 | 6 | 5 | 外れ (遅れ) |
+| 残りの 54 問 | 53 | 0.942 | [0.821, 1.081] | 5 → 7 | 1 | 3 | 2 | 2 | 外れ (区間上端・遅れ) |
+| 240 問全部、両方無効の組を除く | 97 | 0.964 | [0.890, 1.044] | 10 → 12 | 3 | 5 | 6 | 5 | 外れ (遅れ) |
+| M 186 問、両方無効の組を除く | 45 | 0.991 | [0.935, 1.050] | 5 → 5 | 2 | 2 | 4 | 3 | 外れ (区間上端・遅れ) |
+
+両方とも記録が無効な組 1: neos-3402454-bohle (combo killed / 既定 killed)
+
+既定だけ解けた 3: neos-1456979 (M) 1.51: combo time_limit 600.0s / 既定 optimal 393.5s; neos-631710 (残り) 4.20: combo time_limit 600.0s / 既定 optimal 135.4s; rail507 (M) 1.28: combo time_limit 600.0s / 既定 optimal 466.2s
+combo だけ解けた 5: CMS750_4 (M) 0.42: combo optimal 243.7s / 既定 time_limit 600.0s; ex10 (残り) 0.13: combo optimal 69.1s / 既定 time_limit 600.0s; ex9 (残り) 0.07: combo optimal 30.3s / 既定 time_limit 600.0s; fiball (M) 0.54: combo optimal 322.1s / 既定 time_limit 600.0s; netdiversion (残り) 0.94: combo optimal 565.3s / 既定 time_limit 600.0s
+
+1.25 倍超の遅れ 6 問 (240 問全部、比の大きい順):
+   neos-631710 (残り) 4.20: combo time_limit 600.0s / 既定 optimal 135.4s
+   mushroom-best (M) 1.61: combo optimal 408.0s / 既定 optimal 250.4s
+   neos-1456979 (M) 1.51: combo time_limit 600.0s / 既定 optimal 393.5s
+   neos-2987310-joes (残り) 1.41: combo optimal 25.7s / 既定 optimal 15.3s
+   rail507 (M) 1.28: combo time_limit 600.0s / 既定 optimal 466.2s
+   chromaticindex512-7 (M) 1.28: combo optimal 257.1s / 既定 optimal 198.7s
+
+効いた (0.8 倍未満) 5 問 (240 問全部、比の小さい順):
+   ex9 (残り) 0.07: combo optimal 30.3s / 既定 time_limit 600.0s
+   ex10 (残り) 0.13: combo optimal 69.1s / 既定 time_limit 600.0s
+   CMS750_4 (M) 0.42: combo optimal 243.7s / 既定 time_limit 600.0s
+   fiball (M) 0.54: combo optimal 322.1s / 既定 time_limit 600.0s
+   unitcal_7 (M) 0.73: combo optimal 275.9s / 既定 optimal 382.1s
+
+== 4 スレッド (combo_t4 / def_t4、1 より小さければ combo が速い)
+
+| 集合 | 組 | 比 | 95% 区間 | 解けた数 既定 → combo | 既定だけ | combo だけ | 1.25 倍超の遅れ | 0.8 倍未満 | 目安 |
+|---|---:|---:|---|---|---:|---:|---:|---:|---|
+| M 186 問 | 62 | 1.035 | [0.980, 1.092] | 11 → 11 | 1 | 1 | 6 | 1 | 外れ (区間上端・遅れ) |
+| 240 問全部 | 115 | 1.021 | [0.957, 1.089] | 19 → 19 | 2 | 2 | 9 | 4 | 外れ (区間上端・遅れ) |
+| 残りの 54 問 | 53 | 1.004 | [0.887, 1.138] | 8 → 8 | 1 | 1 | 3 | 3 | 外れ (区間上端・遅れ) |
+| 240 問全部、両方無効の組を除く | 114 | 1.021 | [0.957, 1.089] | 19 → 19 | 2 | 2 | 9 | 4 | 外れ (区間上端・遅れ) |
+| M 186 問、両方無効の組を除く | 62 | 1.035 | [0.980, 1.092] | 11 → 11 | 1 | 1 | 6 | 1 | 外れ (区間上端・遅れ) |
+
+両方とも記録が無効な組 1: neos-3402454-bohle (combo killed / 既定 crash)
+
+既定だけ解けた 2: chromaticindex1024-7 (M) 1.34: combo time_limit 600.0s / 既定 optimal 444.3s; neos-631710 (残り) 14.89: combo time_limit 600.0s / 既定 optimal 31.0s
+combo だけ解けた 2: csched008 (M) 0.36: combo optimal 211.4s / 既定 time_limit 600.0s; netdiversion (残り) 0.99: combo optimal 591.3s / 既定 time_limit 600.0s
+
+1.25 倍超の遅れ 9 問 (240 問全部、比の大きい順):
+   neos-631710 (残り) 14.89: combo time_limit 600.0s / 既定 optimal 31.0s
+   30n20b8 (M) 2.73: combo optimal 512.9s / 既定 optimal 181.3s
+   tbfp-network (M) 1.82: combo optimal 323.2s / 既定 optimal 173.4s
+   gen-ip054 (M) 1.51: combo optimal 400.5s / 既定 optimal 262.4s
+   gmu-35-40 (M) 1.51: combo optimal 566.3s / 既定 optimal 372.9s
+   roi2alpha3n4 (残り) 1.41: combo optimal 347.3s / 既定 optimal 243.4s
+   neos-2987310-joes (残り) 1.39: combo optimal 23.8s / 既定 optimal 14.4s
+   chromaticindex512-7 (M) 1.37: combo optimal 228.0s / 既定 optimal 163.5s
+   chromaticindex1024-7 (M) 1.34: combo time_limit 600.0s / 既定 optimal 444.3s
+
+効いた (0.8 倍未満) 4 問 (240 問全部、比の小さい順):
+   ex9 (残り) 0.26: combo optimal 22.6s / 既定 optimal 116.7s
+   ex10 (残り) 0.29: combo optimal 40.8s / 既定 optimal 165.3s
+   csched008 (M) 0.36: combo optimal 211.4s / 既定 time_limit 600.0s
+   neos-3402294-bobin (残り) 0.59: combo optimal 110.6s / 既定 optimal 196.1s
