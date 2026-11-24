@@ -190,3 +190,7 @@ python analysis/protoscreen_20261124/feat.py --tag sbpb --env ENOMOTO_MIP_SB_PRO
 feat.py (8 節) で P 58 問の既定 (1 スレッド・種 1・60 秒、1 時間弱) を回せば、上の未測の特徴 (nra_phi・sb_degen_share・cpn・root_gap・first_solution_time) が全問そろう。
 ENUM_ADAPT の s は `--tag ea --env ENOMOTO_MIP_ENUM_ADAPT=1` (enum の効いた・害の 5 問だけで足りる: `--problems neos8,nu25-pr12,air03,neos-960392,rout`)。
 特徴は数え上げなので、上限に届かずに解ける問題ではほかの計測と同時に回しても値は変わらない (時間切れの問題では、ノード数などが機械の速さで変わる)。
+- 2026-11-24 回した (HCoW、先端 fb9a51b3d を `pip install -e .`、check_default.py で 6 問一致): feat.jsonl に既定 58 行 (tag def) と ENUM_ADAPT の 5 行 (tag ea)。
+  def は optimal 39・time_limit 19。same_path は解けた 39 問で全部真、偽の 19 問は全部時間切れ (ノード数が機械の速さで変わる)。
+  sb_degen_share が None の 17 問はどれもノード 0。first_solution_time が None は 30n20b8・ns1116954 (60 秒で解なし)。
+  ea: neos8 の最初の周の s = 0.064 (止める 1・続ける 1、9.6 秒)、nu25-pr12 1.115、neos-960392 1.857、air03・rout は s の行なし (列挙の周に入らない)。
