@@ -213,6 +213,7 @@ class Model:
         node_limit: Optional[int] = None,
         threads: Optional[int] = None,
         log: bool = True,
+        seed: Optional[int] = None,
         *,
         root_solver: Optional[str] = None,
     ) -> Solution:
@@ -260,6 +261,12 @@ class Model:
         同時実行の勝敗、整数最適化では根の LP・切除平面・探索の経過) を、最後に結果を標準出力に出す。
         False なら何も出さない。
 
+        ``seed``: 整数最適化の乱数の種 (0 以上 2**64 未満の整数)。``None`` (既定) なら環境変数 ``ENOMOTO_T_MIP_SEED``
+        (計測の台本用) の値、それもなければ 0 (以前と同じ動き)。木の中のヒューリスティクスや、並列の Feasibility Jump・Local-MIP の
+        スレッドの乱数に混ぜる。1 スレッド (``threads=1``) なら同じ種で同じ結果 (ノード数・目的値) になり再現できる。2 スレッド以上では
+        同じ種でもスレッドのタイミングで探索の道筋が揺れうる。種を変えて回すと、問題ごとの時間の揺れを確かめられる。負の値・2**64 以上は
+        ``ValueError``、整数でなければ (``bool`` を含む) ``TypeError``。LP (整数変数のないモデル) では使わない。
+
         ``root_solver``: ``lp_solver`` の以前の名前 (互換のため残す。使うと ``DeprecationWarning`` を出す)。
         ``lp_solver`` と同時に指定すると ``TypeError``。
         """
@@ -279,6 +286,11 @@ class Model:
                 UserWarning,
                 stacklevel=2,
             )
+        if seed is not None:
+            if isinstance(seed, bool) or not isinstance(seed, int):
+                raise TypeError(f"seed must be an int or None, got {type(seed).__name__}")
+            if not 0 <= seed < 2**64:
+                raise ValueError(f"seed must be in [0, 2**64), got {seed}")
         if log and self._objective is not None:
             self._log_header(threads)
         t0 = time.perf_counter()
@@ -290,6 +302,7 @@ class Model:
             node_limit=node_limit,
             threads=threads,
             log=log,
+            seed=seed,
         )
         elapsed = time.perf_counter() - t0
         status = result["status"]

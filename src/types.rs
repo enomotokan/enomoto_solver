@@ -280,4 +280,7 @@ pub struct MipSettings {
     /// (使える CPU の数 + 1 の半分) を渡す。[`crate::mip::max_threads`] を超える値は頭打ちにする)。2 以上なら基底のない緩和問題
     /// (根など) を二段解法と内点法 + クロスオーバーで同時に解き、木の探索もこの数のスレッドで分け合う。
     pub threads: Option<usize>,
+    /// 乱数の種 (`Model.solve(seed=...)`)。未指定なら環境変数 `ENOMOTO_T_MIP_SEED`、なければ 0 ([`crate::mip::solver::MipParams::seed`])。
+    /// LP (整数変数のないモデル) では使わない
+    pub seed: Option<u64>,
 }

@@ -417,6 +417,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             distinguish: false,
             fc_submip: false,
             tl_base: f64::NAN,
+            // 乱数の種は親のものを渡す
+            seed: self.params.seed,
         };
         let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());
         self.heur_iters += r.lp_iterations;
@@ -722,6 +724,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             distinguish: false,
             fc_submip: false,
             tl_base: f64::NAN,
+            // 乱数の種は親のものを渡す
+            seed: self.params.seed,
         };
         let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());
         self.heur_iters += r.lp_iterations;
@@ -975,7 +979,7 @@ pub(super) fn vb01_fix_dom(p: &MipProblem, dom: &mut Domain, order: &[u32], tigh
 /// LP probing の前に呼ぶ)。定義域は `p` の境界 + 含意 `conflict_edges`、衝突グラフは行と `conflict_edges` から作り、サブ MIP は
 /// [`super::solve_problem`] (500 ノード、1 本 `time_limit` 秒まで、それまでの最良の値を打ち切り値に) で解く。
 /// 見つけた最良の実行可能解 (目的値 (最小化形、定数項込み), `p` の列の空間の値) を返す。
-pub(crate) fn vbounds01_on_problem(p: &MipProblem, verbose: bool, time_limit: f64) -> Option<(f64, Vec<f64>)> {
+pub(crate) fn vbounds01_on_problem(p: &MipProblem, verbose: bool, time_limit: f64, seed: u64) -> Option<(f64, Vec<f64>)> {
     let t0 = std::time::Instant::now();
     let binary: Vec<bool> = (0..p.n).map(|j| p.is_int[j] && p.col_lo[j] >= 0.0 && p.col_up[j] <= 1.0).collect();
     let g = super::clique::CliqueGraph::build_with(p.n, &p.rows, &p.row_lo, &p.row_up, &binary, &p.col_lo, &p.col_up, &p.conflict_edges);
@@ -1027,6 +1031,8 @@ pub(crate) fn vbounds01_on_problem(p: &MipProblem, verbose: bool, time_limit: f6
             distinguish: false,
             fc_submip: false,
             tl_base: f64::NAN,
+            // 乱数の種は親のものを渡す
+            seed,
         };
         let r = super::solve_problem(&sub, params, true);
         if let Some(x) = r.x {
@@ -1055,7 +1061,7 @@ mod tests {
         let inf = f64::INFINITY;
         let rows = vec![vec![(0, 1.0), (1, -1.0)], vec![(2, 1.0), (3, 1.0)], vec![(1, 1.0), (2, 1.0)]];
         let p = MipProblem::from_rows(vec![0.0; 4], vec![1.0; 4], vec![-1.0, 0.0, 0.0, -1.0], 0.0, 1.0, vec![true; 4], rows, vec![-inf, -inf, 1.0], vec![0.0, 1.0, inf]);
-        let (z, x) = vbounds01_on_problem(&p, false, 10.0).expect("VB01 should find a solution");
+        let (z, x) = vbounds01_on_problem(&p, false, 10.0, 0).expect("VB01 should find a solution");
         assert!(p.is_feasible(&x, 1e-9));
         assert!((p.objective(&x) - z).abs() <= 1e-9);
     }
