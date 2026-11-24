@@ -12,7 +12,8 @@ for e in extra:
     m.setParam(k, type(cur)(v) if not isinstance(cur, bool) else v.lower() in ("1", "true"))
 m.readProblem(str(WT / ".miplib_cache" / f"{p}.mps"))
 t = time.perf_counter(); m.optimize(); t = time.perf_counter() - t
+st = D / "logs" / f"scip_{p}_{tag}.stat"; m.writeStatistics(str(st))
 row = {"problem": p, "tag": tag, "extra": extra, "status": m.getStatus(), "root_dual": m.getDualboundRoot(), "dual": m.getDualbound(),
-       "primal": m.getPrimalbound() if m.getNSols() else None, "nodes": m.getNNodes(), "root_sepa_rounds": m.getNSepaRounds(), "time": round(t, 2)}
+       "primal": m.getPrimalbound() if m.getNSols() else None, "nodes": m.getNNodes(), "time": round(t, 2)}
 print(json.dumps(row))
 with open(D / "scip.jsonl", "a") as f: f.write(json.dumps(row) + "\n")
