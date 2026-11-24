@@ -16236,7 +16236,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// (ポートフォリオ並列の挙動は変えない)。
     fn has_cutoff_value(&self) -> bool {
         // `ENOMOTO_MIP_TREE_OWN_INC_ONLY`: 以前の形 (自分の暫定解があるときだけ)
-        self.incumbent.is_some() || (self.pool.is_some() && env_str!("ENOMOTO_MIP_TREE_OWN_INC_ONLY").is_none() && self.shared.as_ref().is_some_and(|s| s.best().is_finite()))
+        self.incumbent.is_some()
+            || (self.pool.is_some() && env_str!("ENOMOTO_MIP_TREE_OWN_INC_ONLY").is_none() && self.shared.as_ref().is_some_and(|s| s.best().is_finite()))
+            // 試作 `ENOMOTO_MIP_CUTOFF_USER_TREE` ([`cutoff_user_tree`]): 外側の求解の打ち切り値 (利用者の `ENOMOTO_MIP_CUTOFF`・TPRE の予備の解の値・
+            // 再スタートで引き継いだ値) も数える
+            || (cutoff_user_tree() && !self.params.submip && self.params.cutoff.is_finite())
     }
 
     /// 証明の段階に入ったか ([`Self::proof_phase_check`])。
@@ -28563,4 +28567,14 @@ pub(super) fn lit_explain_auto() -> bool {
 pub(super) fn conflict_proof_explain() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *F.get_or_init(|| env_str!("ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN").is_none_or(|v| v != "0"))
+}
+
+/// 試作 `ENOMOTO_MIP_CUTOFF_USER_TREE` (analysis/ti6_20261124、既定では使わない、`=1` で使う): 木の中の「打ち切り値に使える値があるか」
+/// ([`Solver::has_cutoff_value`]) に、外側の求解の打ち切り値 (`params.cutoff`: 利用者の `ENOMOTO_MIP_CUTOFF`、TPRE の予備の解の値、再スタートで
+/// 引き継いだ値) も数える。今は自分の暫定解 (と木を分け合う相手の解) があるときだけ真で、打ち切り値だけがあるあいだはノードの被約費用による固定・
+/// 下界最小のノードを取る頻度の引き上げなどが止まる (traininstance6 に最適値を打ち切り値で与えると、暫定解が見つからないまま深さ寄りに進み、
+/// 終わりの下界が 3636 → 118 に下がった)。打ち切り値は刈り込みの上限 (`prune_limit`) にすでに入っている。サブ MIP では使わない
+pub(super) fn cutoff_user_tree() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_MIP_CUTOFF_USER_TREE").is_some_and(|v| v != "0"))
 }
