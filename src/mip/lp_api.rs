@@ -173,6 +173,8 @@ pub trait MipLp: Clone + Send {
     fn adopt_lu_snapshot(&mut self, _s: &LuSnapshot) -> bool {
         false
     }
+    /// 試作 `ENOMOTO_MIP_LU_EXTEND`: 木の探索に入ったことを知らせる ([`TwoStageLp::set_lu_extend_tree`])。対応しない実装は何もしない。
+    fn set_lu_extend_tree(&mut self, _on: bool) {}
 }
 
 macro_rules! forward_impl {
@@ -318,6 +320,9 @@ forward_impl!(
     },
     fn adopt_lu_snapshot(&mut self, s: &LuSnapshot) -> bool {
         TwoStageLp::adopt_lu_snapshot(self, s)
+    },
+    fn set_lu_extend_tree(&mut self, on: bool) {
+        TwoStageLp::set_lu_extend_tree(self, on)
     },
     fn delete_and_add_rows(&mut self, remove: &[bool], rows: &[(Vec<(usize, f64)>, f64, f64)]) {
         TwoStageLp::delete_and_add_rows(self, remove, rows)
