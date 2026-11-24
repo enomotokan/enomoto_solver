@@ -15804,6 +15804,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let prot = if keep_basis { self.basis_protected_cuts() } else { None };
             // 診断 `ENOMOTO_MIP_DIAG_GLOBALAUDIT` (analysis/globalaudit_20261124、解き方は変えない): 根のノードを分枝するときに、根の定義域が
             // 大域的な境界より締まっている (子に引き継がれず、根へ戻ると捨てる) 列を理由ごとに数える
+            // 試作 `ENOMOTO_MIP_GLOBALFIX` の `a` (analysis/globalfix_20261124): 根のノードの整数列の締め付けを大域的な境界に入れる
+            // (子・根へ戻った後・再スタートの判定・ほかのスレッドにも効く)。診断はその後に数える (大域にない残りを出す)
+            if node.depth == 0 && node.changes.is_empty() && super::domain::globalfix('a') && !self.params.submip && self.snap.is_none() && !self.dom.infeasible {
+                self.globalfix_root();
+            }
             if node.depth == 0 && super::domain::globalaudit_on() && self.params.verbose && !self.params.submip && self.snap.is_none() {
                 self.globalaudit_root();
             }
@@ -23695,6 +23700,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if l.is_empty() {
             return false;
         }
+        // 試作 `ENOMOTO_MIP_GLOBALFIX` の `c` (analysis/globalfix_20261124): 長さ 1 の衝突 (大域的に成り立つリテラルを除いた後) は、そのリテラルの
+        // 否定が全ての (打ち切り値より良い) 解で成り立つ = 大域的な固定。否定はプールの伝播 (conflict_pool.rs の「否定」) と同じ形
+        // (`x <= v` の否定は整数列 `x >= floor(v) + 1`・連続列 `x >= v`)。プールにもそのまま入れる (ほかの振る舞いは変えない)
+        if l.len() == 1 && super::domain::globalfix('c') {
+            let (j, upper, v) = l[0];
+            let int = self.p.is_int[j];
+            if upper {
+                self.dom.tighten_global(self.p, j, false, if int { v.floor() + 1.0 } else { v });
+            } else {
+                self.dom.tighten_global(self.p, j, true, if int { v.ceil() - 1.0 } else { v });
+            }
+            super::domain::GF_STATS[7].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         let ok = self.lit_conflicts.add(&l, self.importing);
         // 診断 `ENOMOTO_MIP_DIAG_GLOBALAUDIT` (analysis/globalaudit_20261124): 長さ 1 の衝突 (大域的な固定) を数える
         if ok && super::domain::globalaudit_on() {
@@ -24329,6 +24347,44 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP: RSTCRIT t: newly fixed columns hold {nnz_new} of {nnz_free} nonzeros ({:.1}%) at node {}; node limit of the tree restart ignored", 100.0 * s, self.nodes);
         }
         big
+    }
+
+    /// 試作 `ENOMOTO_MIP_GLOBALFIX` の `a` (analysis/globalfix_20261124): 根のノード (深さ 0、分枝の変更なし) を分枝する時点で、定義域が
+    /// 大域的な境界より締まっている整数列の境界を `tighten_global` で大域的な境界に入れる。根のノードの定義域は「大域的な境界 + 大域的に
+    /// 成り立つ推論 (行・双対証明・衝突・カットの伝播) + 打ち切り値より良い解だけを残す推論 (被約費用・強分枝の片側・目的の伝播)」なので、
+    /// 打ち切り値より良い全ての解で成り立つ (根の被約費用の固定と同じ根拠)。根のノードの LP の値を子の下界に使うのも同じ前提。
+    /// 連続列は入れない (analysis/objprobehull_20261124 の 1.2 節: 連続列の境界を LP に入れると根の下界・木が悪くなる形がある)
+    fn globalfix_root(&mut self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let p = self.p;
+        let before = self.newly_fixed_ints();
+        let mut nt = 0u64;
+        for j in 0..p.n {
+            if !p.is_int[j] {
+                continue;
+            }
+            let (lo, up) = (self.dom.lo[j], self.dom.up[j]);
+            if lo > self.dom.global_lo[j] {
+                self.dom.tighten_global(p, j, false, lo);
+                nt += 1;
+            }
+            if up < self.dom.global_up[j] {
+                self.dom.tighten_global(p, j, true, up);
+                nt += 1;
+            }
+        }
+        let after = self.newly_fixed_ints();
+        let g = &super::domain::GF_STATS;
+        g[4].fetch_add(1, Relaxed);
+        g[5].fetch_add(nt, Relaxed);
+        g[6].fetch_add(after.saturating_sub(before) as u64, Relaxed);
+        if self.params.verbose && nt > 0 {
+            eprintln!(
+                "MIP: GLOBALFIX a: root node (restart {}): {nt} integer bounds made global, newly fixed integers {before} -> {after} ({:.2}s)",
+                self.params.restarts,
+                self.start.elapsed().as_secs_f64()
+            );
+        }
     }
 
     /// 診断 `ENOMOTO_MIP_DIAG_GLOBALAUDIT` (analysis/globalaudit_20261124): 根のノード (深さ 0) を分枝する時点で、定義域が大域的な境界より
@@ -28902,6 +28958,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     "MIP: GLOBALAUDIT reset: returns to the root with pending global tightenings {} (tightenings applied {}); dropped propagation would tighten integer bounds {} (fixing {} integer columns), continuous bounds {}, infeasible {} (all threads, cumulative)",
                     g[0], g[1], g[2], g[3], g[5], g[4]
                 );
+                let f: Vec<u64> = super::domain::GF_STATS.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
+                eprintln!("MIP: GLOBALAUDIT globalfix: b: propagations {} (integer bounds {}, newly fixed integers {}, infeasible {}); a: root nodes {} (integer bounds {}, newly fixed {}); c: global fixings {} (all threads, cumulative)", f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]);
                 let c: Vec<u64> = super::domain::GA_CONF.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
                 eprintln!("MIP: GLOBALAUDIT conflicts: literal conflicts added {}, of length 1 (global fixings kept only in the pool) {} (imported {}) (all threads, cumulative)", c[0], c[1], c[2]);
             }
