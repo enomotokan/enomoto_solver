@@ -1461,7 +1461,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     root_obj_probe_stats: [u64; 2],
     /// 試作 `ENOMOTO_MIP_OBJPROBE` ([`Self::objprobe_round`]) の状態
     pub(super) objp: ObjProbeState,
-    sb_prop_stats: [u64; 2],
+    sb_prop_stats: [u64; 3],
     /// 強分岐の子の LP 値から凸性で締めた一般整数の境界の数 (`ENOMOTO_MIP_SB_TIGHTEN`)
     sb_tighten_count: u64,
     /// 強分岐の下の子で軌道に沿って 0 にした列の数 (`ENOMOTO_MIP_SB_OF`)
@@ -5993,7 +5993,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         hcm_auto: snap.as_ref().is_some_and(|sn| sn.hcm_auto),
         root_obj_probe_stats: [0; 2],
         objp: ObjProbeState::default(),
-        sb_prop_stats: [0; 2],
+        sb_prop_stats: [0; 3],
         sb_tighten_count: 0,
         sb_of_count: 0,
         sb_rc_count: 0,
@@ -18499,6 +18499,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let par_sb = self.params.threads > 1
             && !self.params.submip
             && env_str!("ENOMOTO_MIP_SB_PROP").is_none()
+            && env_str!("ENOMOTO_MIP_SB_PROBEBD").is_none()
             && env_str!("ENOMOTO_MIP_PAR_SB").is_some()
             && self.pool.as_ref().is_none_or(|pl| pl.idle.load(std::sync::atomic::Ordering::Relaxed) + 1 >= pl.threads);
         let mut pre: std::collections::HashMap<usize, [SbSide; 2]> = std::collections::HashMap::new();
@@ -18540,6 +18541,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 子の LP での x_j の被約費用 (`ENOMOTO_MIP_SB_RC`。分けた境界にないか使わなければ 0)
             let mut child_rc = [0.0f64; 2];
             let mut cut = [false; 2];
+            // 試作 `ENOMOTO_MIP_SB_PROBEBD` (既定では使わない、analysis/treegap_20261123): 強分岐の子の伝播 (`ENOMOTO_MIP_SB_PROP` と同じ)
+            // で締まった境界を子ごとに覚え、両方の子が残ったら、両方で締まった列の境界の和 (下限は小さい方、上限は大きい方) をこのノードの
+            // 定義域に置く (どちらの子でも成り立つのでノードで成り立つ)。SCIP の relpscost の `probingbounds` (既定で有効) に当たる
+            let sb_probebd = env_str!("ENOMOTO_MIP_SB_PROBEBD").is_some();
+            let mut side_bd: [std::collections::HashMap<usize, (f64, f64)>; 2] = Default::default();
             // 試作 `ENOMOTO_MIP_PCL` の `a`: 子の LP が反復上限で途中の値になった側があるか
             let mut sb_capped = false;
             if par_sb && !pre.contains_key(&j) {
@@ -18684,7 +18690,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 伝播で締まった境界も子の LP に渡す
                 // 既定では無効 (`ENOMOTO_MIP_SB_PROP` で有効): neos-911970 では最適解が見つかったが、misc07・binkar10_1 で
                 // 子の LP を省いた分の評価の違いなどから大きく悪化した
-                let sb_prop = env_str!("ENOMOTO_MIP_SB_PROP").is_some();
+                let sb_prop = sb_probebd || env_str!("ENOMOTO_MIP_SB_PROP").is_some();
                 let pos = self.dom.stack_len();
                 if sb_prop {
                     if is_up {
@@ -18707,6 +18713,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.pc.add_cutoff(j, is_up);
                         self.sb_prop_stats[0] += 1;
                         continue;
+                    }
+                    if sb_probebd {
+                        let cs: Vec<usize> = self.dom.changes_since(pos).map(|(c, _, _)| c).filter(|&c| c != j).collect();
+                        for c in cs {
+                            side_bd[side].insert(c, (self.dom.lo[c], self.dom.up[c]));
+                        }
                     }
                     if env_str!("ENOMOTO_MIP_SB_PROP_NO_LP").is_none() {
                         for (c, _, _) in self.dom.changes_since(pos) {
@@ -18827,6 +18839,36 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     bound_changes += 1;
                 }
                 _ => {
+                    if sb_probebd && !side_bd[0].is_empty() && !side_bd[1].is_empty() {
+                        let mut hull: Vec<(usize, f64, f64)> = Vec::new();
+                        for (&c, &(l0, u0)) in side_bd[0].iter() {
+                            if let Some(&(l1, u1)) = side_bd[1].get(&c) {
+                                hull.push((c, l0.min(l1), u0.max(u1)));
+                            }
+                        }
+                        hull.sort_unstable_by_key(|h| h.0);
+                        for (c, l, u) in hull {
+                            if self.dom.infeasible {
+                                break;
+                            }
+                            let had = self.dbg_on && self.dbg_contains();
+                            self.dom.set_external_tag(2);
+                            if l > self.dom.lo[c] + 1e-9 {
+                                self.dom.tighten_lower(self.p, c, l);
+                                self.sb_prop_stats[2] += 1;
+                                bound_changes += 1;
+                            }
+                            if u < self.dom.up[c] - 1e-9 {
+                                self.dom.tighten_upper(self.p, c, u);
+                                self.sb_prop_stats[2] += 1;
+                                bound_changes += 1;
+                            }
+                            self.dom.set_external(false);
+                            if had && !self.dbg_contains() {
+                                self.dbg_lost(&format!("strong branching probing bounds x{c} in [{l}, {u}]"), true);
+                            }
+                        }
+                    }
                     // `ENOMOTO_MIP_SB_TIGHTEN` (試作、既定では使わない): 一般整数列で、子の LP 値から凸性で境界を締める
                     // (CBC の `CBCNODE_TIGHTEN_BOUNDS`、CbcNode.cpp)。LP の値は x_j の境界の凸関数なので、下の子の値 o_d から
                     // 1 単位あたりの増分 (o_d − z)/(v − ⌊v⌋) を取ると、x_j <= t の値は z + (v − t)·増分 以上。これが打ち切り値を
@@ -27808,7 +27850,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if !super::pseudocost::gap1().is_empty() {
                 eprintln!("MIP: GAP1 {}: child selection down {} up {}; branching selections {}, with ties {} (candidates in ties {}), changed by the queue counts {}; objective proofs not violated beyond the tolerance {}", super::pseudocost::gap1(), self.gap1_stats[0], self.gap1_stats[1], self.gap1_stats[2], self.gap1_stats[3], self.gap1_stats[4], self.gap1_stats[5], self.gap1_stats[6]);
             }
-            eprintln!("MIP: objective propagation: pruned {} nodes, tightened {} bounds; strong branching children infeasible by propagation {}, propagated bounds passed to child LPs {}", self.obj_prop_stats[0], self.obj_prop_stats[1], self.sb_prop_stats[0], self.sb_prop_stats[1]);
+            eprintln!("MIP: objective propagation: pruned {} nodes, tightened {} bounds; strong branching children infeasible by propagation {}, propagated bounds passed to child LPs {}, node bounds from both children {} (ENOMOTO_MIP_SB_PROBEBD)", self.obj_prop_stats[0], self.obj_prop_stats[1], self.sb_prop_stats[0], self.sb_prop_stats[1], self.sb_prop_stats[2]);
             if s3propstat() {
                 let g = |k: usize| S3PROP[k].load(std::sync::atomic::Ordering::Relaxed);
                 eprintln!("MIP: S3PROPSTAT row propagation at nodes (all threads): infeasible {}, tightened integer {} continuous {}", g(0), g(1), g(2));
