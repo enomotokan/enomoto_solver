@@ -127,6 +127,22 @@ pub struct Domain {
     impl_adj: Option<std::sync::Arc<Vec<Vec<u32>>>>,
     /// 固定されて、含意を伝播するのを待つ 2 値列。
     impl_queue: Vec<usize>,
+    /// 試作 `ENOMOTO_MIP_ROOT_OBJ_PROBE_HULL=2` (analysis/objprobehull_20261124): 0-1 列の値から 0-1 でない列の境界への含意
+    /// (`x_j = v ⇒ y >= b` / `y <= b`、変数の境界の式 `y >= l0 + (l1 - l0) x_j` を 2 本の含意に分けたもの) の表。[`BoundImpl`]
+    bimpl: Option<std::sync::Arc<BoundImpl>>,
+    /// [`Self::bimpl`] の伝播を待つ列 (固定された 0-1 列 = 向き、境界が動いた y = 対偶)
+    bimpl_queue: Vec<usize>,
+    /// [`Self::bimpl`] で締めた回数 [x_j の固定から y, y の範囲から x_j (対偶)]
+    pub bimpl_stats: [u64; 2],
+}
+
+/// 0-1 列の値から列の境界への含意の表 ([`Domain::add_bound_implications`])。
+#[derive(Clone, Debug, Default)]
+pub struct BoundImpl {
+    /// 文字 `2j + v` (x_j = v) ごとの (y, 上限か, 値): x_j = v ⇒ y <= 値 (上限) / y >= 値
+    pub by_lit: Vec<Vec<(u32, bool, f64)>>,
+    /// y ごとの (文字 `2j + v`, 上限か, 値): 同じ含意を y の側から引く (対偶: y の範囲が値を外れたら x_j = 1 - v)
+    pub by_col: Vec<Vec<(u32, bool, f64)>>,
 }
 
 thread_local! {
@@ -195,6 +211,9 @@ impl Domain {
             global_up: p.col_up.clone(),
             impl_adj: None,
             impl_queue: Vec::new(),
+            bimpl: None,
+            bimpl_queue: Vec::new(),
+            bimpl_stats: [0; 2],
             cong: super::hnf::table_for(p),
             row_cap: if env_str!("ENOMOTO_MIP_NO_ROWCAP").is_some() { vec![f64::INFINITY; p.m] } else { p.rows.iter().map(|r| r.iter().map(|&(j, a)| a.abs() * (p.col_up[j] - p.col_lo[j])).fold(0.0f64, f64::max)).collect() },
         };
@@ -414,6 +433,11 @@ impl Domain {
         if self.impl_adj.is_some() && self.lo[j] == self.up[j] && (self.lo[j] == 0.0 || self.lo[j] == 1.0) && p.is_int[j] {
             self.impl_queue.push(j);
         }
+        if let Some(b) = &self.bimpl {
+            if !b.by_col[j].is_empty() || (p.is_int[j] && self.lo[j] == self.up[j] && (self.lo[j] == 0.0 || self.lo[j] == 1.0) && !b.by_lit[2 * j + self.lo[j] as usize].is_empty()) {
+                self.bimpl_queue.push(j);
+            }
+        }
         if self.lo[j] > self.up[j] + bound_tol(self.lo[j]) {
             if !self.infeasible {
                 self.conflict = Some(ConflictSrc::Col(j));
@@ -482,6 +506,28 @@ impl Domain {
         }
     }
 
+    /// 試作 `ENOMOTO_MIP_ROOT_OBJ_PROBE_HULL=2`: 含意 (x_j = v ⇒ y <= b (上限) / y >= b) を表に足す。`list` は (j, v, y, 上限か, b)。
+    /// 足したら、今の定義域で成り立つ向き (固定済みの x_j・範囲を外れた y) も待ち行列に積む。呼び手が [`Self::propagate`] する。根で呼ぶこと
+    pub fn add_bound_implications(&mut self, p: &MipProblem, list: &[(usize, usize, usize, bool, f64)]) {
+        if list.is_empty() {
+            return;
+        }
+        let n = p.n;
+        let arc = self.bimpl.get_or_insert_with(|| std::sync::Arc::new(BoundImpl { by_lit: vec![Vec::new(); 2 * n], by_col: vec![Vec::new(); n] }));
+        let b = std::sync::Arc::make_mut(arc);
+        for &(j, v, y, upper, val) in list {
+            b.by_lit[2 * j + v].push((y as u32, upper, val));
+            b.by_col[y].push(((2 * j + v) as u32, upper, val));
+            self.bimpl_queue.push(j);
+            self.bimpl_queue.push(y);
+        }
+    }
+
+    /// [`Self::bimpl`] の含意の本数
+    pub fn bound_implication_count(&self) -> usize {
+        self.bimpl.as_ref().map_or(0, |b| b.by_lit.iter().map(|l| l.len()).sum())
+    }
+
     /// 試作 `ENOMOTO_MIP_FIXMORE` (src/mip/fixmore.rs): 今固定されている 0-1 列を含意の伝播の待ち行列に積む ([`Self::add_implications`]
     /// より前に固定されていた列の含意も伝播させる)。
     pub fn queue_fixed_binaries(&mut self, p: &MipProblem) {
@@ -497,7 +543,7 @@ impl Domain {
 
     /// 伝播を待っている行・含意が残っているか (`propagate` が手間の上限で打ち切ったか)。
     pub fn has_pending(&self) -> bool {
-        !self.queue.is_empty() || !self.impl_queue.is_empty()
+        !self.queue.is_empty() || !self.impl_queue.is_empty() || !self.bimpl_queue.is_empty()
     }
 
     /// 記録を `pos` まで巻き戻す (境界と活動量を戻し、矛盾の印を消す)。
@@ -521,6 +567,7 @@ impl Domain {
         }
         self.queue.clear();
         self.impl_queue.clear();
+        self.bimpl_queue.clear();
     }
 
     /// 根まで戻し、保留中の大域的な締め付けを適用する。
@@ -648,7 +695,54 @@ impl Domain {
                     break;
                 }
             }
-            let Some(i) = self.queue.pop() else { break };
+            // 試作 `ENOMOTO_MIP_ROOT_OBJ_PROBE_HULL=2`: 0-1 列の値から列の境界への含意 (理由は含意と同じく記録しない)
+            if let Some(b) = self.bimpl.clone() {
+                while let Some(k) = self.bimpl_queue.pop() {
+                    // 向き: x_k = v に固定されていれば、y の境界を締める
+                    if p.is_int[k] && self.lo[k] == self.up[k] && (self.lo[k] == 0.0 || self.lo[k] == 1.0) {
+                        let lits = &b.by_lit[2 * k + self.lo[k] as usize];
+                        work += lits.len();
+                        for &(y, upper, val) in lits {
+                            let y = y as usize;
+                            let t = if upper { self.tighten_upper(p, y, val) } else { self.tighten_lower(p, y, val) };
+                            self.bimpl_stats[0] += t as u64;
+                            if self.infeasible {
+                                break;
+                            }
+                        }
+                    }
+                    // 対偶: y の範囲が含意の値を外れたら、x_j = 1 - v
+                    if !self.infeasible {
+                        let rel = &b.by_col[k];
+                        work += rel.len();
+                        for &(lit, upper, val) in rel {
+                            let out = if upper { self.lo[k] > val + bound_tol(val) } else { self.up[k] < val - bound_tol(val) };
+                            if !out {
+                                continue;
+                            }
+                            let (j, v) = ((lit / 2) as usize, (lit % 2) as f64);
+                            let t = if v == 1.0 { self.tighten_upper(p, j, 0.0) } else { self.tighten_lower(p, j, 1.0) };
+                            self.bimpl_stats[1] += t as u64;
+                            if self.infeasible {
+                                break;
+                            }
+                        }
+                    }
+                    if self.infeasible {
+                        break;
+                    }
+                }
+                if self.infeasible {
+                    break;
+                }
+            }
+            let Some(i) = self.queue.pop() else {
+                // `ENOMOTO_MIP_ROOT_OBJ_PROBE_HULL=2` の含意が待ち行列に残っていれば続ける (含意だけで動いた列が行を持たないとき)
+                if self.bimpl.is_some() && (!self.bimpl_queue.is_empty() || (self.impl_adj.is_some() && !self.impl_queue.is_empty())) {
+                    continue;
+                }
+                break;
+            };
             self.in_queue[i] = false;
             // 走査を省いた行は数えない
             let (use_up, use_lo) = self.row_sides(p, i);
