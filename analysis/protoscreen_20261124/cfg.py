@@ -12,6 +12,8 @@ P1 = {  # 試作の番号: (名前, 環境変数, 1 スレッドで回すか, 4 
     9: ("bfrt", {"ENOMOTO_MIP_NODELP_BFRT_GROUP": "1"}, True, True, "lpiter_20261123"),
     10: ("ppi", {"ENOMOTO_MIP_PROOFPROP": "i"}, False, True, "proofprop_20261123"),
     11: ("sbpb", {"ENOMOTO_MIP_SB_PROBEBD": "1"}, True, True, "treegap_20261123"),
+    # 12 番目は後から足した (分担表 shards.json は 1〜11 のまま。12 は shards_c12.json・plan12.py、既定の行は共有)
+    12: ("cutu", {"ENOMOTO_MIP_CUTOFF_USER_TREE": "1"}, True, True, "ti6_20261124"),
 }
 CFGS = {"def_t1": {}, "def_t4": {}}
 for k, (name, env, t1, t4, _) in P1.items():

@@ -61,3 +61,12 @@ khb05250・p0201 × 21 設定 × 種 1、上限 10 秒 (`python run.py 0 確か�
 - 分担 7: 先端 ed107692d (src は 7d54b3ced と同じ) を `maturin develop --release` で入れ、check_default.py で 6 問とも一致を確かめてから回し始めた (2026-11-24)。
 - 12 番目の試作 (木の中の打ち切り値の判定に利用者・TPRE の打ち切り値も数える、HuKp が作成中) は、名前が届いたら別の小さな台本で P の 1・4 スレッドを足す
   (既定はこの計測の def_t1・def_t4 の行を共有)。
+
+## 7. 12 番目の試作 (後から足した)
+
+- 12 cutu: `ENOMOTO_MIP_CUTOFF_USER_TREE=1` (analysis/ti6_20261124、HuKp)。木の中の「打ち切り値に使える値があるか」に外側の求解の打ち切り値
+  (利用者の `ENOMOTO_MIP_CUTOFF`・TPRE の予備の解の値・再スタートで引き継いだ値) も数える。1・4 スレッド。
+- 分担表は別: `python plan12.py 2` → shards_c12.json (58 問 × 種 1〜3 × {cutu_t1, cutu_t4} = 348 回、60 秒、2 分担、各 1.59 時間)。
+  回し方 `python run.py K shards_c12.json res_c12_sK.jsonl` (K = 0・1)。既定は shards.json の def_t1・def_t4 の行を共有する (同じ分担ではないので組ではない)。
+- shards.json (1〜11 番) は作り直していない (分担 0〜7 はすでに回し始めている)。summ.py は res_s*.jsonl と res_c12_s*.jsonl の両方を読む。
+- ビルド: この試作の入った先端で作り直してから回す (分担 7 を回している間は作り直さない)。
