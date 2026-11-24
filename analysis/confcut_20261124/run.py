@@ -30,7 +30,7 @@ if OUT.exists():
     for l in OUT.read_text().splitlines():
         r = json.loads(l); done.add((r["problem"], r["cfg"], r["seed"]))
 KEYS = ["nodes", "lp_iters", "cut_rows_total", "node_cut_secs", "leaves_inf", "leaves_bound", "conflicts_rows", "lit_conflicts", "proofs_live",
-        "sep_calls", "cand_conf", "cand_proof", "in_lp_conf", "in_lp_proof", "n_rounds", "nodes_with", "pruned_with", "clq_checked", "clq_redundant"]
+        "sep_calls", "cand_conf", "cand_proof", "in_lp_conf", "in_lp_proof", "n_rounds", "nodes_with", "pruned_with", "clq_checked", "clq_redundant", "lit_live", "lit_live_binary"]
 
 
 def one(job):

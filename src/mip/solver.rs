@@ -28614,8 +28614,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 試作 `ENOMOTO_MIP_CONFCUT` の数 (診断 `ENOMOTO_MIP_CONFCUT_DIAG=1` なら試作なしでも、ログなしで 1 行出す。analysis/confcut_20261124)
         if (env_str!("ENOMOTO_MIP_CONFCUT").is_some() || env_str!("ENOMOTO_MIP_CONFCUT_DIAG").is_some()) && !self.params.submip {
             let c = &self.confcut_stats;
+            let lb = self.lit_conflicts.count_binary(self.p, &self.dom.global_lo, &self.dom.global_up);
             eprintln!(
-                "CONFCUT_DIAG: nodes {} lp_iters {} cut_rows_total {} node_cut_secs {:.3} leaves_inf {} leaves_bound {} conflicts_rows {} lit_conflicts {} proofs_live {} | sep_calls {} cand_conf {} cand_proof {} in_lp_conf {} in_lp_proof {} n_rounds {} nodes_with {} pruned_with {} clq_checked {} clq_redundant {}",
+                "CONFCUT_DIAG: nodes {} lp_iters {} cut_rows_total {} node_cut_secs {:.3} leaves_inf {} leaves_bound {} conflicts_rows {} lit_conflicts {} proofs_live {} | sep_calls {} cand_conf {} cand_proof {} in_lp_conf {} in_lp_proof {} n_rounds {} nodes_with {} pruned_with {} clq_checked {} clq_redundant {} lit_live {} lit_live_binary {}",
                 self.nodes,
                 self.lp.total_iterations(),
                 self.next_cut_id,
@@ -28625,7 +28626,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.conflicts_added,
                 self.lit_stats[0],
                 self.dual_proofs.iter().filter(|r| r.1.is_finite()).count(),
-                c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9]
+                c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9],
+                lb.0,
+                lb.1
             );
         }
         if self.params.verbose {

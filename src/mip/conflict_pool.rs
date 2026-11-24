@@ -383,6 +383,13 @@ impl LitConflictPool {
         }
     }
 
+    /// 診断 (`ENOMOTO_MIP_CONFCUT_DIAG`): 残っている衝突の数と、そのうち全てのリテラルが 0-1 列 (大域的な境界 [0, 1]) のものの数
+    pub fn count_binary(&self, p: &MipProblem, glo: &[f64], gup: &[f64]) -> (usize, usize) {
+        let live: Vec<&Vec<Lit>> = self.slots.iter().flatten().collect();
+        let bin = live.iter().filter(|c| c.iter().all(|&(j, _, _)| p.is_int[j] && glo[j] == 0.0 && gup[j] == 1.0)).count();
+        (live.len(), bin)
+    }
+
     /// 定義域の記録の位置 `start` より後に境界が変わった列を含む衝突で伝播する (固定点まで、各回の後に行の伝播も)。
     /// 矛盾なら `Err`、そうでなければ締めた境界の数。
     pub fn propagate(&mut self, p: &MipProblem, dom: &mut Domain, start: usize) -> Result<usize, ()> {
