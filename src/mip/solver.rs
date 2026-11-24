@@ -18383,7 +18383,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.poly_diag_raised.clear();
         let sb_iters0 = self.sb_iters;
         self.rootsb_active = false;
+        let sb_lps0 = self.sb_lps;
         let r = self.select_branch_inner(frac, node_obj, depth);
+        // 診断 `ENOMOTO_MIP_SBTRACE=N` (振る舞いは変えない、sbadapt_20261124 6 節): 部分 MIP でない始めの N ノードで、分枝の選び方を 1 行ずつ出す
+        // (ノード番号・深さ・ノードの値・候補の数・この選びで解いた強分枝の LP・伝播で切った子の累計・結果)
+        if !self.params.submip && env_str!("ENOMOTO_MIP_SBTRACE").and_then(|v| v.parse::<u64>().ok()).is_some_and(|n| self.nodes < n) {
+            let out = match &r {
+                BranchAction::Branch { col, value } => format!("branch {col} {value:.6}"),
+                BranchAction::Resolve => "resolve".to_string(),
+                BranchAction::Prune => "prune".to_string(),
+            };
+            eprintln!("SBTRACE {} {depth} {node_obj:.6} {} {} {} {out}", self.nodes, frac.len(), self.sb_lps - sb_lps0, self.sb_prop_stats[0]);
+        }
         // 試作 `ENOMOTO_MIP_ROOTSB`: 強めた強分岐の反復の合計を数える。`f` なら木の強分岐の予算 (`sb_iters`) に数えない
         if self.rootsb_active {
             self.rootsb_used += self.sb_iters - sb_iters0;
