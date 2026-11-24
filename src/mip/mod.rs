@@ -696,6 +696,15 @@ pub fn solve_mip(
             if solver::end_diag() || params.verbose {
                 eprintln!("MIP: polished the solution ({:.2}s)", t_solve.elapsed().as_secs_f64());
             }
+            if polish_strict_mode() >= 2 && (solver::end_diag() || params.verbose || env_str!("ENOMOTO_MIP_POLISH_STATS").is_some()) {
+                use std::sync::atomic::Ordering;
+                eprintln!(
+                    "MIP: POLISH_STRICT=2: incumbent polishes {} (replaced {}), {:.3}s",
+                    INC_POLISH[0].load(Ordering::Relaxed),
+                    INC_POLISH[1].load(Ordering::Relaxed),
+                    INC_POLISH[2].load(Ordering::Relaxed) as f64 / 1e9
+                );
+            }
             if r.status == MipStatus::Optimal {
                 r.best_bound = z;
             } else {
@@ -796,10 +805,81 @@ fn exact_objective(p: &MipProblem, x: &[f64]) -> f64 {
 /// 解き直した解は、元の問題の違反 (境界・行) が増えず目的値が悪くならないとき、または違反が真に減って目的値の悪化が
 /// 相対 1e-6 以下のときに採る。最小化形の目的値を返す
 /// (誤差補償つきの和)。`ENOMOTO_MIP_NO_POLISH` なら丸めと目的値の計算し直しだけ。
-/// 試作 `ENOMOTO_MIP_POLISH_STRICT` (既定では使わない): [`polish_solution`] を時間切れの回でも回し、違反が減る解き直しは目的値が悪くなっても採る
+/// 試作 `ENOMOTO_MIP_POLISH_STRICT` (既定では使わない。analysis/nattai_20261125/) の段階: 0 = 使わない、
+/// 1 = [`polish_solution`] を時間切れの回でも回し、違反が減る解き直しは目的値が悪くなっても採る、
+/// 2 = 1 に加えて、暫定解を受け入れるたびに [`polish_in_problem`] で研磨し、打ち切り値・共有する最良値も研磨した値にする
+pub(super) fn polish_strict_mode() -> u8 {
+    static V: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    *V.get_or_init(|| match env_str!("ENOMOTO_MIP_POLISH_STRICT") {
+        Some(v) if v == "2" => 2,
+        Some(v) if v != "0" => 1,
+        _ => 0,
+    })
+}
+
 fn polish_strict() -> bool {
-    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| env_str!("ENOMOTO_MIP_POLISH_STRICT").is_some_and(|v| v != "0"))
+    polish_strict_mode() >= 1
+}
+
+/// `ENOMOTO_MIP_POLISH_STRICT=2` の集計: 研磨した回数、解を取り替えた回数、かかった時間 (ナノ秒)
+pub(super) static INC_POLISH: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+
+/// `ENOMOTO_MIP_POLISH_STRICT=2` (試作): 暫定解 `x` (問題 `p` の空間、目的値 `z`) の整数列を固定した `p` を、B&B の LP とは別に
+/// 一から (前処理 + 単体法) 解き直す。B&B の LP はカット・境界のずらしの入った問題を許容誤差の範囲で解くので、行ごとには許容誤差以下の違反が
+/// 多くの行で積もり、目的値が本当の値より低い暫定解になる (neos-5188808-nattai: 112 行 × 9.5e-7 で 1e-4)。採り方は [`polish_solution`] の
+/// 試作と同じ (違反が増えず目的値が悪くならない、または違反が真に減る)。取り替えたら新しい目的値を返す
+pub(super) fn polish_in_problem(p: &MipProblem, x: &mut Vec<f64>, z: f64) -> Option<f64> {
+    use crate::types::{LinearExpr, RowSense, Sense};
+    use std::sync::atomic::Ordering;
+    if p.is_int.iter().all(|&b| b) {
+        return None;
+    }
+    let t = std::time::Instant::now();
+    let vars: Vec<VariableData> = (0..p.n)
+        .map(|j| {
+            let (lb, ub) = if p.is_int[j] { (x[j].round(), x[j].round()) } else { (p.col_lo[j], p.col_up[j]) };
+            VariableData { vtype: VarType::Continuous, lb, ub }
+        })
+        .collect();
+    let objective = Objective {
+        expr: LinearExpr { coeffs: (0..p.n).filter(|&j| p.cost[j] != 0.0).map(|j| (j, p.cost[j])).collect(), constant: p.offset },
+        sense: Sense::Minimize,
+    };
+    let mut cons = Vec::with_capacity(p.m);
+    for i in 0..p.m {
+        let expr = LinearExpr { coeffs: p.rows[i].iter().copied().collect(), constant: 0.0 };
+        let (lo, up) = (p.row_lo[i], p.row_up[i]);
+        if lo == up {
+            cons.push(ConstraintRow { expr, sense: RowSense::Eq, rhs: lo });
+            continue;
+        }
+        if lo.is_finite() {
+            cons.push(ConstraintRow { expr: expr.clone(), sense: RowSense::Ge, rhs: lo });
+        }
+        if up.is_finite() {
+            cons.push(ConstraintRow { expr, sense: RowSense::Le, rhs: up });
+        }
+    }
+    let r = solve_lp(&vars, &objective, &cons, RootSolver::Simplex, LpOptions::default());
+    INC_POLISH[0].fetch_add(1, Ordering::Relaxed);
+    let mut out = None;
+    if let (Status::Optimal, Some(mut xn)) = (r.status, r.x) {
+        for j in 0..p.n {
+            if p.is_int[j] {
+                xn[j] = x[j].round();
+            }
+        }
+        let zn = exact_objective(p, &xn);
+        let (vo, vn) = (max_violation(p, x), max_violation(p, &xn));
+        let scale = z.abs().max(1.0);
+        if (vn <= vo.max(1e-9) && zn <= z + 1e-9 * scale) || vn < vo {
+            *x = xn;
+            out = Some(zn);
+            INC_POLISH[1].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    INC_POLISH[2].fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    out
 }
 
 fn polish_solution(variables: &[VariableData], objective: &Objective, constraints: &[ConstraintRow], p: &MipProblem, x: &mut Vec<f64>, lp: bool) -> f64 {
