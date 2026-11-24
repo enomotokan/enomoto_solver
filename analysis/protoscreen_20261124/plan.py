@@ -18,7 +18,7 @@ for f in glob.glob(str(D.parent / "final_20261118" / "res_P_s*.jsonl")):
             if r["cfg"] in ("def", "def_t1"):
                 T[(r["problem"], "t1" if r["cfg"] == "def_t1" else "t4", r["seed"])] = min(r["result"]["time"], TL) if solved(r) else TL
 def est(p, c, s): return T.get((p, "t1" if c.endswith("_t1") else "t4", s), TL) + 8
-CF = list(CFGS)
+CF = [c for c in CFGS if not c.startswith("cutu_")]  # 12 番目 (cutu) は plan12.py の別の分担表
 groups = {(p, s): [(p, c, s) for c in CF[(i + s) % len(CF):] + CF[:(i + s) % len(CF)]] for i, p in enumerate(PROBS) for s in (1, 2, 3)}
 gl = sorted(groups.items(), key=lambda kv: -sum(est(*t) for t in kv[1]))
 load = [0.0] * NS; shards = [[] for _ in range(NS)]
