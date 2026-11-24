@@ -5068,9 +5068,57 @@ impl<'a, L: MipLp> Solver<'a, L> {
         cands.retain(|c| c.coefs.len() <= maxlen);
     }
 
+    /// 試作 `ENOMOTO_MIP_CONFCUT` の `n` ([`Solver::confcut_node_round`]): 衝突・証明のカットの候補だけで、[`Self::node_cut_round`] と同じく
+    /// 長さで絞り ([`Self::node_cut_maxlen`])、[`select_cuts`] で `ENOMOTO_T_MIP_NODE_MAX_CUTS` 本まで選び、プールに入れて年齢で行を外してから加える
+    pub(super) fn node_conf_round(&mut self, x: &[f64]) -> bool {
+        let p = self.p;
+        let max_rows = p.m + (2 * p.m).max(500);
+        if self.lp.num_rows() >= max_rows {
+            return false;
+        }
+        let mut cands: Vec<Candidate> = Vec::new();
+        for (c, r, is_proof) in self.confcut_rows(x) {
+            if let Some(cand) = conf_candidate(c, r, x) {
+                self.confcut_stats[if is_proof { 2 } else { 1 }] += 1;
+                if self.confcut_fp.len() > 200_000 {
+                    self.confcut_fp.clear();
+                }
+                self.confcut_fp.insert(cut_fingerprint(&cand.coefs, cand.rhs), is_proof);
+                cands.push(cand);
+            }
+        }
+        self.node_cut_maxlen(&mut cands);
+        if cands.is_empty() {
+            return false;
+        }
+        let room = max_rows - self.lp.num_rows();
+        let chosen = select_cuts(cands, room.min(tunable!("ENOMOTO_T_MIP_NODE_MAX_CUTS", 20usize, usize)), p);
+        if chosen.is_empty() {
+            return false;
+        }
+        let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = chosen.into_iter().map(|c| (c.coefs, f64::NEG_INFINITY, c.rhs)).collect();
+        if env_str!("ENOMOTO_MIP_NODE_CUTS_KEEP").is_none() {
+            for (c, _, r) in &rows {
+                self.add_to_pool(c, *r);
+            }
+            self.remove_aged_cuts();
+        }
+        self.add_cut_rows(&rows);
+        true
+    }
+
     /// LP にカットの行を加える (年齢 0)。
     pub(super) fn add_cut_rows(&mut self, rows: &[(Vec<(usize, f64)>, f64, f64)]) {
         self.debug_check_cut_rows(rows);
+        // 試作 `ENOMOTO_MIP_CONFCUT`: 衝突・証明のカット (分離の候補にしたものの指紋) が入った数を数える
+        if !self.confcut_fp.is_empty() {
+            for (c, _, r) in rows {
+                if let Some(&is_proof) = self.confcut_fp.get(&cut_fingerprint(c, *r)) {
+                    self.confcut_stats[if is_proof { 4 } else { 3 }] += 1;
+                    self.confcut_node_added = true;
+                }
+            }
+        }
         self.sync_cut_age();
         self.lp.add_rows(rows);
         self.cut_age.extend(std::iter::repeat_n(0, rows.len()));
@@ -7196,6 +7244,36 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 keep_best(&mut cands, n0, self.p);
             }
         }
+        // 試作 `ENOMOTO_MIP_CONFCUT` ([`super::solver::confcut_has`]、analysis/confcut_20261124): 今の点が破る衝突・双対証明を候補に入れる
+        // (選び方・外し方はほかの候補と同じ。目的関数の下界の行と同じ「extra」に数える)
+        if super::solver::confcut_has('c') || super::solver::confcut_has('p') {
+            let rows = self.confcut_rows(x);
+            self.confcut_stats[0] += 1;
+            // 診断 `ENOMOTO_MIP_CONFCUT_DIAG=2`: 0-1 の衝突の候補のうち、2 つのリテラルが clique の表で隣接する (同時に真になれない) もの
+            // (その辺だけで衝突が導けるので、衝突は辺の不等式より弱く冗長) を数える (README 5 節)
+            if env_str!("ENOMOTO_MIP_CONFCUT_DIAG") == Some("2") {
+                let g = self.clique_graph_get();
+                for (c, _, is_proof) in &rows {
+                    if *is_proof || c.len() > 200 || c.iter().any(|&(_, a)| a.abs() != 1.0) {
+                        continue;
+                    }
+                    let lits: Vec<u32> = c.iter().map(|&(j, a)| 2 * j as u32 + u32::from(a < 0.0)).collect();
+                    let red = (0..lits.len()).any(|i| (i + 1..lits.len()).any(|k| g.adjacent(lits[i], lits[k])));
+                    self.confcut_stats[8] += 1;
+                    self.confcut_stats[9] += red as u64;
+                }
+            }
+            for (c, r, is_proof) in rows {
+                if let Some(cand) = conf_candidate(c, r, x) {
+                    self.confcut_stats[if is_proof { 2 } else { 1 }] += 1;
+                    if self.confcut_fp.len() > 200_000 {
+                        self.confcut_fp.clear();
+                    }
+                    self.confcut_fp.insert(cut_fingerprint(&cand.coefs, cand.rhs), is_proof);
+                    cands.push(cand);
+                }
+            }
+        }
         tag(&mut cands, sepprof::SRC_EXTRA);
         let mut nsrc0 = cands.len();
         // 元の行 1 本ずつ (診断用 `ENOMOTO_MIP_DEBUG_NO_ROW_CUTS`: 使わない)
@@ -9092,6 +9170,37 @@ fn finish_cut_impl(
     // 密な tableau 行の候補を主と裏のカットが同時に持っていた、analysis/biglp_20261121 4 節。値は変わらない)
     coefs.shrink_to_fit();
     Some(Candidate { coefs, rhs, efficacy, forced: false, src: 0, sub: 0, kind })
+}
+
+/// 試作 `ENOMOTO_MIP_CONFCUT`: 衝突・証明の行 `coefs x <= rhs` (係数は列の昇順) を分離の候補にする。[`finish_cut_impl`] の終わりと同じく、
+/// 係数の幅が 1e6 を超えるものを捨て、最大係数 1 に揃え、破れ > 1e-6 (1 + |右辺|)・効き目 >= 1e-5 のものだけを返す
+/// (暫定解を切るかの確かめはしない: 打ち切り値の証明・打ち切り値で刈ったノードの衝突は暫定解を切りうる)
+fn conf_candidate(mut coefs: Vec<(usize, f64)>, mut rhs: f64, x: &[f64]) -> Option<Candidate> {
+    coefs.retain(|&(_, c)| c != 0.0);
+    if coefs.is_empty() {
+        return None;
+    }
+    let cmax = coefs.iter().fold(0.0f64, |m, &(_, c)| m.max(c.abs()));
+    let cmin = coefs.iter().fold(f64::INFINITY, |m, &(_, c)| m.min(c.abs()));
+    if cmax / cmin > 1e6 {
+        return None;
+    }
+    let s = 1.0 / cmax;
+    for c in coefs.iter_mut() {
+        c.1 *= s;
+    }
+    rhs *= s;
+    let act: f64 = coefs.iter().map(|&(j, c)| c * x[j]).sum();
+    let norm: f64 = coefs.iter().map(|&(_, c)| c * c).sum::<f64>().sqrt();
+    let viol = act - rhs;
+    if viol <= 1e-6 * (1.0 + rhs.abs()) {
+        return None;
+    }
+    let efficacy = viol / norm;
+    if efficacy < 1e-5 {
+        return None;
+    }
+    Some(Candidate { coefs, rhs, efficacy, forced: false, src: 0, sub: 0, kind: 0 })
 }
 
 /// 効き目の大きい順に、既に選んだものとほぼ平行 (|cos| > 0.99) なものを除いて選ぶ。
