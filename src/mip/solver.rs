@@ -4049,7 +4049,7 @@ pub(crate) fn heur1t(c: char) -> bool {
 ///   b_t は害の出た pg の ln r の最大 1.50 と効いた neos-1171448 の最小 2.57 の中ほど、a_t はその両端で f_t が 0.1・0.9 になる
 ///   ln 9 / 0.535 ≈ 4.1 を丸めた (README 2 節)。木の中の大近傍探索の時間の割合を、既定の割合から
 ///   4 スレッドのヒューリスティクス役の割合 (`ENOMOTO_T_MIP_HEUR_ROLE_FRAC`) へ f_t だけ寄せる (`HEUR1T` の `l` は f_t = 1 に当たる)。
-///   木を始めて 1 秒・100 ノード・全体の時間の `ENOMOTO_T_MIP_HEUR_TRIG_WARM_FRAC` (5%) までは測らず f_t = 0 (役の起動の判定と同じ温まり)。
+///   木を始めて 1 秒・全体の時間の `ENOMOTO_T_MIP_HEUR_TRIG_WARM_FRAC` (5%) までは測らず f_t = 0 (役の起動の判定と同じ温まり。ノード数の下限は使わない)。
 /// - `FJSYNC_LABEL` (同期の FJ の解の名札) はそのまま有効にする。
 pub(crate) fn heur_adapt() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -25176,7 +25176,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let done = (1.0 - w).max(0.0);
         let v = if tree_el > 0.0 { done / tree_el } else { 0.0 };
         let est = if v > 1e-12 { w.max(0.0) / v } else { f64::INFINITY };
-        let warm = tree_el >= 1.0 && self.nodes >= tunable!("ENOMOTO_T_MIP_HEUR_TRIG_NODES", 100u64, u64) && tree_el >= tunable!("ENOMOTO_T_MIP_HEUR_TRIG_WARM_FRAC", 0.05, f64) * (tree_el + left);
+        // 温まり: 木を始めて 1 秒・全体の時間の `ENOMOTO_T_MIP_HEUR_TRIG_WARM_FRAC` (5%) (役の起動の判定と同じ。ノード数の下限 100 は
+        // 使わない: 1 ノード 0.17 秒の neos-1171448 では 100 ノードまで 15 秒かかり、その間の最初の大近傍探索 (50・100 ノード目) が既定の割合になった)
+        let warm = tree_el >= 1.0 && tree_el >= tunable!("ENOMOTO_T_MIP_HEUR_TRIG_WARM_FRAC", 0.05, f64) * (tree_el + left);
         let f = if !warm {
             0.0
         } else if left <= 0.0 || !est.is_finite() {
