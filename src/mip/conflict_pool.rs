@@ -351,6 +351,45 @@ impl LitConflictPool {
         Ok(())
     }
 
+    /// 試作 `ENOMOTO_MIP_CONFCUT` (analysis/confcut_20261124): 全てのリテラルが 0-1 列 (整数で大域的な境界が [0, 1]) の `x >= 1`・`x <= 0` で
+    /// ある衝突を線形の不等式 Σ_{x>=1} x − Σ_{x<=0} x <= k − 1 − (x<=0 の数) (各リテラルの真の度合い x・1 − x の和 <= k − 1) にし、
+    /// 点 `x` が破るもの (破れ > 1e-6 (1 + |右辺|)) を (係数 (列の昇順), 右辺) で `out` に足す。0-1 でない列・大域的に固定された列を
+    /// 含む衝突は飛ばす (一般整数・連続のリテラルは線形にすると弱いか、1 つまでしか書けない: [`super::solver`] の `add_conflict_lits`)。
+    /// 年齢・統計は変えない
+    pub fn violated_binary_rows(&self, p: &MipProblem, glo: &[f64], gup: &[f64], x: &[f64], out: &mut Vec<(Vec<(usize, f64)>, f64)>) {
+        'c: for c in self.slots.iter().flatten() {
+            let (mut act, mut rhs) = (0.0, c.len() as f64 - 1.0);
+            for &(j, upper, v) in c {
+                if !p.is_int[j] || glo[j] != 0.0 || gup[j] != 1.0 {
+                    continue 'c;
+                }
+                if !upper && v == 1.0 {
+                    act += x[j];
+                } else if upper && v == 0.0 {
+                    act -= x[j];
+                    rhs -= 1.0;
+                } else {
+                    continue 'c;
+                }
+            }
+            if act - rhs <= 1e-6 * (1.0 + rhs.abs()) {
+                continue;
+            }
+            // リテラルは列・向きの順に並べてある (`add`)。同じ列の両側 (それ自体で矛盾) は使わない
+            if c.windows(2).any(|w| w[0].0 == w[1].0) {
+                continue;
+            }
+            out.push((c.iter().map(|&(j, upper, _)| (j, if upper { -1.0 } else { 1.0 })).collect(), rhs));
+        }
+    }
+
+    /// 診断 (`ENOMOTO_MIP_CONFCUT_DIAG`): 残っている衝突の数と、そのうち全てのリテラルが 0-1 列 (大域的な境界 [0, 1]) のものの数
+    pub fn count_binary(&self, p: &MipProblem, glo: &[f64], gup: &[f64]) -> (usize, usize) {
+        let live: Vec<&Vec<Lit>> = self.slots.iter().flatten().collect();
+        let bin = live.iter().filter(|c| c.iter().all(|&(j, _, _)| p.is_int[j] && glo[j] == 0.0 && gup[j] == 1.0)).count();
+        (live.len(), bin)
+    }
+
     /// 定義域の記録の位置 `start` より後に境界が変わった列を含む衝突で伝播する (固定点まで、各回の後に行の伝播も)。
     /// 矛盾なら `Err`、そうでなければ締めた境界の数。
     pub fn propagate(&mut self, p: &MipProblem, dom: &mut Domain, start: usize) -> Result<usize, ()> {
