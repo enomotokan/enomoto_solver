@@ -234,7 +234,7 @@ ENUM_ADAPT の s は `--tag ea --env ENOMOTO_MIP_ENUM_ADAPT=1` (enum の効い�
 - **enum と ENUM_ADAPT**: 害の neos8 は ENUM_ADAPT でも 4.6 → 9.6 秒 (HCoW の回、s1 = 0.064 で 1 度止めても、その前の周の固定費が残る)・8.9 秒 (9.3 節の 1 回、s1 = 0.205)。
   s は時間で決まるので機械と回で揺れる。nu25-pr12 (s1 1.115)・neos-960392 (1.857) は続ける側。**ENUM_ADAPT は P の enum の害 4 問を避けない** (どれも根で解ける短い問題で、
   残り時間に対する割合では固定費が小さく見える)。
-- **h1t**: 効いた 10teams だけが root_gap 0 (時間切れ・最初の解 13.7 秒)。害の 9 問 (mc11・misc07・pk1・markshare_4_0・mas76・swath1・eil33-2・noswot ほか) は root_gap 0.0017〜1。
+- **h1t**: 効いた 10teams だけが root_gap 0 (時間切れ・最初の解 13.7 秒)。比 1.15 超の 8 問 (mc11・misc07・pk1・markshare_4_0・mas76・swath1・eil33-2・noswot) は root_gap 0.0017〜1。
   「根の下界 = 最適値」は解いている途中では分からないので、代わりの量 (下界が止まって暫定解だけが動く) が要る。
 - **lux**: 害の nw04・neos-960392・physiciansched6-2 (4 スレッド)・neos-827175 (4 スレッド) はどれも既定ではノード 0 (根で解ける)。physiciansched6-2 は 1 スレッドでは得 (0.61)。
   ノード 0 の問題での根の LP の遅れ (nw04) と、根で閉じなくなる (neos-827175) が害の型。特徴の候補は根の LP の時間の変化 (lux の LU の延ばしの失敗) だが、feat.py では測っていない。
