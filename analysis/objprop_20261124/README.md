@@ -1,0 +1,49 @@
+# objprop: 目的の伝播 (打ち切り値) の抜けの直し (2026-11-24、親の依頼・利用者の承認)
+
+監査 analysis/globalaudit_20261124 の 2.7 節 (O1〜O8) で洗い出された「目的の伝播 (`目的値 <= 打ち切り値` を 1 本の行として伝播) が抜けている所」の直し。
+前段の analysis/objprobehull_20261124 (7 節) で作った `ENOMOTO_MIP_ROOT_OBJPROP_GLOBAL=1` (O5) を土台にする。**どれも既定は変えない。**
+
+## 1. `ENOMOTO_MIP_OBJ_PROP` (O1、ノードの目的の伝播) を切った経緯
+
+- コードの注釈 (`Solver::propagate_objective`): 「既定では無効。neos-911970 の下界・暫定解は良くなるが、40 問では 2 回の比較ともわずかに悪化した (sgeomean +0.2〜0.3)」。
+- analysis/mip_opt_eval_20261011.md (パラメータの単独の評価の表): `ENOMOTO_MIP_OBJ_PROP` 有効で +0.6% (2 回)。
+- その後の記録では効きが見えない: treeclose_20261114 (「`OBJ_PROP=1` にしても締めた境界 0・刈ったノード 0」)、uccase12_neos-2978193-inde_20261020 (「目的関数の伝播は 1 回も効かない」)、
+  gap1_tree_20261109 (neos-957323 ではクリーク分割の下界が効かない)。
+- つまり切った根拠は「40 問・2 回で +0.2〜0.6%」(揺れの範囲に近い小さな悪化) で、当時は根の目的の伝播の大域化 (O5) も打ち切り値つきプロービングもなかった。
+  今の版で O5 と組み合わせて測り直す (3 節)。
+
+## 2. 試作 (どれも既定オフ)
+
+| 名前 | 監査の番号 | 中身 |
+|---|---|---|
+| `ENOMOTO_MIP_ROOT_OBJPROP_GLOBAL=1` | O5 | 根の打ち切り値つきプロービングの前に、根の定義域で行と目的の伝播をかけ、整数列の境界を大域的に置く (objprobehull 7 節) |
+| `ENOMOTO_MIP_OBJ_PROP=1` (既存) | O1 | ノードの伝播の不動点・LP の前の伝播で目的の行を伝播する |
+| `ENOMOTO_MIP_SB_OBJPROP=1` | O3 | 強分枝の子の伝播 (`SB_PROP`・`SB_PROBEBD`・`SB_ADAPT` のどれかで入る。既定では子の伝播そのものが切) で、`OBJ_PROP` が切でも目的の行を伝播する (`propagate_objective_sb`)。子の刈り・両方の子の共通の境界 (`SB_PROBEBD`) が締まる |
+| `ENOMOTO_MIP_OBJPROP_REDO=g` | O6 (A3) | 暫定解が良くなるたび (根の被約費用の固定のかけ直しと同じ所、`root_redcost_fixing`) に、大域的な境界で行と目的の行を交互に伝播して整数列を大域的に締める (既存の `global_obj_prop`、試作 `HO2_GOBJ=all` の本体。連続の目的の列は締めない形 `global_obj_prop_ex(.., false)` にした: 打ち切り値を連続列の境界に言い直すと LP に害、objprobehull 1.2 節の mas76) |
+| `ENOMOTO_MIP_OBJPROP_REDO=p` | O6 | 木の中で打ち切り値が下がった後、待ち行列からノードを取って定義域を根に戻した所 (ノードの分枝を積む前) で、根の打ち切り値つきプロービングをかけ直す (`objprop_redo_tree`) |
+
+### 2.1 O6 の「いつかけ直すか」(新しい閾値は作らない)
+
+- `g`: 目的の行 1 本と行の伝播を大域的な境界でかける。手間は伝播 1〜数回 (`ENOMOTO_T_MIP_HO2_GOBJ_PASSES` 既定 5 の既存の上限) で、改善のたびに既にかけている根の被約費用の固定と同じ所・同じ回数。
+  絞りの物差しは置かない (改善 1 回あたりの手間が伝播数回で小さい。fiber・qnet1・mzzv42z で 1 回 0.001 秒以下)。
+- `p`: 打ち切り値つきプロービングは重いので、根の回と同じ既存の物差しで決める:
+  1. 打ち切り値が前にかけた回 (根の回を含む) より下がっていること (同じ打ち切り値では結果が変わらない)。
+  2. 根の回と同じ見切り: 根の LP の値と今の暫定解の相対ギャップ <= `ENOMOTO_T_MIP_ROOT_OBJ_PROBE_MAX_GAP` (0.05)、今も自由な根の LP の分数の 0-1 列が
+     `..._MIN_CANDS` (500) 本以上。見切り (`..._GIVEUP`)・回り (`..._PASSES`) も同じ。
+  3. 時間は根の回と合わせて `..._TIME_FRAC` (時間上限の 0.2) の枠の中。
+  - 候補と根の LP の値は、根の回 (`root_obj_probe`) で控えた根の LP の解を使う (木の中の LP はノードの LP なので使わない)。LP のカットの行も使わない
+    (ノードの LP の行は根と違う)。主 (番号 0) だけが回す。
+  - 両側矛盾 (打ち切り値より良い解なし) なら、1 スレッドでは暫定解を最適として終える。木を分け合うときは終え方の受け渡しを作っていないので、証明を捨てて続ける (正しさは変わらない)。
+- 固定・締め付けを大域的に置いてよい理由は根の回と同じ (打ち切り値より良い解だけを残す。objprobehull 1.1 節)。
+
+### 2.2 誤答の確かめ
+
+`bash analysis/objprop_20261124/fuzz.sh` (試作を全部: ROOT_OBJPROP_GLOBAL・OBJ_PROP・OBJPROP_REDO=gp・SB_PROBEBD + SB_OBJPROP、見切りを外す MIN_CANDS=0・MAX_GAP=1):
+fuzz 7 本とも誤答 0 (fuzz_tiny 0/400・fuzz_highs 0/300・fuzz_objint 0/1000・fuzz_slack 0・fuzz_tiny2 0/400・fuzz_objint2 0/1000・fuzz_slack2 0)、cargo test 424 通過・失敗 0。
+
+## 3. P の計測 (58 問 × 種 1〜3 × 60 秒)
+
+設定は cfg.py、分担は plan.py → shards.json (1 スレッドは 3 本同時、4 スレッドは 1 本ずつ)、`python analysis/objprop_20261124/run.py K`、集計は summ.py (protoscreen の写し。
+各試作を既定と、cfg.py の 6 番目の相手とも比べる)。
+
+(結果は下に追記)

@@ -109,6 +109,8 @@ pub struct Domain {
     low_water: usize,
     /// 根に戻ったときに適用する大域的な境界の締め付け (列, 上限か, 値)。
     pending_global: Vec<(usize, bool, f64)>,
+    /// 試作 `ENOMOTO_MIP_GLOBALFIX` の `b`: 根の伝播が矛盾した (打ち切り値より良い解がない)。以後 `reset_to_root` のたびに矛盾にする
+    pub root_dead: bool,
     /// 診断用: デバッグ解 (含意の伝播がデバッグ解を切ったら表示する)。
     pub dbg_sol: Option<std::sync::Arc<Vec<f64>>>,
     /// 根に戻った回数 (活動量の誤差の蓄積を防ぐための定期的な再計算に使う)。
@@ -127,6 +129,22 @@ pub struct Domain {
     impl_adj: Option<std::sync::Arc<Vec<Vec<u32>>>>,
     /// 固定されて、含意を伝播するのを待つ 2 値列。
     impl_queue: Vec<usize>,
+    /// 試作 `ENOMOTO_MIP_ROOT_OBJ_PROBE_HULL=2` (analysis/objprobehull_20261124): 0-1 列の値から 0-1 でない列の境界への含意
+    /// (`x_j = v ⇒ y >= b` / `y <= b`、変数の境界の式 `y >= l0 + (l1 - l0) x_j` を 2 本の含意に分けたもの) の表。[`BoundImpl`]
+    bimpl: Option<std::sync::Arc<BoundImpl>>,
+    /// [`Self::bimpl`] の伝播を待つ列 (固定された 0-1 列 = 向き、境界が動いた y = 対偶)
+    bimpl_queue: Vec<usize>,
+    /// [`Self::bimpl`] で締めた回数 [x_j の固定から y, y の範囲から x_j (対偶)]
+    pub bimpl_stats: [u64; 2],
+}
+
+/// 0-1 列の値から列の境界への含意の表 ([`Domain::add_bound_implications`])。
+#[derive(Clone, Debug, Default)]
+pub struct BoundImpl {
+    /// 文字 `2j + v` (x_j = v) ごとの (y, 上限か, 値): x_j = v ⇒ y <= 値 (上限) / y >= 値
+    pub by_lit: Vec<Vec<(u32, bool, f64)>>,
+    /// y ごとの (文字 `2j + v`, 上限か, 値): 同じ含意を y の側から引く (対偶: y の範囲が値を外れたら x_j = 1 - v)
+    pub by_col: Vec<Vec<(u32, bool, f64)>>,
 }
 
 thread_local! {
@@ -157,6 +175,39 @@ pub fn chg_count() -> u64 {
 pub fn act_work() -> u64 {
     ACT_WORK.with(|w| w.get())
 }
+
+/// 試作 `ENOMOTO_MIP_GLOBALFIX` (analysis/globalfix_20261124、既定では使わない): 値の文字で部品を選ぶ。
+/// `a` 根のノード (深さ 0) の整数列の締め付けを大域的な境界に入れる、`b` `reset_to_root` で保留中の大域的な締め付けを置いた後に伝播し切って
+/// 大域的な境界にする、`c` 長さ 1 のリテラルの衝突を大域的な固定にする。
+pub(crate) fn globalfix(c: char) -> bool {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| match env_str!("ENOMOTO_MIP_GLOBALFIX") {
+        Some(v) if v != "0" && v != "off" => v.to_string(),
+        _ => String::new(),
+    })
+    .contains(c)
+}
+
+/// [`globalfix`] の数え (全スレッドの合計、`ENOMOTO_MIP_LOG` の終わりに出す): [`b` の伝播の回数, `b` で締めた整数列の境界の数,
+/// `b` で固定した整数列の数, `b` の矛盾の回数, `a` を当てた回数, `a` で大域にした整数列の境界の数, `a` で固定した整数列の数,
+/// `c` で大域に置いた固定の数]
+pub(crate) static GF_STATS: [std::sync::atomic::AtomicU64; 8] = [const { std::sync::atomic::AtomicU64::new(0) }; 8];
+
+/// 診断 `ENOMOTO_MIP_DIAG_GLOBALAUDIT` (analysis/globalaudit_20261124、既定では使わない。解き方は変えない): 大域的に分かった情報を
+/// 捨てている量を数えて `ENOMOTO_MIP_LOG` に出す
+pub(crate) fn globalaudit_on() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| env_str!("ENOMOTO_MIP_DIAG_GLOBALAUDIT").is_some_and(|v| v != "0"))
+}
+
+/// [`globalaudit_on`] の数え (全スレッドの合計): [保留中の大域的な締め付けを置いた根への戻りの回数, 置いた締め付けの数,
+/// 捨てた待ち行列を伝播すると締まる整数列の境界の数 (大域的な境界にない), そのうち固定になる整数列の数, その伝播が矛盾した回数,
+/// 締まる連続列の境界の数]
+pub(crate) static GA_RESET: [std::sync::atomic::AtomicU64; 6] = [const { std::sync::atomic::AtomicU64::new(0) }; 6];
+
+/// [`globalaudit_on`] の数え (全スレッドの合計): [リテラルの衝突をプールに足した数, そのうち (大域的に成り立つリテラルを除いて) 長さ 1 のもの
+/// (= 大域的な固定だが、プールに入れるだけで大域的な境界には置かない), 長さ 1 のうち取り込み (ほかのスレッドから) のもの]
+pub(crate) static GA_CONF: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
 
 impl Domain {
     /// これまでに伝播で走査した行の長さの合計 (スレッドごと。ヒューリスティクスの手間の上限に使う)。
@@ -189,12 +240,16 @@ impl Domain {
             proof_reason_budget: u64::MAX,
             low_water: 0,
             pending_global: Vec::new(),
+            root_dead: false,
             dbg_sol: None,
             resets: 0,
             global_lo: p.col_lo.clone(),
             global_up: p.col_up.clone(),
             impl_adj: None,
             impl_queue: Vec::new(),
+            bimpl: None,
+            bimpl_queue: Vec::new(),
+            bimpl_stats: [0; 2],
             cong: super::hnf::table_for(p),
             row_cap: if env_str!("ENOMOTO_MIP_NO_ROWCAP").is_some() { vec![f64::INFINITY; p.m] } else { p.rows.iter().map(|r| r.iter().map(|&(j, a)| a.abs() * (p.col_up[j] - p.col_lo[j])).fold(0.0f64, f64::max)).collect() },
         };
@@ -414,6 +469,11 @@ impl Domain {
         if self.impl_adj.is_some() && self.lo[j] == self.up[j] && (self.lo[j] == 0.0 || self.lo[j] == 1.0) && p.is_int[j] {
             self.impl_queue.push(j);
         }
+        if let Some(b) = &self.bimpl {
+            if !b.by_col[j].is_empty() || (p.is_int[j] && self.lo[j] == self.up[j] && (self.lo[j] == 0.0 || self.lo[j] == 1.0) && !b.by_lit[2 * j + self.lo[j] as usize].is_empty()) {
+                self.bimpl_queue.push(j);
+            }
+        }
         if self.lo[j] > self.up[j] + bound_tol(self.lo[j]) {
             if !self.infeasible {
                 self.conflict = Some(ConflictSrc::Col(j));
@@ -482,6 +542,28 @@ impl Domain {
         }
     }
 
+    /// 試作 `ENOMOTO_MIP_ROOT_OBJ_PROBE_HULL=2`: 含意 (x_j = v ⇒ y <= b (上限) / y >= b) を表に足す。`list` は (j, v, y, 上限か, b)。
+    /// 足したら、今の定義域で成り立つ向き (固定済みの x_j・範囲を外れた y) も待ち行列に積む。呼び手が [`Self::propagate`] する。根で呼ぶこと
+    pub fn add_bound_implications(&mut self, p: &MipProblem, list: &[(usize, usize, usize, bool, f64)]) {
+        if list.is_empty() {
+            return;
+        }
+        let n = p.n;
+        let arc = self.bimpl.get_or_insert_with(|| std::sync::Arc::new(BoundImpl { by_lit: vec![Vec::new(); 2 * n], by_col: vec![Vec::new(); n] }));
+        let b = std::sync::Arc::make_mut(arc);
+        for &(j, v, y, upper, val) in list {
+            b.by_lit[2 * j + v].push((y as u32, upper, val));
+            b.by_col[y].push(((2 * j + v) as u32, upper, val));
+            self.bimpl_queue.push(j);
+            self.bimpl_queue.push(y);
+        }
+    }
+
+    /// [`Self::bimpl`] の含意の本数
+    pub fn bound_implication_count(&self) -> usize {
+        self.bimpl.as_ref().map_or(0, |b| b.by_lit.iter().map(|l| l.len()).sum())
+    }
+
     /// 試作 `ENOMOTO_MIP_FIXMORE` (src/mip/fixmore.rs): 今固定されている 0-1 列を含意の伝播の待ち行列に積む ([`Self::add_implications`]
     /// より前に固定されていた列の含意も伝播させる)。
     pub fn queue_fixed_binaries(&mut self, p: &MipProblem) {
@@ -497,7 +579,7 @@ impl Domain {
 
     /// 伝播を待っている行・含意が残っているか (`propagate` が手間の上限で打ち切ったか)。
     pub fn has_pending(&self) -> bool {
-        !self.queue.is_empty() || !self.impl_queue.is_empty()
+        !self.queue.is_empty() || !self.impl_queue.is_empty() || !self.bimpl_queue.is_empty()
     }
 
     /// 記録を `pos` まで巻き戻す (境界と活動量を戻し、矛盾の印を消す)。
@@ -521,17 +603,33 @@ impl Domain {
         }
         self.queue.clear();
         self.impl_queue.clear();
+        self.bimpl_queue.clear();
     }
 
     /// 根まで戻し、保留中の大域的な締め付けを適用する。
     pub fn reset_to_root(&mut self, p: &MipProblem) {
         self.backtrack_to(p, 0);
         let pend = std::mem::take(&mut self.pending_global);
+        let mut applied = 0u64;
         for (j, upper, v) in pend {
             let tighter = if upper { v < self.up[j] } else { v > self.lo[j] };
             if tighter {
                 self.set_bound(p, j, upper, v, false);
+                applied += 1;
             }
+        }
+        // 試作 `ENOMOTO_MIP_GLOBALFIX` の `b` (analysis/globalfix_20261124): 置いた締め付けから行 (と含意) を通して締まる境界を、待ち行列を
+        // 捨てずに根で伝播し切り、大域的な境界にする (`commit_root`)。根の定義域 = 大域的な境界 + 大域的に成り立つ推論なので、どのノード・
+        // どのスレッドでも成り立つ。矛盾したら (打ち切り値より良い解がない) 以後の根への戻りで毎回矛盾にする (`root_dead`)
+        if self.root_dead {
+            self.infeasible = true;
+        } else if applied > 0 && globalfix('b') {
+            self.globalfix_propagate(p);
+        }
+        // 診断 `ENOMOTO_MIP_DIAG_GLOBALAUDIT` (analysis/globalaudit_20261124): 下で伝播の待ち行列を捨てるので、置いた締め付けから行を通して
+        // 締まるはずの境界は大域的な境界に入らない。写しで伝播してその量を数える (解き方は変えない)
+        if applied > 0 && globalaudit_on() && !self.infeasible {
+            self.globalaudit_dropped(p, applied);
         }
         self.resets += 1;
         if self.resets % 64 == 0 {
@@ -539,6 +637,79 @@ impl Domain {
         }
         self.queue.iter().for_each(|&i| self.in_queue[i] = false);
         self.queue.clear();
+    }
+
+    /// 試作 `ENOMOTO_MIP_GLOBALFIX` の `b`: 根 (記録が空) で待ち行列を伝播し切り (手間の上限で打ち切られたら続けて、最大
+    /// `ENOMOTO_T_MIP_FIXMORE_ROUNDS` (既定 50) 回。FIXMORE の `propagate_all` と同じ)、結果を大域的な境界にする。矛盾なら
+    /// 記録を巻き戻して `root_dead` を立てる。
+    fn globalfix_propagate(&mut self, p: &MipProblem) {
+        use std::sync::atomic::Ordering::Relaxed;
+        debug_assert!(self.stack.is_empty());
+        let rounds = tunable!("ENOMOTO_T_MIP_FIXMORE_ROUNDS", 50usize, usize);
+        let mut ok = true;
+        for _ in 0..rounds {
+            if !self.propagate(p) {
+                ok = false;
+                break;
+            }
+            if !self.has_pending() {
+                break;
+            }
+        }
+        GF_STATS[0].fetch_add(1, Relaxed);
+        if !ok {
+            self.backtrack_to(p, 0);
+            self.root_dead = true;
+            self.infeasible = true;
+            GF_STATS[3].fetch_add(1, Relaxed);
+            return;
+        }
+        let (mut ti, mut fi) = (0u64, 0u64);
+        for c in &self.stack {
+            if p.is_int[c.col] {
+                ti += 1;
+            }
+        }
+        for j in 0..p.n {
+            if p.is_int[j] && self.lo[j] == self.up[j] && self.global_lo[j] < self.global_up[j] {
+                fi += 1;
+            }
+        }
+        GF_STATS[1].fetch_add(ti, Relaxed);
+        GF_STATS[2].fetch_add(fi, Relaxed);
+        if !self.stack.is_empty() {
+            self.commit_root();
+        }
+    }
+
+    /// [`globalaudit_on`] 用: 保留中の大域的な締め付けを置いた直後 (待ち行列を捨てる前) の定義域の写しを伝播し、締まる境界を数える。
+    /// 写しの伝播の手間はこのスレッドの数え (手間の期限・時計) から差し引く (解き方を変えない)
+    fn globalaudit_dropped(&self, p: &MipProblem, applied: u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (t0, a0, c0, d0, w0) = (crate::ticks::raw(), act_work(), chg_count(), DEBUG_WORK.with(|w| w.get()), work_cuts());
+        let mut d = self.clone();
+        let ok = d.propagate(p);
+        let (mut ti, mut fi, mut tc) = (0u64, 0u64, 0u64);
+        if ok {
+            for j in 0..p.n {
+                let t = (d.lo[j] > self.lo[j]) as u64 + (d.up[j] < self.up[j]) as u64;
+                if p.is_int[j] {
+                    ti += t;
+                    fi += (d.lo[j] == d.up[j] && self.lo[j] < self.up[j]) as u64;
+                } else {
+                    tc += t;
+                }
+            }
+        }
+        let t1 = crate::ticks::raw();
+        crate::ticks::add_raw(&std::array::from_fn(|k| t0[k].wrapping_sub(t1[k])));
+        ACT_WORK.with(|w| w.set(a0));
+        CHG_COUNT.with(|w| w.set(c0));
+        DEBUG_WORK.with(|w| w.set(d0));
+        WORK_CUTS.with(|w| w.set(w0));
+        for (k, v) in [1u64, applied, ti, fi, (!ok) as u64, tc].into_iter().enumerate() {
+            GA_RESET[k].fetch_add(v, Relaxed);
+        }
     }
 
     /// 大域的に (すべてのノードで) 有効な締め付け。根にいればすぐ、そうでなければ次に根へ戻ったときに適用する。
@@ -648,7 +819,54 @@ impl Domain {
                     break;
                 }
             }
-            let Some(i) = self.queue.pop() else { break };
+            // 試作 `ENOMOTO_MIP_ROOT_OBJ_PROBE_HULL=2`: 0-1 列の値から列の境界への含意 (理由は含意と同じく記録しない)
+            if let Some(b) = self.bimpl.clone() {
+                while let Some(k) = self.bimpl_queue.pop() {
+                    // 向き: x_k = v に固定されていれば、y の境界を締める
+                    if p.is_int[k] && self.lo[k] == self.up[k] && (self.lo[k] == 0.0 || self.lo[k] == 1.0) {
+                        let lits = &b.by_lit[2 * k + self.lo[k] as usize];
+                        work += lits.len();
+                        for &(y, upper, val) in lits {
+                            let y = y as usize;
+                            let t = if upper { self.tighten_upper(p, y, val) } else { self.tighten_lower(p, y, val) };
+                            self.bimpl_stats[0] += t as u64;
+                            if self.infeasible {
+                                break;
+                            }
+                        }
+                    }
+                    // 対偶: y の範囲が含意の値を外れたら、x_j = 1 - v
+                    if !self.infeasible {
+                        let rel = &b.by_col[k];
+                        work += rel.len();
+                        for &(lit, upper, val) in rel {
+                            let out = if upper { self.lo[k] > val + bound_tol(val) } else { self.up[k] < val - bound_tol(val) };
+                            if !out {
+                                continue;
+                            }
+                            let (j, v) = ((lit / 2) as usize, (lit % 2) as f64);
+                            let t = if v == 1.0 { self.tighten_upper(p, j, 0.0) } else { self.tighten_lower(p, j, 1.0) };
+                            self.bimpl_stats[1] += t as u64;
+                            if self.infeasible {
+                                break;
+                            }
+                        }
+                    }
+                    if self.infeasible {
+                        break;
+                    }
+                }
+                if self.infeasible {
+                    break;
+                }
+            }
+            let Some(i) = self.queue.pop() else {
+                // `ENOMOTO_MIP_ROOT_OBJ_PROBE_HULL=2` の含意が待ち行列に残っていれば続ける (含意だけで動いた列が行を持たないとき)
+                if self.bimpl.is_some() && (!self.bimpl_queue.is_empty() || (self.impl_adj.is_some() && !self.impl_queue.is_empty())) {
+                    continue;
+                }
+                break;
+            };
             self.in_queue[i] = false;
             // 走査を省いた行は数えない
             let (use_up, use_lo) = self.row_sides(p, i);
