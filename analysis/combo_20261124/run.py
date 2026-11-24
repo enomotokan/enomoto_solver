@@ -6,7 +6,7 @@
 
 分担の組み替え (README 7 節): takeover.json に {"K": N} があれば、分担 K の終わりの N 組 (def と combo の 2 回で 1 組) を手伝いに渡す。
 - 持ち主 (run.py K): 渡した N 組を回さない。takeover.json は始めるときに読む (書き換えたら、取り込んでから同じコマンドで回し直す)。
-- 手伝い (run.py K --tail): 渡された N 組だけを res_sK_tail.jsonl に足す。止めても同じコマンドで続きから回る。
+- 手伝い (run.py K --tail): 渡された N 組だけを、終わりの組から逆順に res_sK_tail.jsonl に足す。止めても同じコマンドで続きから回る。
 takeover.json がなければ、これまでと同じ動き。"""
 import json, os, subprocess, sys, time
 from pathlib import Path
@@ -26,7 +26,9 @@ n_tail = 2 * int(json.loads(TO.read_text()).get(str(k), 0)) if TO.exists() else 
 assert len(mine) % 2 == 0 and n_tail <= len(mine)
 if TAIL:
     assert n_tail > 0, f"takeover.json で分担 {k} の組が渡されていない"
-    mine = mine[len(mine) - n_tail:]
+    # 手伝いは終わりの組から逆順に回す (持ち主が回し直す前に渡した組へ進んでも、重なりが途中の数組で済む)。組の中の順はそのまま
+    tail = mine[len(mine) - n_tail:]
+    mine = [r for i in range(len(tail) - 2, -1, -2) for r in tail[i:i + 2]]
 else:
     mine = mine[:len(mine) - n_tail]
 OUT = Path(argv[3]) if len(argv) > 3 else D / (f"res_s{k}_tail.jsonl" if TAIL else f"res_s{k}.jsonl")
