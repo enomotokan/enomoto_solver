@@ -151,7 +151,13 @@ MIPLIB 240 問の組み合わせの計測 (analysis/combo_20261124) で、combo 
 
 ## 6. 参考: mushroom-best の SB_ADAPT=1 (sbpb を f_B の確率で効かせる)
 
-(結果は下に追記)
+既定に `ENOMOTO_MIP_SB_ADAPT=1` だけ足した形 (`res_sbadapt.jsonl`): **600 秒で時間切れ (6533 ノード)**。
+
+- sbpb をそのまま足した形 (469 秒・4631 ノード) より悪い。
+- SB_ADAPT は sbpb (確率 f_B) のほかに、退化のノードでの強分枝・HiGHS 並みの予算 (f_A)・衝突の重みの床 (f_B) も変える。
+  mushroom-best ではどれかが害になり、f_B・f_A の物差し (deg・cpn) では止まらなかった。
+- mushroom-best の sbpb の害は、sbadapt の形では避けられない。直しの見当はまだない
+  (強分枝の子の伝播で何が変わるかを見る必要がある。未調査)。
 
 ## 7. 1 スレッドでも結果が回ごとに変わる (経過時間に依る判定)
 
