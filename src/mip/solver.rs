@@ -1156,6 +1156,15 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) propcut_rc: Vec<(f64, Vec<(usize, bool, f64, f64)>)>,
     /// `ENOMOTO_MIP_TREE4_PROOFCUT` (試作) の数: [ラウンド, 加えた行, 加えた後に刈ったノード]
     t4_pc: [u64; 3],
+    /// 試作 `ENOMOTO_MIP_CONFCUT` ([`confcut_has`]、analysis/confcut_20261124) の数: [分離で候補を作った回, 衝突の候補, 証明の候補,
+    /// LP に入った衝突のカット, LP に入った証明のカット, 'n' のラウンド, カットが入ったノード, そのうち刈ったノード,
+    /// (診断 `ENOMOTO_MIP_CONFCUT_DIAG=2`) clique の表で調べた衝突の候補, そのうち隣接する 2 リテラルを含むもの]
+    /// (LP に入った数はカットの指紋 `confcut_fp` で数えるので、プールから戻ったものも含む)
+    pub(super) confcut_stats: [u64; 10],
+    /// 試作 `ENOMOTO_MIP_CONFCUT`: 分離の候補にした衝突・証明のカットの指紋 (真なら証明)
+    pub(super) confcut_fp: std::collections::HashMap<u64, bool>,
+    /// 試作 `ENOMOTO_MIP_CONFCUT`: このノードで衝突・証明のカットが LP に入ったか
+    pub(super) confcut_node_added: bool,
     /// 利用者向けのログ ([`crate::log`]) の探索の経過の見出しを出したか。
     user_log_header: bool,
     /// 処理中 (最後に取り出した) のノードの下界 (根では根の LP の値)。待ち行列にないので全体の下界に足す。
@@ -1460,6 +1469,11 @@ pub(super) struct Solver<'a, L: MipLp> {
     cwr_diag_w: f64,
     /// 試作 `ENOMOTO_MIP_CUTCONF`: 証明のプールに cut-based の衝突の制約を入れている最中 (分類 2 にする)
     cutconf_push: bool,
+    /// 試作 `ENOMOTO_MIP_CONFCUT`: 次に `push_pool_row` で入れる行が衝突の制約 (`add_conflict_lits`) か
+    conf_push: bool,
+    /// 証明ごとの、衝突の制約 (`add_conflict_lits` で入れた行) か (`dual_proofs` と同じ並び。試作 `ENOMOTO_MIP_CONFCUT` が使う。
+    /// ほかのスレッドから取り込んだ行は区別できないので偽)
+    proof_conf: std::collections::VecDeque<bool>,
     multi_secs: f64,
     /// HiGHS 式のカット選択の状態 (これまでの最良のスコア、残す下限の係数)
     pub(super) cutsel_best: f64,
@@ -3646,6 +3660,14 @@ fn tree_restart_on() -> bool {
 ///   `p`・`l` と同じ) を持ち越す (HiGHS の `performRestart` は下界とカットプールを持ち越す)。
 /// - `s`: 木の中の再スタートの後の根では、カットのループを `ENOMOTO_T_MIP_TREEEFF_ROUNDS` (5) ラウンドまでにする (カットは行として持ち込む)。
 /// - `h`: 木の中の再スタートの後の根では、軽いヒューリスティクスだけを回す (暫定解があるとき)。
+/// 試作 `ENOMOTO_MIP_CONFCUT=文字` (既定では使わない、analysis/confcut_20261124/README.md): 衝突・双対証明のうち今の LP 解が破るものを
+/// 分離のカットの候補に入れる ([`Solver::confcut_rows`])。`1`・`c`: 衝突 (証明のプールの衝突の行と、リテラルのプールの 0-1 だけの衝突)。
+/// `p`: 衝突の行でない証明 (打ち切り値の証明・Farkas の証明など)。`n`: ノードの分離をしない取り出したノードでも、この候補だけで
+/// 1 ラウンド選んで加える ([`Solver::confcut_node_round`])
+pub(super) fn confcut_has(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_CONFCUT").is_some_and(|v| v.contains(c) || (c == 'c' && v.contains('1')))
+}
+
 pub(super) fn treeeff(c: char) -> bool {
     env_def!("ENOMOTO_MIP_TREEEFF", "rpsh").is_some_and(|v| v.contains(c))
 }
@@ -5847,6 +5869,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         t4_rc_extra: Vec::new(),
         propcut_rc: Vec::new(),
         t4_pc: [0; 3],
+        confcut_stats: [0; 10],
+        confcut_fp: std::collections::HashMap::new(),
+        confcut_node_added: false,
         user_log_header: false,
         cur_lb: f64::NEG_INFINITY,
         root_lb: f64::NEG_INFINITY,
@@ -6046,6 +6071,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         cwr_diag_w: 0.0,
         lx_hist: [0; 9],
         cutconf_push: false,
+        conf_push: false,
+        proof_conf: std::collections::VecDeque::new(),
         multi_secs: 0.0,
         cutsel_best: 0.0,
         cutsel_factor: 0.9,
@@ -9969,6 +9996,48 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.t4_pc[1] += rows.len() as u64;
         self.add_cut_rows(&rows);
         true
+    }
+
+    /// 試作 `ENOMOTO_MIP_CONFCUT` ([`confcut_has`]): 点 `x` が破る衝突・証明の行 (係数 (列の昇順), 右辺, 証明か)。サブ MIP では使わない。
+    /// 打ち切り値の証明は今の打ち切り値で右辺を取る (打ち切り値より良い解に対して成り立つ)。衝突の行・リテラルの衝突も、打ち切り値で
+    /// 刈ったノードから作ったものは打ち切り値より良い解に対してだけ成り立つが、どれも大域的な境界と大域的な行だけから導いたもの
+    /// (ノードの局所的な境界はリテラルとして衝突の中に残る) なので、どのノードでも妥当 (README 2 節)
+    pub(super) fn confcut_rows(&self, x: &[f64]) -> Vec<(Vec<(usize, f64)>, f64, bool)> {
+        let (cc, cp) = (confcut_has('c'), confcut_has('p'));
+        let mut out: Vec<(Vec<(usize, f64)>, f64, bool)> = Vec::new();
+        if self.params.submip || !(cc || cp) {
+            return out;
+        }
+        for k in 0..self.dual_proofs.len() {
+            let conf = self.proof_conf.get(k).copied().unwrap_or(false);
+            if !(if conf { cc } else { cp }) {
+                continue;
+            }
+            let rhs = self.proof_rhs(k);
+            if !rhs.is_finite() {
+                continue;
+            }
+            let c = &self.dual_proofs[k].0;
+            let act: f64 = c.iter().map(|&(j, a)| a * x[j]).sum();
+            if act - rhs > 1e-6 * (1.0 + rhs.abs()) {
+                let mut c = c.clone();
+                c.sort_by_key(|&(j, _)| j);
+                out.push((c, rhs, !conf));
+            }
+        }
+        if cc {
+            let mut v = Vec::new();
+            self.lit_conflicts.violated_binary_rows(self.p, &self.dom.global_lo, &self.dom.global_up, x, &mut v);
+            out.extend(v.into_iter().map(|(c, r)| (c, r, false)));
+        }
+        out
+    }
+
+    /// 試作 `ENOMOTO_MIP_CONFCUT` の `n`: 衝突・証明のカットの候補だけで、ノードの分離と同じ選び方・外し方の 1 ラウンド
+    /// ([`Self::node_cut_round`] の分離を [`Self::confcut_rows`] に置き換えたもの)。加えたら真
+    fn confcut_node_round(&mut self, x: &[f64]) -> bool {
+        self.confcut_stats[5] += 1;
+        self.node_conf_round(x)
     }
 
     /// 処理を始めたノードの下界を記録する。木を分け合うときは、このスレッドの下界 (処理中のノードと自分の待ち行列の
@@ -14152,6 +14221,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // `ENOMOTO_MIP_TREE4_PROOFCUT`: このノードでの証明の行のラウンド数と、行を加えたか
             let mut t4pc_rounds = 0usize;
             let mut t4pc_added = false;
+            // 試作 `ENOMOTO_MIP_CONFCUT` の `n`: このノードで衝突・証明だけのラウンドを回したか
+            let mut cc_round_done = false;
+            self.confcut_node_added = false;
             let action = loop {
                 // 試作 `ENOMOTO_MIP_GEN_LAZY` の外し直し (年齢が上限を超えた戻した行。`ENOMOTO_T_MIP_GEN_LAZY_AGE`)
                 self.gen_lazy_redrop();
@@ -15382,6 +15454,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                     }
                 }
+                // 試作 `ENOMOTO_MIP_CONFCUT` の `n` ([`confcut_has`]): 取り出したノードで 1 回、衝突・証明のカットの候補だけで選んで加える
+                // (ノードの分離より前に回す。ノードの分離を回せば、残った破れた衝突・証明はそちらの候補にも入る)
+                if confcut_has('n') && !self.params.submip && !cc_round_done && node.depth > 0 && plunge_depth == 0 && !hcm_sep {
+                    cc_round_done = true;
+                    let t_nc = Instant::now();
+                    let tk_nc = crate::ticks::total();
+                    let it_nc = self.lp.total_iterations();
+                    let added = self.confcut_node_round(&x);
+                    self.node_cut_secs += t_nc.elapsed().as_secs_f64();
+                    self.node_cut_ticks += crate::ticks::total() - tk_nc;
+                    self.node_cut_work += self.lp.total_iterations().saturating_sub(it_nc) as f64 + tunable!("ENOMOTO_T_MIP_TIMEDEP_SEP_COST", 0.5, f64) * self.avg_node_iters() as f64;
+                    if added {
+                        resolves += 1;
+                        node_cut_resolve = Some(Instant::now());
+                        nc_res_it = self.lp.total_iterations();
+                        nc_res_tk = crate::ticks::total();
+                        continue;
+                    }
+                }
                 // `ENOMOTO_MIP_TREE_SEP`: 取り出したノードでは、プールのラウンドの後でも分離し ([`Solver::tree_sep_start`] で始めるか
                 // を決める)、LP の値が前のラウンドまでの伸びの 1.01 倍を超えて伸び、時間の予算に収まる間
                 // `ENOMOTO_T_MIP_TREE_SEP_ROUNDS` (既定 5) ラウンドまで繰り返す。分離しても加わらなければそのノードでは打ち止め
@@ -15546,6 +15637,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if t4pc_added && matches!(action, None) {
                 self.t4_pc[2] += 1;
             }
+            if self.confcut_node_added {
+                self.confcut_stats[6] += 1;
+                self.confcut_stats[7] += matches!(action, None) as u64;
+            }
             if pclog_on() && !self.params.submip {
                 self.pclog_emit(&node, pcl, rp_obj0, rp_obj, if action.is_some() { "br" } else { "lp" });
             }
@@ -15665,6 +15760,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             };
             let basis = keep_basis.then_some(basis);
             let prot = if keep_basis { self.basis_protected_cuts() } else { None };
+            // 診断 `ENOMOTO_MIP_DIAG_GLOBALAUDIT` (analysis/globalaudit_20261124、解き方は変えない): 根のノードを分枝するときに、根の定義域が
+            // 大域的な境界より締まっている (子に引き継がれず、根へ戻ると捨てる) 列を理由ごとに数える
+            if node.depth == 0 && super::domain::globalaudit_on() && self.params.verbose && !self.params.submip && self.snap.is_none() {
+                self.globalaudit_root();
+            }
             // 強分岐で子の LP が最適まで解けていれば、その値を子の下界にする
             let sb_bounds = self.last_sb.filter(|&(j, _, _)| j == col && env_str!("ENOMOTO_MIP_NO_SB_CHILD_BOUND").is_none());
             let mut of_fixes = std::mem::take(&mut self.of_node_fixes);
@@ -21141,9 +21241,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let (mut dp, mut base, mut st, mut keys) = (std::collections::VecDeque::new(), std::collections::VecDeque::new(), std::collections::VecDeque::new(), std::collections::VecDeque::new());
         let mut refs = std::collections::VecDeque::new();
         let mut cuts = std::collections::VecDeque::new();
+        // `proof_conf` は詰め直す前の並びのまま写して、残すものだけ取る
+        let old_conf = std::mem::take(&mut self.proof_conf);
         let it = std::mem::take(&mut self.dual_proofs).into_iter().zip(std::mem::take(&mut self.proof_base)).zip(std::mem::take(&mut self.proof_state)).zip(std::mem::take(&mut self.proof_keys)).zip(std::mem::take(&mut self.proof_ref)).zip(std::mem::take(&mut self.proof_cuts));
         for (k, (((((row, b), s), ky), rf), pc)) in it.enumerate() {
             if s != ProofState::Dead {
+                self.proof_conf.push_back(old_conf.get(k).copied().unwrap_or(false));
                 map.insert(old_first + k as u64, new_first + dp.len() as u64);
                 dp.push_back(row);
                 base.push_back(b);
@@ -21323,6 +21426,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.proof_keys.push_back(keys);
         self.proof_cuts.push_back(if state == ProofState::Imported { None } else { self.proof_pending_cuts.take() });
         self.proof_ref.push_back(false);
+        self.proof_conf.push_back(self.conf_push);
         self.dual_proofs.push_back((coefs, konst, obj));
         let k = self.dual_proofs.len() - 1;
         if self.proof_snap.is_some() && self.proof_root_tight(base, self.proof_rhs(k)) {
@@ -23550,6 +23654,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return false;
         }
         let ok = self.lit_conflicts.add(&l, self.importing);
+        // 診断 `ENOMOTO_MIP_DIAG_GLOBALAUDIT` (analysis/globalaudit_20261124): 長さ 1 の衝突 (大域的な固定) を数える
+        if ok && super::domain::globalaudit_on() {
+            use std::sync::atomic::Ordering::Relaxed;
+            let g = &super::domain::GA_CONF;
+            g[0].fetch_add(1, Relaxed);
+            if l.len() == 1 {
+                g[1].fetch_add(1, Relaxed);
+                g[2].fetch_add(self.importing as u64, Relaxed);
+            }
+        }
         if ok {
             self.lit_stats[0] += 1;
             // 作ったときには知らせず、刈り込み・締め付けに使われたときに知らせる (`ENOMOTO_MIP_TREE_SHARE_LITS_AT_ONCE` なら作ったときに)
@@ -23682,7 +23796,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         });
         self.conflicts_added += 1;
+        self.conf_push = !self.importing;
         self.push_pool_row(coefs, ones - 1.0, false);
+        self.conf_push = false;
         true
     }
 
@@ -24171,6 +24287,75 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP: RSTCRIT t: newly fixed columns hold {nnz_new} of {nnz_free} nonzeros ({:.1}%) at node {}; node limit of the tree restart ignored", 100.0 * s, self.nodes);
         }
         big
+    }
+
+    /// 診断 `ENOMOTO_MIP_DIAG_GLOBALAUDIT` (analysis/globalaudit_20261124): 根のノード (深さ 0) を分枝する時点で、定義域が大域的な境界より
+    /// 締まっている列を、その境界を最後に変えた記録の理由ごとに数えて出す。深さ 0 の変更はすべて根で (打ち切り値より良い解について)
+    /// 成り立つが、子には分枝だけが渡り、`reset_to_root` で巻き戻すので、大域的な境界に入れていない分は木では捨てることになる。
+    /// 理由の文字は [`Domain::reason_counts_int`] と同じ (B 決定・含意 (-1)、R 行、L 局所の被約費用、S 強分枝、O オービトープ、P 双対証明、
+    /// F リテラルの衝突、J 目的の伝播、E その他、C カットプール。P・C は通し番号つきの理由も含む)
+    fn globalaudit_root(&self) {
+        let p = self.p;
+        let d = &self.dom;
+        let len = d.stack_len();
+        // (列, 上限か) ごとの最後の記録の位置と理由
+        let mut last: std::collections::HashMap<(usize, bool), (usize, i32)> = std::collections::HashMap::new();
+        for k in 0..len {
+            let (j, upper, _, r) = d.trail_entry(k);
+            last.insert((j, upper), (k, r));
+        }
+        let cls = |r: i32| -> usize {
+            match r {
+                r if super::domain::proof_reason_id(r).is_some() => 5,
+                r if super::domain::cut_reason_id(r).is_some() => 9,
+                -1 => 0,
+                r if r >= 0 => 1,
+                -3 => 2,
+                -4 => 3,
+                -5 => 4,
+                -6 => 5,
+                -7 => 6,
+                -8 => 7,
+                -9 => 9,
+                _ => 8,
+            }
+        };
+        let (mut tight, mut fixed, mut cont) = ([0usize; 10], [0usize; 10], 0usize);
+        let mut no_rec = 0usize;
+        for j in 0..p.n {
+            let lo_t = d.lo[j] > d.global_lo[j];
+            let up_t = d.up[j] < d.global_up[j];
+            if !(lo_t || up_t) {
+                continue;
+            }
+            if !p.is_int[j] {
+                cont += 1;
+                continue;
+            }
+            let a = if lo_t { last.get(&(j, false)).copied() } else { None };
+            let b = if up_t { last.get(&(j, true)).copied() } else { None };
+            let Some((_, r)) = [a, b].into_iter().flatten().max_by_key(|e| e.0) else {
+                no_rec += 1;
+                continue;
+            };
+            tight[cls(r)] += 1;
+            if d.lo[j] == d.up[j] && d.global_lo[j] < d.global_up[j] {
+                fixed[cls(r)] += 1;
+            }
+        }
+        let nm = ['B', 'R', 'L', 'S', 'O', 'P', 'F', 'J', 'E', 'C'];
+        let fmt = |c: &[usize; 10]| nm.iter().zip(c).filter(|(_, &v)| v > 0).map(|(n, v)| format!("{n}{v}")).collect::<Vec<_>>().join(",");
+        let (nt, nf) = (tight.iter().sum::<usize>(), fixed.iter().sum::<usize>());
+        eprintln!(
+            "MIP: GLOBALAUDIT root: at the root branching (restart {}, trail {len}): integer columns tighter than the global bounds {nt} [{}], of which fixed {nf} [{}] (no trail entry {no_rec}); continuous columns tighter {cont}; globally newly fixed integers {}, restart expected now {} / with the local fixes {} ({:.2}s)",
+            self.params.restarts,
+            fmt(&tight),
+            fmt(&fixed),
+            self.newly_fixed_ints(),
+            self.restart_expected(0),
+            self.restart_expected(nf),
+            self.start.elapsed().as_secs_f64()
+        );
     }
 
     /// 根の LP を解く前から新たに大域固定された整数列の数 ([`Self::maybe_restart`] の判定と同じ数え方)。
@@ -28426,6 +28611,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let s = self.clq_lazy_stats;
             eprintln!("MIP: CLQ_LAZY stats tid {}: dropped {} checks {} restored {} resolves {} still dropped {}", self.pool_tid, s[0], s[1], s[2], s[3], self.clq_lazy.len());
         }
+        // 試作 `ENOMOTO_MIP_CONFCUT` の数 (診断 `ENOMOTO_MIP_CONFCUT_DIAG=1` なら試作なしでも、ログなしで 1 行出す。analysis/confcut_20261124)
+        if (env_str!("ENOMOTO_MIP_CONFCUT").is_some() || env_str!("ENOMOTO_MIP_CONFCUT_DIAG").is_some()) && !self.params.submip {
+            let c = &self.confcut_stats;
+            eprintln!(
+                "CONFCUT_DIAG: nodes {} lp_iters {} cut_rows_total {} node_cut_secs {:.3} leaves_inf {} leaves_bound {} conflicts_rows {} lit_conflicts {} proofs_live {} | sep_calls {} cand_conf {} cand_proof {} in_lp_conf {} in_lp_proof {} n_rounds {} nodes_with {} pruned_with {} clq_checked {} clq_redundant {}",
+                self.nodes,
+                self.lp.total_iterations(),
+                self.next_cut_id,
+                self.node_cut_secs,
+                self.nra_leaves[0],
+                self.nra_leaves[1],
+                self.conflicts_added,
+                self.lit_stats[0],
+                self.dual_proofs.iter().filter(|r| r.1.is_finite()).count(),
+                c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9]
+            );
+        }
         if self.params.verbose {
             eprintln!("MIP: dual proofs and conflicts {} (conflicts added {} (from proofs {}), Farkas {}, pruned {} nodes, tightened {} bounds, rejected as numerically unreliable {})", self.dual_proofs.len(), self.conflicts_added, self.proof_conflicts, self.farkas_added, self.proof_prunes, self.proof_tightenings, self.proof_numeric_rejects);
             if proof_verify() {
@@ -28646,6 +28848,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 LPINF_HIST.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect::<Vec<_>>()
             );
             eprintln!("MIP: sibling backtracks {}; basis restores {} (basic count mismatch {}), first LP iterations after a restore {}", self.sibling_backtracks, self.restore_stats.0, self.restore_stats.1, self.restore_stats.2);
+            if super::domain::globalaudit_on() {
+                let g: Vec<u64> = super::domain::GA_RESET.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
+                eprintln!(
+                    "MIP: GLOBALAUDIT reset: returns to the root with pending global tightenings {} (tightenings applied {}); dropped propagation would tighten integer bounds {} (fixing {} integer columns), continuous bounds {}, infeasible {} (all threads, cumulative)",
+                    g[0], g[1], g[2], g[3], g[5], g[4]
+                );
+                let c: Vec<u64> = super::domain::GA_CONF.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
+                eprintln!("MIP: GLOBALAUDIT conflicts: literal conflicts added {}, of length 1 (global fixings kept only in the pool) {} (imported {}) (all threads, cumulative)", c[0], c[1], c[2]);
+            }
             if super::separation::hl2_d2_any() {
                 let d = &self.d2_stats;
                 eprintln!("MIP: HL2_D2: protected inactive cuts kept {} (dropped by the D2a limits {}); D2b: rows stored {}, restores with re-added rows {} ({} rows), failed for missing rows {}, protection count mismatch {}, still mismatched {}", d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]);
