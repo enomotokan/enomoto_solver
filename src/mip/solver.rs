@@ -921,6 +921,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) heur1t_lurk: Vec<[f64; 2]>,
     /// 試作 `ENOMOTO_MIP_HEUR_ADAPT` ([`heur_adapt`]): 木の完了の見込みからの割合 f_t と、それを測ったときのノード数 (64 ノードおきに測り直す)
     pub(super) heur_adapt_ft: (u64, f64),
+    /// 試作 `ENOMOTO_MIP_HEUR_ADAPT` の f_t で上乗せした大近傍探索の予算の積分 (手間の単位, 秒) と、最後に積んだときの (手間, 秒)
+    pub(super) heur_adapt_extra: (f64, f64),
+    pub(super) heur_adapt_last: Option<(f64, f64)>,
     /// 試作 `ENOMOTO_MIP_RENS_BIGGAP` (P2-HEUR): この求解で既定の RENS (LP で整数値の列を全部固定) をもう回したか
     pub(super) rens_biggap_done: bool,
     /// 直近に主のスレッドで解いたサブ MIP が、ノード上限まで進んだか (停滞・成果連動の打ち切りでなく。[`rens_more_nodes_real`])
@@ -4061,7 +4064,8 @@ pub(crate) fn heur1t(c: char) -> bool {
 ///   と残りの秒の比 r から sigmoid(a_t (ln r − b_t))。a_t = `ENOMOTO_T_MIP_HEUR_ADAPT_TREE_A` (4)、b_t = `ENOMOTO_T_MIP_HEUR_ADAPT_TREE_B` (2)。
 ///   b_t は害の出た pg の ln r の最大 1.50 と効いた neos-1171448 の最小 2.57 の中ほど、a_t はその両端で f_t が 0.1・0.9 になる
 ///   ln 9 / 0.535 ≈ 4.1 を丸めた (README 2 節)。木の中の大近傍探索の時間の割合を、既定の割合から
-///   4 スレッドのヒューリスティクス役の割合 (`ENOMOTO_T_MIP_HEUR_ROLE_FRAC`) へ f_t だけ寄せる (`HEUR1T` の `l` は f_t = 1 に当たる)。
+///   4 スレッドのヒューリスティクス役の割合 (`ENOMOTO_T_MIP_HEUR_ROLE_FRAC`) へ f_t だけ寄せる。寄せた分は経過の差分ごとに積む
+///   (既定の「割合 × 全体の経過」の形で一時の f_t に経過全体を掛けない。`HEUR1T` の `l` は f_t = 1 で経過全体に掛ける形)。
 ///   木を始めて 1 秒・全体の時間の `ENOMOTO_T_MIP_HEUR_TRIG_WARM_FRAC` (5%) までは測らず f_t = 0 (役の起動の判定と同じ温まり。ノード数の下限は使わない)。
 /// - `FJSYNC_LABEL` (同期の FJ の解の名札) はそのまま有効にする。
 pub(crate) fn heur_adapt() -> bool {
@@ -5716,6 +5720,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         heur1t_seen: Vec::new(),
         heur1t_lurk: Vec::new(),
         heur_adapt_ft: (0, 0.0),
+        heur_adapt_extra: (0.0, 0.0),
+        heur_adapt_last: None,
         rens_biggap_done: false,
         submip_full_nodes: false,
         rens_spawn_node_limit: 0,
@@ -14756,9 +14762,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let frac = if heur1t('l') && !self.params.submip && self.pool.is_none() && self.params.threads <= 1 && self.incumbent.is_some() {
                         frac.max(tunable!("ENOMOTO_T_MIP_HEUR_ROLE_FRAC", 0.25, f64))
                     } else if heur_adapt() && !self.params.submip && self.pool.is_none() && self.params.threads <= 1 && self.incumbent.is_some() {
-                        // 試作 `ENOMOTO_MIP_HEUR_ADAPT` の f_t: ヒューリスティクス役の割合へ f_t だけ寄せる
+                        // 試作 `ENOMOTO_MIP_HEUR_ADAPT` の f_t: ヒューリスティクス役の割合へ f_t だけ寄せる。寄せた分 f_t × (役の割合 − 割合) は、
+                        // 既定のように「割合 × 全体の経過」で一度に与えず、ノードごとに経過の差分に掛けて積む (`heur_adapt_extra`)。
+                        // 木の初めに見込みが揺れて f_t が一時だけ大きくなると、根の時間を含む経過全体に高い割合が掛かって予算がまとめて
+                        // 出ていた (swath1)。f_t がずっと 0 なら既定と同じ
                         let ft = self.adapt_tree_f(Some(&node));
-                        frac + ft * (tunable!("ENOMOTO_T_MIP_HEUR_ROLE_FRAC", 0.25, f64) - frac).max(0.0)
+                        let now = (crate::ticks::total() - self.ticks0, self.start.elapsed().as_secs_f64());
+                        let (tk0, s0) = self.heur_adapt_last.unwrap_or(now);
+                        let gain = ft * (tunable!("ENOMOTO_T_MIP_HEUR_ROLE_FRAC", 0.25, f64) - frac).max(0.0);
+                        self.heur_adapt_extra.0 += gain * (now.0 - tk0).max(0.0);
+                        self.heur_adapt_extra.1 += gain * (now.1 - s0).max(0.0);
+                        self.heur_adapt_last = Some(now);
+                        frac
                     } else {
                         frac
                     };
@@ -14770,10 +14785,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // 1 回のサブ MIP は時間でなく LP の反復の上限 max(2 x 予算, `ENOMOTO_T_MIP_TIMEDEP_LNS_MIN` (既定 5) x 根の LP の反復) で止める
                     // 試作 `ENOMOTO_MIP_TICKS` の `n` ([`super::ticks_on`]): 時間の規則と同じ式を手間の単位 ([`crate::ticks`]) で数える (`TIMEDEP` の `n` より先)
                     let tk_n = lns_time && super::ticks_on('n') && !self.params.submip;
-                    let lns_avail_tk = frac * (crate::ticks::total() - self.ticks0) - self.lns_ticks;
+                    let lns_avail_tk = frac * (crate::ticks::total() - self.ticks0) - self.lns_ticks + self.heur_adapt_extra.0;
                     let td_n = !tk_n && lns_time && super::timedep('n') && !self.params.submip;
                     let lns_avail_it = frac * (self.node_iters + self.sb_iters) as f64 - self.lns_iters as f64;
-                    let lns_avail = frac * self.start.elapsed().as_secs_f64() - self.lns_secs;
+                    let lns_avail = frac * self.start.elapsed().as_secs_f64() - self.lns_secs + self.heur_adapt_extra.1;
                     let lns_ok = if tk_n { lns_avail_tk > 0.0 } else if td_n { lns_avail_it > 0.0 } else if lns_time { lns_avail > 0.0 } else { self.heur_iters - self.heur_iters_root < budget };
                     // `ENOMOTO_MIP_HO1_LNSBANK` ([`ho1_lnsbank`]): 1 回の上限が下限に届くまで貯める (根の段・サブ MIP の中は今のまま)
                     let lns_ok = lns_ok
