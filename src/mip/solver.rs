@@ -79,6 +79,15 @@ pub struct MipParams {
     /// 外側の求解の元の時間上限 [秒] (再スタート・前処理の後の求解に渡す `time_limit` は残り時間)。試作 `ENOMOTO_MIP_TIMEDEP` の `b` で、
     /// 割合で決める量の基準に使う ([`MipParams::frac_tl`])。サブ MIP では使わない。未設定は NaN
     pub tl_base: f64,
+    /// 乱数の種 (`Model.solve(seed=...)`、[`crate::types::MipSettings::seed`])。木のヒューリスティクスの乱数・並列の FJ/Local-MIP の
+    /// スレッドの種などに混ぜる。0 が以前と同じ種。未指定なら環境変数 `ENOMOTO_T_MIP_SEED` (計測の台本用) の値、それもなければ 0
+    /// ([`default_seed`])。サブ MIP には親の値をそのまま渡す
+    pub seed: u64,
+}
+
+/// 種の既定値: 環境変数 `ENOMOTO_T_MIP_SEED` (計測の台本用) の値、なければ 0
+pub fn default_seed() -> u64 {
+    tunable!("ENOMOTO_T_MIP_SEED", 0u64, u64)
 }
 
 impl MipParams {
@@ -274,7 +283,7 @@ fn light_root_heur(name: &str) -> bool {
 
 impl Default for MipParams {
     fn default() -> Self {
-        MipParams { time_limit: f64::INFINITY, node_limit: u64::MAX, rel_gap: 0.0, abs_gap: 0.0, verbose: false, submip: false, cutoff: f64::INFINITY, restarts: 0, skip_heurs: 0, threads: 1, distinguish: false, fc_submip: false, tl_base: f64::NAN }
+        MipParams { time_limit: f64::INFINITY, node_limit: u64::MAX, rel_gap: 0.0, abs_gap: 0.0, verbose: false, submip: false, cutoff: f64::INFINITY, restarts: 0, skip_heurs: 0, threads: 1, distinguish: false, fc_submip: false, tl_base: f64::NAN, seed: default_seed() }
     }
 }
 
@@ -5532,12 +5541,12 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         locks: super::heuristics::compute_locks(p),
         // 乱数の種は従のスレッドごとに変える (同じ暫定解から同じ近傍を重複して探さないように)。
         // 主 (番号 0)・1 スレッドは以前と同じ種。`ENOMOTO_MIP_TREE_HEUR_ALL` なら全スレッドが同じ種
-        // `ENOMOTO_T_MIP_SEED` (既定 0 で今まで通り): 種をずらす (同じ問題を種を変えて流す計測用)
+        // 種 (`MipParams::seed`、`Model.solve(seed=...)` か環境変数 `ENOMOTO_T_MIP_SEED`。既定 0 で今まで通り): 種をずらす
         rng: (if pool_tid == 0 || env_str!("ENOMOTO_MIP_TREE_HEUR_ALL").is_some() {
             0x2545_F491_4F6C_DD1D
         } else {
             (0x2545_F491_4F6C_DD1D ^ (pool_tid as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)).max(1)
-        } ^ tunable!("ENOMOTO_T_MIP_SEED", 0u64, u64).wrapping_mul(0xD1B5_4A32_D192_ED03))
+        } ^ params.seed.wrapping_mul(0xD1B5_4A32_D192_ED03))
         .max(1),
         root_redcost: None,
         rcs: Default::default(),
@@ -7671,7 +7680,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut pc = self.p.clone();
         pc.col_lo.clone_from(&self.dom.lo);
         pc.col_up.clone_from(&self.dom.up);
-        let salt = 0x5EED_0000_0000_0001u64 ^ tunable!("ENOMOTO_T_MIP_SEED", 0u64, u64);
+        let salt = 0x5EED_0000_0000_0001u64 ^ self.params.seed;
         // 求解の時間の上限を期限として渡す (1 スレッドの手間の上限 (`ENOMOTO_MIP_TICKS` の `f`) でも時間の上限で止まるように。
         // analysis/hang_20261117/README.md)
         let tl = self.params.time_limit;
@@ -16236,7 +16245,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// (ポートフォリオ並列の挙動は変えない)。
     fn has_cutoff_value(&self) -> bool {
         // `ENOMOTO_MIP_TREE_OWN_INC_ONLY`: 以前の形 (自分の暫定解があるときだけ)
-        self.incumbent.is_some() || (self.pool.is_some() && env_str!("ENOMOTO_MIP_TREE_OWN_INC_ONLY").is_none() && self.shared.as_ref().is_some_and(|s| s.best().is_finite()))
+        self.incumbent.is_some()
+            || (self.pool.is_some() && env_str!("ENOMOTO_MIP_TREE_OWN_INC_ONLY").is_none() && self.shared.as_ref().is_some_and(|s| s.best().is_finite()))
+            // 試作 `ENOMOTO_MIP_CUTOFF_USER_TREE` ([`cutoff_user_tree`]): 外側の求解の打ち切り値 (利用者の `ENOMOTO_MIP_CUTOFF`・TPRE の予備の解の値・
+            // 再スタートで引き継いだ値) も数える
+            || (cutoff_user_tree() && !self.params.submip && self.params.cutoff.is_finite())
     }
 
     /// 証明の段階に入ったか ([`Self::proof_phase_check`])。
@@ -25178,7 +25191,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         } else {
             t_end
         };
-        let Some(sh) = super::prechain::attach(pc, t_end, t_ext, self.params.restarts, self.params.verbose) else { return false };
+        let Some(sh) = super::prechain::attach(pc, t_end, t_ext, self.params.restarts, self.params.verbose, self.params.seed) else { return false };
         sh.has_inc.store(self.incumbent.is_some() && !self.inc_only_fj, std::sync::atomic::Ordering::Relaxed);
         self.fj_has_inc = Some(sh.has_inc.clone());
         self.lmip_mailbox = Some(sh.mailbox.clone());
@@ -28563,4 +28576,14 @@ pub(super) fn lit_explain_auto() -> bool {
 pub(super) fn conflict_proof_explain() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *F.get_or_init(|| env_str!("ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN").is_none_or(|v| v != "0"))
+}
+
+/// 試作 `ENOMOTO_MIP_CUTOFF_USER_TREE` (analysis/ti6_20261124、既定では使わない、`=1` で使う): 木の中の「打ち切り値に使える値があるか」
+/// ([`Solver::has_cutoff_value`]) に、外側の求解の打ち切り値 (`params.cutoff`: 利用者の `ENOMOTO_MIP_CUTOFF`、TPRE の予備の解の値、再スタートで
+/// 引き継いだ値) も数える。今は自分の暫定解 (と木を分け合う相手の解) があるときだけ真で、打ち切り値だけがあるあいだはノードの被約費用による固定・
+/// 下界最小のノードを取る頻度の引き上げなどが止まる (traininstance6 に最適値を打ち切り値で与えると、暫定解が見つからないまま深さ寄りに進み、
+/// 終わりの下界が 3636 → 118 に下がった)。打ち切り値は刈り込みの上限 (`prune_limit`) にすでに入っている。サブ MIP では使わない
+pub(super) fn cutoff_user_tree() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_MIP_CUTOFF_USER_TREE").is_some_and(|v| v != "0"))
 }
