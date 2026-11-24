@@ -79,6 +79,15 @@ pub struct MipParams {
     /// 外側の求解の元の時間上限 [秒] (再スタート・前処理の後の求解に渡す `time_limit` は残り時間)。試作 `ENOMOTO_MIP_TIMEDEP` の `b` で、
     /// 割合で決める量の基準に使う ([`MipParams::frac_tl`])。サブ MIP では使わない。未設定は NaN
     pub tl_base: f64,
+    /// 乱数の種 (`Model.solve(seed=...)`、[`crate::types::MipSettings::seed`])。木のヒューリスティクスの乱数・並列の FJ/Local-MIP の
+    /// スレッドの種などに混ぜる。0 が以前と同じ種。未指定なら環境変数 `ENOMOTO_T_MIP_SEED` (計測の台本用) の値、それもなければ 0
+    /// ([`default_seed`])。サブ MIP には親の値をそのまま渡す
+    pub seed: u64,
+}
+
+/// 種の既定値: 環境変数 `ENOMOTO_T_MIP_SEED` (計測の台本用) の値、なければ 0
+pub fn default_seed() -> u64 {
+    tunable!("ENOMOTO_T_MIP_SEED", 0u64, u64)
 }
 
 impl MipParams {
@@ -274,7 +283,7 @@ fn light_root_heur(name: &str) -> bool {
 
 impl Default for MipParams {
     fn default() -> Self {
-        MipParams { time_limit: f64::INFINITY, node_limit: u64::MAX, rel_gap: 0.0, abs_gap: 0.0, verbose: false, submip: false, cutoff: f64::INFINITY, restarts: 0, skip_heurs: 0, threads: 1, distinguish: false, fc_submip: false, tl_base: f64::NAN }
+        MipParams { time_limit: f64::INFINITY, node_limit: u64::MAX, rel_gap: 0.0, abs_gap: 0.0, verbose: false, submip: false, cutoff: f64::INFINITY, restarts: 0, skip_heurs: 0, threads: 1, distinguish: false, fc_submip: false, tl_base: f64::NAN, seed: default_seed() }
     }
 }
 
@@ -5532,12 +5541,12 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         locks: super::heuristics::compute_locks(p),
         // 乱数の種は従のスレッドごとに変える (同じ暫定解から同じ近傍を重複して探さないように)。
         // 主 (番号 0)・1 スレッドは以前と同じ種。`ENOMOTO_MIP_TREE_HEUR_ALL` なら全スレッドが同じ種
-        // `ENOMOTO_T_MIP_SEED` (既定 0 で今まで通り): 種をずらす (同じ問題を種を変えて流す計測用)
+        // 種 (`MipParams::seed`、`Model.solve(seed=...)` か環境変数 `ENOMOTO_T_MIP_SEED`。既定 0 で今まで通り): 種をずらす
         rng: (if pool_tid == 0 || env_str!("ENOMOTO_MIP_TREE_HEUR_ALL").is_some() {
             0x2545_F491_4F6C_DD1D
         } else {
             (0x2545_F491_4F6C_DD1D ^ (pool_tid as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)).max(1)
-        } ^ tunable!("ENOMOTO_T_MIP_SEED", 0u64, u64).wrapping_mul(0xD1B5_4A32_D192_ED03))
+        } ^ params.seed.wrapping_mul(0xD1B5_4A32_D192_ED03))
         .max(1),
         root_redcost: None,
         rcs: Default::default(),
@@ -7671,7 +7680,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut pc = self.p.clone();
         pc.col_lo.clone_from(&self.dom.lo);
         pc.col_up.clone_from(&self.dom.up);
-        let salt = 0x5EED_0000_0000_0001u64 ^ tunable!("ENOMOTO_T_MIP_SEED", 0u64, u64);
+        let salt = 0x5EED_0000_0000_0001u64 ^ self.params.seed;
         // 求解の時間の上限を期限として渡す (1 スレッドの手間の上限 (`ENOMOTO_MIP_TICKS` の `f`) でも時間の上限で止まるように。
         // analysis/hang_20261117/README.md)
         let tl = self.params.time_limit;
@@ -25182,7 +25191,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         } else {
             t_end
         };
-        let Some(sh) = super::prechain::attach(pc, t_end, t_ext, self.params.restarts, self.params.verbose) else { return false };
+        let Some(sh) = super::prechain::attach(pc, t_end, t_ext, self.params.restarts, self.params.verbose, self.params.seed) else { return false };
         sh.has_inc.store(self.incumbent.is_some() && !self.inc_only_fj, std::sync::atomic::Ordering::Relaxed);
         self.fj_has_inc = Some(sh.has_inc.clone());
         self.lmip_mailbox = Some(sh.mailbox.clone());
