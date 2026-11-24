@@ -645,7 +645,8 @@ pub fn solve_mip(
             r.x = Some(y);
         }
     }
-    let r = r;
+    // 利用者の打ち切り値より良くない解は返さない ([`patch_user_cutoff`])
+    let r = if params.submip { r } else { patch_user_cutoff(r, params.cutoff, params.verbose) };
     if solver::end_diag() || params.verbose {
         eprintln!("MIP: solve returned {:?} after {:.2}s (time limit {:.2}s)", r.status, t_solve.elapsed().as_secs_f64(), params.time_limit);
     }
@@ -738,8 +739,9 @@ pub fn solve_mip(
         nodes: r.nodes,
         lp_iterations: r.lp_iterations,
         root_bound: root_bound.map_or(f64::NAN, |z| s * z),
-        first_solution_time: first_sol.map_or(f64::NAN, |(t, _)| t),
-        first_solution_objective: first_sol.map_or(f64::NAN, |(_, z)| s * z),
+        // 打ち切り値より良くない最初の解は数えない (返す解と揃える、[`patch_user_cutoff`])
+        first_solution_time: first_sol.filter(|&(_, z)| params.submip || !at_or_above(z, params.cutoff)).map_or(f64::NAN, |(t, _)| t),
+        first_solution_objective: first_sol.filter(|&(_, z)| params.submip || !at_or_above(z, params.cutoff)).map_or(f64::NAN, |(_, z)| s * z),
     };
     let status = match r.status {
         MipStatus::Optimal => Status::Optimal,
@@ -1326,6 +1328,34 @@ thread_local! {
     /// 再スタート前の pseudocost (木の中の再スタートで引き継ぐとき。全体で使う試作 `ENOMOTO_MIP_RESTART_PC` は 2026-11-18 に削除)。再スタートが [`solve_problem`] に渡す問題の空間で置き、前処理後の空間に
     /// 写して置き直し ([`pseudocost::Pseudocost::remap_for_restart`])、再スタート後の求解の開始時に取り出す (static TLS の領域のため Box)
     pub(crate) static RESTART_PC: std::cell::RefCell<Option<Box<pseudocost::Pseudocost>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// 目的値 `z` が打ち切り値 `cutoff` (最小化形) 以上か (相対 1e-9 の余裕)。`cutoff` が無限なら偽。
+fn at_or_above(z: f64, cutoff: f64) -> bool {
+    cutoff.is_finite() && z >= cutoff - 1e-9 * cutoff.abs().max(1.0)
+}
+
+/// 一番外側の結果に利用者の打ち切り値 (`ENOMOTO_MIP_CUTOFF`、最小化形) を当てる: 打ち切り値は「これ以上の解は要らない」なので、返す解の値が
+/// 打ち切り値以上ならその解は返さない。木は刈り込みの上限を `min(打ち切り値, 暫定解)` にするので、打ち切り値より悪い暫定解 (根の
+/// ヒューリスティクスや前処理の解は打ち切り値と比べずに受け入れる) を持ったまま木を刈り尽くして「最適」で終わっても、示したのは
+/// 「打ち切り値より良い解はない」だけで、その解が最適だとは言えない (misc07 に打ち切り値 1000 を与えると 3670 を「最適」と返していた。
+/// 最適値は 2810。analysis/ti6_20261124)。そこで「最適」は「実行不能 (打ち切り値より良い解はない)」にし、時間・ノードの上限なら状態は
+/// そのままで解なしにする。打ち切り値が無限 (既定) なら何もしない。
+fn patch_user_cutoff(mut r: solver::MipResult, cutoff: f64, verbose: bool) -> solver::MipResult {
+    let Some(z) = r.objective else { return r };
+    if !at_or_above(z, cutoff) {
+        return r;
+    }
+    if verbose {
+        eprintln!("MIP: the solution {z:.10e} is not better than the cutoff {cutoff:.10e}; not returned");
+    }
+    r.x = None;
+    r.objective = None;
+    if r.status == MipStatus::Optimal {
+        r.status = MipStatus::Infeasible;
+        r.best_bound = f64::INFINITY;
+    }
+    r
 }
 
 pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: bool) -> solver::MipResult {
@@ -2151,7 +2181,14 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     // 前処理後の問題の打ち切り値にする。前処理の双対の簡約は最適解を少なくとも 1 つ残し、前処理後の問題の目的値は元の問題と同じ
     // (定数項を含む。前処理は列の番号を保ち x = d x' の尺度だけ) なので、U 以上を刈っても最適解は失わない。木が U より良い解を
     // 見つけなければ x_orig を返し、「U より良い解はない」で終われば最適として返す (対称性の側の `orig_only` と同じ考え)
-    let tpre_orig: Option<(f64, Vec<f64>)> = tpre_x_orig.filter(|x| x.len() == p.n && p.is_feasible(x, 1e-6) && solver::START_SOL.with(|s| s.borrow().is_none())).map(|x| (p.objective(&x), x));
+    // 打ち切り値 (利用者の `ENOMOTO_MIP_CUTOFF`、サブ MIP なら親の暫定解) 以上の解は予備の答えにしない: 木の打ち切り値は小さい方の打ち切り値に
+    // なるので、木が示せるのは「打ち切り値より良い解はない」だけで、x_orig の値 u との間は調べていない。それでも予備の答えにすると、木が
+    // 実行不能で終わったとき u を「最適」と返していた (analysis/ti6_20261124: traininstance6 で打ち切り値 28290.03 に対し VB01 の 41160 を
+    // 返し、下の [`patch_user_cutoff`] の再現 (misc07・打ち切り値 1000) と同じ形)
+    let tpre_orig: Option<(f64, Vec<f64>)> = tpre_x_orig
+        .filter(|x| x.len() == p.n && p.is_feasible(x, 1e-6) && solver::START_SOL.with(|s| s.borrow().is_none()))
+        .map(|x| (p.objective(&x), x))
+        .filter(|(u, _)| !(*u >= params.cutoff - 1e-9 * params.cutoff.abs().max(1.0)));
     let params = match &tpre_orig {
         Some((u, _)) => {
             if params.verbose {
@@ -10504,6 +10541,29 @@ fn merge_parallel_rows(rows: &mut Vec<Vec<(usize, f64)>>, row_lo: &mut Vec<f64>,
 
 #[cfg(test)]
 mod tests {
+    /// 利用者の打ち切り値より良くない解は返さない ([`patch_user_cutoff`]、analysis/ti6_20261124 の再現: misc07 に打ち切り値 1000 を与えると
+    /// 3670 を「最適」と返していた)。最適で終わっていれば「実行不能 (打ち切り値より良い解はない)」、時間切れなら解なし、良い解はそのまま。
+    #[test]
+    fn user_cutoff_drops_solutions_not_better_than_it() {
+        let r = |status, z: Option<f64>| solver::MipResult { status, x: z.map(|_| vec![1.0]), objective: z, best_bound: 1425.0, nodes: 0, lp_iterations: 0 };
+        let a = patch_user_cutoff(r(MipStatus::Optimal, Some(3670.0)), 1000.0, false);
+        assert_eq!(a.status, MipStatus::Infeasible);
+        assert!(a.x.is_none() && a.objective.is_none() && a.best_bound == f64::INFINITY);
+        let b = patch_user_cutoff(r(MipStatus::TimeLimit, Some(41160.0)), 28290.02829, false);
+        assert_eq!(b.status, MipStatus::TimeLimit);
+        assert!(b.x.is_none() && b.objective.is_none() && b.best_bound == 1425.0);
+        // 打ち切り値と同じ値 (余裕の内) も返さない
+        let c = patch_user_cutoff(r(MipStatus::Optimal, Some(1000.0)), 1000.0, false);
+        assert_eq!(c.status, MipStatus::Infeasible);
+        // 打ち切り値より良い解・打ち切り値なし (既定) はそのまま
+        let d = patch_user_cutoff(r(MipStatus::Optimal, Some(2810.0)), 2810.5, false);
+        assert_eq!(d.status, MipStatus::Optimal);
+        assert_eq!(d.objective, Some(2810.0));
+        let e = patch_user_cutoff(r(MipStatus::Optimal, Some(3670.0)), f64::INFINITY, false);
+        assert_eq!(e.status, MipStatus::Optimal);
+        assert_eq!(e.objective, Some(3670.0));
+    }
+
     use super::*;
 
     /// TREE2_FORCEQ ([`tree2_forceq_rows`]): 本当に強制される行 (`x_a + x_b = 1000 y`、x_a・x_b ∈ [0, 500]) は 2 項等式を作り、
