@@ -780,6 +780,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) nra_credit: f64,
     /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の数: [片づけた回, 外した行, 外さなかった行, 選び直しのラウンド, f の和 (× 1e6), f を見た回]
     pub(super) nra_stats: [u64; 6],
+    /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `r`: 選び直しのラウンドの解き直しで目的値が [伸びた, 伸びなかった] 回
+    pub(super) nra_rho: [u64; 2],
     /// 診断用: 効き目で続けるノードの分離の結果の内訳 (打ち切り、伸び/差が 0.02 未満、0.1 未満、0.3 未満、0.3 以上)
     pub(super) nca_hist: [u64; 5],
     /// ノードで加えたカットの非零の数の指数移動平均 (`ENOMOTO_T_MIP_NODE_CUT_ADAPT_DENSITY`、[`Solver::nca_dense`])。
@@ -5604,6 +5606,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         nra_leaves: [0; 2],
         nra_credit: 0.0,
         nra_stats: [0; 6],
+        nra_rho: [0; 2],
         nca_hist: [0; 5],
         tdd: if super::treedepth::on() && !params.submip { Some(Box::default()) } else { None },
         nca_cut_nnz: None,
@@ -6218,6 +6221,11 @@ pub(super) fn ncl_has(c: char) -> bool {
 /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` (既定では使わない、analysis/nodespeed_20261123/README.md 8 節): [`Solver::nra_f`]
 pub(super) fn nra_on() -> bool {
     env_str!("ENOMOTO_MIP_NODEROWS_ADAPT").is_some()
+}
+
+/// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の文字 (`r`: 選び直しの頻度を効き目 ρ 倍にする)
+pub(super) fn nra_has(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_NODEROWS_ADAPT").is_some_and(|v| v.contains(c))
 }
 
 /// 試作 `ENOMOTO_MIP_POOL_SEL` の文字 (`e`: 戻したカットを目的値の伸びで残すか外すか決める)
@@ -9742,7 +9750,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let f = self.nra_f();
         self.nra_stats[4] += (f * 1e6) as u64;
         self.nra_stats[5] += 1;
-        self.nra_credit += 1.0 - f;
+        // `r`: 持ち分を、選び直しのラウンドが目的値を伸ばした割合 ρ = (伸びた + 1) / (回 + 2) 倍にする (戻しても伸びない木では回す頻度を下げる)
+        let rho = if nra_has('r') { (self.nra_rho[0] as f64 + 1.0) / ((self.nra_rho[0] + self.nra_rho[1]) as f64 + 2.0) } else { 1.0 };
+        self.nra_credit += (1.0 - f) * rho;
         if self.nra_credit >= 1.0 {
             self.nra_credit -= 1.0;
             self.nra_stats[3] += 1;
@@ -13962,6 +13972,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let mut pse_nopool = false;
             // 試作 `ENOMOTO_MIP_NODEROWS_ADAPT`: このノードでプールの選び直しのラウンドを回すか (持ち分 1 − f)
             let nra_pool = self.nra_pool_due();
+            // `NODEROWS_ADAPT` の `r`: 選び直しのラウンドの前の目的値 (解き直しで伸びたかを数える)
+            let mut nra_pending: Option<f64> = None;
             // ノードの分離でカットを加えた後の解き直しか (その LP の時間を `node_cut_secs` に足す)
             let mut node_cut_resolve: Option<Instant> = None;
             let mut nc_res_it = 0u64;
@@ -14426,6 +14438,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 xp("m_lpstat");
                 self.node_lp_opt = true;
                 node_obj = self.lp.objective() + self.p.offset;
+                if let Some(obj0) = nra_pending.take() {
+                    self.nra_rho[usize::from(node_obj <= obj0 + 1e-6 * (1.0 + obj0.abs()))] += 1;
+                }
                 // 試作 `ENOMOTO_MIP_POOL_SEL` の `e`: 直前にプールから戻したなら、目的値が伸びたかを見る (許容誤差は行の活動量の判定と同じ
                 // 相対 1e-6)。伸びなければ戻したカットを外して解き直し (外した後の LP の最適値は戻す前と同じ)、このノードと子では戻さない
                 if let Some((obj0, id0)) = pse_pending.take() {
@@ -15097,6 +15112,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let added = if poolsel_on() || nra_pool { self.pool_select_round(&x) } else { self.pool_cut_round(&x, max_cuts) };
                     if added && poolsel_has('e') {
                         pse_pending = Some((obj_pre, id_pre));
+                    }
+                    if added && nra_pool && nra_has('r') && !poolsel_on() {
+                        nra_pending = Some(obj_pre);
                     }
                     if added && tree_log() && !self.params.submip {
                         eprintln!("EPOOL d={} rows {} -> {} lp={node_obj}", node.depth, r0, self.lp.num_rows());
@@ -21148,9 +21166,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let deg = if self.feat[4] > 0 { self.feat[3] as f64 / 1000.0 / self.feat[4] as f64 } else { f64::NAN };
         let zero_obj = self.p.cost.iter().all(|&c| c == 0.0);
         format!(
-            "FEAT {tag} tid={} nodes={} prune_bound={} prune_infeas={} int_leaves={} conf_calls={} conflicts={} conf_meanlen={:.1} posgain={}/{} degen={:.3} zero_obj={} obj_step={}",
+            "FEAT {tag} tid={} nodes={} prune_bound={} prune_infeas={} int_leaves={} conf_calls={} conflicts={} conf_meanlen={:.1} posgain={}/{} degen={:.3} zero_obj={} obj_step={} nra_inf={} nra_bound={}",
             self.pool_tid, self.nodes, self.feat[0], self.feat[1], self.feat[2], self.multi_stats[0], self.multi_stats[1],
-            self.multi_stats[3] as f64 / self.multi_stats[1].max(1) as f64, fd.2, fd.3, deg, zero_obj, self.obj_step.is_some()
+            self.multi_stats[3] as f64 / self.multi_stats[1].max(1) as f64, fd.2, fd.3, deg, zero_obj, self.obj_step.is_some(),
+            // 閉じた葉の数 ([`Self::nra_leaf`]、`ENOMOTO_MIP_NODEROWS_ADAPT` の φ の元。試作をつけなくても数えている。analysis/protoscreen_20261124 8 節)
+            self.nra_leaves[0], self.nra_leaves[1]
         )
     }
 
@@ -28197,8 +28217,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if nra_on() {
                 let (fsum, fcnt) = (self.nra_stats[4] as f64 * 1e-6, self.nra_stats[5]);
                 eprintln!(
-                    "MIP: node rows adapt (NODEROWS_ADAPT): leaves infeasible {} bound {} (share {:.4}, f now {:.4}, mean f {:.4}); cleanups {} rows removed {} kept {}; pool selection rounds {}",
-                    self.nra_leaves[0], self.nra_leaves[1], self.nra_share(), self.nra_f(), fsum / fcnt.max(1) as f64, self.nra_stats[0], self.nra_stats[1], self.nra_stats[2], self.nra_stats[3]
+                    "MIP: node rows adapt (NODEROWS_ADAPT): leaves infeasible {} bound {} (share {:.4}, f now {:.4}, mean f {:.4}); cleanups {} rows removed {} kept {}; pool selection rounds {} (bound raised {} of {})",
+                    self.nra_leaves[0], self.nra_leaves[1], self.nra_share(), self.nra_f(), fsum / fcnt.max(1) as f64, self.nra_stats[0], self.nra_stats[1], self.nra_stats[2], self.nra_stats[3], self.nra_rho[0], self.nra_rho[0] + self.nra_rho[1]
                 );
             }
             if poolsel_on() {
@@ -28267,6 +28287,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if let Some(mut t) = self.tdd.take() {
             t.fin = (self.incumbent.as_ref().map(|(z, _)| *z), self.global_lower_bound());
             t.dump(self.pool_tid as usize, self.start.elapsed().as_secs_f64(), self.nodes);
+        }
+        // 試作 `ENOMOTO_MIP_NODEROWS_ADAPT`: 従のスレッドの φ・f と片づけ・選び直しの数も出す (`ENOMOTO_MIP_LOG` のとき、診断用)
+        if nra_on() && !self.params.verbose && !self.params.submip && self.pool_tid > 0 && env_str!("ENOMOTO_MIP_LOG").is_some() {
+            let (fsum, fcnt) = (self.nra_stats[4] as f64 * 1e-6, self.nra_stats[5]);
+            eprintln!(
+                "MIP: node rows adapt (thread {}): nodes {} leaves infeasible {} bound {} (share {:.4}, f now {:.4}, mean f {:.4}); cleanups {} rows removed {} kept {}; pool selection rounds {} (bound raised {} of {}); mean rows {:.1}",
+                self.pool_tid, self.nodes, self.nra_leaves[0], self.nra_leaves[1], self.nra_share(), self.nra_f(), fsum / fcnt.max(1) as f64, self.nra_stats[0], self.nra_stats[1], self.nra_stats[2], self.nra_stats[3], self.nra_rho[0], self.nra_rho[0] + self.nra_rho[1], self.node_lp_rows as f64 / self.node_lps.max(1) as f64
+            );
         }
         // `ENOMOTO_MIP_NCA_DIAG`: 木の従のスレッドの分も出す (診断用)
         if !self.params.verbose && !self.params.submip && env_str!("ENOMOTO_MIP_NCA_DIAG").is_some() {
