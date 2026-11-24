@@ -121,6 +121,7 @@ print(x.value, y.value)             # 3.0 7.0
   | `distinguish_infeasible_unbounded` | Whether to distinguish infeasible from unbounded when there is no finite optimal value (default `False`; see "Result status, and infeasible or unbounded problems" below). |
   | `time_limit`, `mip_rel_gap`, `node_limit` | Termination criteria for integer programs (seconds, relative gap (default 0), number of nodes). |
   | `log` | Whether to output the log (default `True`; see "Log" below). |
+  | `seed` | Random seed for integer programs (an integer in [0, 2**64); default `None`). See "Random seed (`seed`)" below. |
 
 - `solve()` always returns a `Solution` and raises no exception even when the problem is infeasible, unbounded or not solved. Judge the result by `Solution.status`. Only when `status` is `"optimal"` (for integer programs stopped at a limit, when there is an incumbent) does `objective` hold a value and can each variable's value be read with `.value`. Otherwise `objective` is `None` and reading `.value` raises `RuntimeError`.
 
@@ -197,6 +198,14 @@ When `threads` is k ≥ 2, the search runs in parallel as follows.
 - Since the order in which nodes are processed changes with the progress of the threads, with k ≥ 2 the number of nodes and the solve time may vary from run to run (the optimal value obtained does not change).
 
 Termination criteria are specified with `time_limit` (seconds), `mip_rel_gap` (relative gap, default 0) and `node_limit` (number of nodes). When the solver stops at a limit, `status` becomes `"time_limit"` or `"node_limit"`, and if there is an incumbent, `objective` and each variable's `.value` can be read. The results are also stored in `best_bound` (the proven bound), `mip_gap` (relative gap) and `nodes` (number of nodes processed) of `Solution`.
+
+**Random seed (`seed`).** `seed` is mixed into the random numbers of the integer-programming search: the heuristics in the tree, the parallel Feasibility Jump and Local-MIP threads, and so on.
+- `None` (the default) uses the environment variable `ENOMOTO_T_MIP_SEED` if it is set, and 0 otherwise. 0 gives the same behavior as before `seed` was added.
+- With `threads=1` the same seed gives the same result (the same number of nodes and the same objective value), so a run can be reproduced.
+- With 2 or more threads the search path can still vary with the timing of the threads, even with the same seed.
+- Running with different seeds shows how much the solve time of a problem varies.
+- A negative value or a value of 2**64 or more raises `ValueError`; a value that is not an integer (including `bool`) raises `TypeError`.
+- For LP (models without integer variables) the seed is not used.
 
 The relative gap measures the difference between the objective value of the incumbent (the feasible solution with the best objective value found during the search) and the proven bound as
 

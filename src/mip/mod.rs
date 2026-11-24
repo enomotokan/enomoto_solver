@@ -511,6 +511,8 @@ pub fn solve_mip(
         // 最適値が分かっている問題で、暫定解を見つける運の良し悪しと証明の時間を切り分けるために使う
         // (pk1 の揺れの調査。最適値 11 の整数目的なら 10.5 を与えると、暫定解 11 を持って始めたのと同じ木になる)
         cutoff: env_f64(env_str!("ENOMOTO_MIP_CUTOFF")).map_or(d.cutoff, |v| p.sense_sign * v),
+        // 乱数の種: 引数 (`Model.solve(seed=...)`) があればそれ、なければ環境変数 `ENOMOTO_T_MIP_SEED`、なければ 0 ([`solver::default_seed`])
+        seed: settings.seed.unwrap_or(d.seed),
         ..d
     };
     let params = MipParams { tl_base: params.time_limit, ..params };
@@ -1292,6 +1294,9 @@ thread_local! {
     /// 今の前処理がサブ MIP のものか ([`solve_problem_inner`] が `params.submip` で立てる)。既定の `ENOMOTO_MIP_SUBMIP_HIGHS` の `p` では
     /// サブ MIP の前処理にも `submip = false` が渡るので、[`prr_active`] はこちらを見る
     pub(crate) static PRESOLVE_IN_SUBMIP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 今の前処理の求解の乱数の種 (`MipParams::seed`、[`solve_problem_inner`] が立てる)。前処理の中のサブ MIP (VB01) に渡す。
+    /// 立っていなければ [`solver::default_seed`]
+    pub(crate) static PRESOLVE_SEED: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
 
 /// `ENOMOTO_MIP_PROBE_REPRESOLVE` (試作) がこの前処理で効くか: 環境変数があり、安全網の解き直し ([`PRR_OFF`]) でも FJ だけに渡す問題の
@@ -1693,14 +1698,14 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     // 試作 `ENOMOTO_MIP_TPRE` ([`tpre`]): 並列の「仮の暫定値つき前処理」を 1 本のスレッドで始める (前処理の後で待って取り込む)
     // `t` (pt): 空いたスレッドで FJ・Local-MIP を前処理の間回し続ける (手間の門で再現する)
     let pt_job = (tpre::mode().is_some_and(|m| m.contains('t') || m.contains('T')) && !params.submip && params.restarts == 0 && params.threads >= 2 && start.is_none())
-        .then(|| tpre::pt_spawn(p, params.threads, 0x7E1E_5EED ^ tunable!("ENOMOTO_T_MIP_SEED", 0u64, u64)));
+        .then(|| tpre::pt_spawn(p, params.threads, 0x7E1E_5EED ^ params.seed));
     // `ENOMOTO_T_MIP_TPRE_MIN_NNZ` (既定 0): 非零がこれより少ない問題では TPRE (p・pl) を使わない (小さい問題は前処理がすぐ終わり、主が待つ分が目立つ。
     // PPL の計測で 10teams・misc07 など 1〜5 秒の問題が数倍遅かった)
     let tpre_big = p.rows.iter().map(|r| r.len()).sum::<usize>() as f64 >= tunable!("ENOMOTO_T_MIP_TPRE_MIN_NNZ", 0.0, f64);
     let tpre_job = (tpre_big && tpre::mode().is_some_and(|m| !m.contains('t') && !m.contains('T')) && !params.submip && params.restarts == 0 && params.threads >= 2 && start.is_none()).then(|| {
         let q = p.clone();
         let safety = if params.time_limit.is_finite() { 0.25 * params.time_limit } else { 60.0 };
-        let seed = 0x7E1E_5EED ^ tunable!("ENOMOTO_T_MIP_SEED", 0u64, u64);
+        let seed = 0x7E1E_5EED ^ params.seed;
         let stop: tpre::Stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let slot: tpre::SolSlot = std::sync::Arc::new(std::sync::Mutex::new(None));
         let (st2, sl2) = (stop.clone(), slot.clone());
@@ -1733,7 +1738,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
     }
     let _prechain = Disarm(!params.submip && params.restarts == 0 && prechain::on());
     if _prechain.0 {
-        prechain::arm(params.threads, params.time_limit, params.verbose);
+        prechain::arm(params.threads, params.time_limit, params.verbose, params.seed);
     }
     // 前処理の重い手順の期限 ([`presolve_stop`]): この求解の時間の上限。戻るときに前の値 (外側の求解のもの) に戻す
     struct RestoreDeadline(Option<std::time::Instant>);
@@ -1764,6 +1769,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
         }))
     });
     let prev_in_sub = PRESOLVE_IN_SUBMIP.with(|f| f.replace(params.submip));
+    let prev_seed = PRESOLVE_SEED.with(|f| f.replace(Some(params.seed)));
     // 診断 `ENOMOTO_MIP_SYMREFL_PRE_DIAG` (analysis/symdyn_20261110.md): 前処理の前の問題で反転を含む対称性を数える (求解は変えない)
     if env_str!("ENOMOTO_MIP_SYMREFL_PRE_DIAG").is_some() && !params.submip && params.restarts == 0 {
         let t = std::time::Instant::now();
@@ -1821,6 +1827,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
         }
     }
     PRESOLVE_IN_SUBMIP.with(|f| f.set(prev_in_sub));
+    PRESOLVE_SEED.with(|f| f.set(prev_seed));
     FEAS_FJ_EARLY.with(|c| c.set(None));
     RESTART_PRESOLVE.with(|f| f.set(prev_rp));
     // `ENOMOTO_MIP_SPARSIFY_LATE` (既定 `s`、`=0` で切る。docs/improvement_history.md の 2026-11-18 の節): HiGHS と同じく前処理 (プロービング・
@@ -4901,6 +4908,8 @@ fn clqprb_shadow_locks(p: &MipProblem, params: MipParams, pre_submip: bool, lp_p
         distinguish: false,
         fc_submip: false,
         tl_base: f64::NAN,
+        // 乱数の種は親のものを渡す
+        seed: params.seed,
     };
     let r = solve_problem(&sub, sp, true);
     let found = r.x.filter(|x| x.len() == q.n).map(|mut x| {
@@ -6041,7 +6050,7 @@ fn presolve_vbclq_e(prob: &mut MipProblem, verbose: bool, secs: f64) -> usize {
     let t0 = std::time::Instant::now();
     // VB01 (SCIP-VB の Solver の外の版、[`heur_scip::vbounds01_on_problem`]) の解。サブ MIP 1 本の時間の上限は `secs` (前処理の
     // LP による固定の時間の上限と同じ安全網。サブ MIP は 500 ノードまで)
-    let vb = heur_scip::vbounds01_on_problem(prob, verbose, secs);
+    let vb = heur_scip::vbounds01_on_problem(prob, verbose, secs, PRESOLVE_SEED.with(|f| f.get()).unwrap_or_else(solver::default_seed));
     let given = env_str!("ENOMOTO_MIP_VBCLQ_PRE_CUTOFF").and_then(|s| s.parse::<f64>().ok()).map(|v| prob.sense_sign * v);
     let (z, src) = match (&vb, given) {
         (Some((zv, _)), Some(zg)) if zg < *zv => (zg, "given cutoff"),
