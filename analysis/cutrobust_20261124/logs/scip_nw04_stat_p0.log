@@ -1,0 +1,20 @@
+original problem has 87482 variables (87482 bin, 0 int, 0 cont) and 36 constraints
+presolving:
+(round 1, exhaustive) 0 del vars, 0 del conss, 0 add conss, 0 chg bounds, 0 chg sides, 0 chg coeffs, 36 upgd conss, 0 impls, 36 clqs, 0 implints
+(round 2, medium)     28 del vars, 0 del conss, 0 add conss, 0 chg bounds, 28 chg sides, 28 chg coeffs, 36 upgd conss, 0 impls, 35 clqs, 0 implints
+(round 3, fast)       28 del vars, 1 del conss, 0 add conss, 0 chg bounds, 28 chg sides, 28 chg coeffs, 36 upgd conss, 0 impls, 35 clqs, 0 implints
+(round 4, exhaustive) 41339 del vars, 1 del conss, 0 add conss, 0 chg bounds, 28 chg sides, 28 chg coeffs, 36 upgd conss, 0 impls, 35 clqs, 0 implints
+   (5.8s) probing: 51/46143 (0.1%) - 0 fixings, 0 aggregations, 0 implications, 0 bound changes
+   (5.8s) probing aborted: 50/50 successive totally useless probings
+   (5.9s) symmetry computation started: requiring (bin +, int +, cont +), (fixed: bin -, int -, cont -)
+   (5.9s) no symmetry present (symcode time: 0.01)
+presolving (5 rounds: 5 fast, 4 medium, 3 exhaustive):
+ 41339 deleted vars, 1 deleted constraints, 0 added constraints, 0 tightened bounds, 0 added holes, 28 changed sides, 28 changed coefficients
+ 0 implications, 35 cliques, 0 implied integral variables (0 bin, 0 int, 0 cont)
+presolved problem has 46143 variables (46143 bin, 0 int, 0 cont) and 35 constraints
+     35 constraints of type <setppc>
+transformed objective value is always integral (scale: 2)
+Presolving Time: 5.73
+
+ time | node  | left  |LP iter|LP it/n|mem/heur|mdpt |vars |cons |rows |cuts |sepa|confs|strbr|  dualbound   | primalbound  |  gap   | compl. 
+p 6.6s|     1 |     0 |     4 |     - |   locks|   0 |  46k|  36 |  35 |   0 |  0 |   0 |   0 |-1.176877e+09 | 1.419300e+05 |    Inf | unknown
