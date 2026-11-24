@@ -3,11 +3,15 @@
 # fuzz の小さい問題では既定の見切り (候補 500 本以上・ギャップ 5% 以下) で根の打ち切り値つきプロービングが走らないので、
 # 既存のつまみで見切りを外して (MIN_CANDS=0・MAX_GAP=1) 試作の締め付けが実際に入る形で回す。
 # リポジトリの根から: bash analysis/objprobehull_20261124/fuzz.sh
+# HULL=2 OG=1 bash ... で =2 と ENOMOTO_MIP_ROOT_OBJPROP_GLOBAL=1 を入れて回す (ログは fuzz_logs_h2og/)。
 # ログは analysis/objprobehull_20261124/fuzz_logs/ (コミットしない)。
 set -u
 cd "$(dirname "$0")/../.."
-export ENOMOTO_MIP_ROOT_OBJ_PROBE_HULL=1 ENOMOTO_T_MIP_ROOT_OBJ_PROBE_MIN_CANDS=0 ENOMOTO_T_MIP_ROOT_OBJ_PROBE_MAX_GAP=1
-L=analysis/objprobehull_20261124/fuzz_logs; mkdir -p $L
+export ENOMOTO_MIP_ROOT_OBJ_PROBE_HULL=${HULL:-1} ENOMOTO_T_MIP_ROOT_OBJ_PROBE_MIN_CANDS=0 ENOMOTO_T_MIP_ROOT_OBJ_PROBE_MAX_GAP=1
+L=analysis/objprobehull_20261124/fuzz_logs
+if [ -n "${OG:-}" ]; then export ENOMOTO_MIP_ROOT_OBJPROP_GLOBAL=$OG; fi
+if [ "${HULL:-1}" != 1 ] || [ -n "${OG:-}" ]; then L=${L}_h${HULL:-1}og${OG:-0}; fi
+mkdir -p $L
 run() { name=$1; shift; echo "== $name: $*"; "$@" > $L/$name.log 2>&1; echo "rc=$?"; tail -3 $L/$name.log; }
 run fuzz_tiny env ENOMOTO_MIP_REL_GAP=1e-9 python3 benchmarks/equiv2_bug_20261022/fuzz_tiny.py 400 0
 run fuzz_highs env ENOMOTO_MIP_REL_GAP=1e-9 python3 scripts/mip_fuzz_vs_highs.py 300
