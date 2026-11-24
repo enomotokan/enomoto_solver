@@ -6636,6 +6636,39 @@ struct ProbeSpecCtx<'a> {
     want_equiv: bool,
 }
 
+/// x_j の両側の変更 `ch0`・`ch1` (どちらの側も伝播が成り立ったとき) から、両側の弱い方 (下限は小さい方、上限は大きい方) が
+/// 今の境界 `lo`・`up` より締まる列の境界 (列, 上限か, 値) を列の番号の順に返す ([`probe_derive`] の締め付けの部品。
+/// 根の打ち切り値つきプロービング (`ENOMOTO_MIP_ROOT_OBJ_PROBE_HULL`) でも使う)。同じ列・側が何度も変わったら最後 (最も締まった) の値を使う
+pub(super) fn probe_hull_bounds(j: usize, ch0: &[(usize, bool, f64)], ch1: &[(usize, bool, f64)], lo: &[f64], up: &[f64]) -> Vec<(usize, bool, f64)> {
+    let mut first: std::collections::BTreeMap<(usize, bool), f64> = std::collections::BTreeMap::new();
+    for &(k, upper, v) in ch0 {
+        first.insert((k, upper), v);
+    }
+    let mut last1: std::collections::HashMap<(usize, bool), f64> = std::collections::HashMap::new();
+    for &(k, upper, v) in ch1 {
+        last1.insert((k, upper), v);
+    }
+    let mut tight = Vec::new();
+    for (&(k, upper), &v0) in &first {
+        if k == j {
+            continue;
+        }
+        let Some(&v1) = last1.get(&(k, upper)) else { continue };
+        if upper {
+            let u = v0.max(v1);
+            if u < up[k] - 1e-9 * (1.0 + u.abs()) {
+                tight.push((k, true, u));
+            }
+        } else {
+            let l = v0.min(v1);
+            if l > lo[k] + 1e-9 * (1.0 + l.abs()) {
+                tight.push((k, false, l));
+            }
+        }
+    }
+    tight
+}
+
 /// x_j の両側の変更 `ch0`・`ch1` から [`ProbeDerived`] を作る ([`probe`] の (true, true) の枝と同じ規則。ハッシュ表の順の代わりに
 /// 列の番号の順に並べる)
 fn probe_derive(j: usize, ch0: &[(usize, bool, f64)], ch1: &[(usize, bool, f64)], lo: &[f64], up: &[f64], cx: &ProbeSpecCtx) -> ProbeDerived {
@@ -6703,24 +6736,7 @@ fn probe_derive(j: usize, ch0: &[(usize, bool, f64)], ch1: &[(usize, bool, f64)]
             }
         }
     }
-    let mut tight = Vec::new();
-    for (&(k, upper), &v0) in &first {
-        if k == j {
-            continue;
-        }
-        let Some(&v1) = last1.get(&(k, upper)) else { continue };
-        if upper {
-            let u = v0.max(v1);
-            if u < up[k] - 1e-9 * (1.0 + u.abs()) {
-                tight.push((k, true, u));
-            }
-        } else {
-            let l = v0.min(v1);
-            if l > lo[k] + 1e-9 * (1.0 + l.abs()) {
-                tight.push((k, false, l));
-            }
-        }
-    }
+    let tight = probe_hull_bounds(j, ch0, ch1, lo, up);
     ProbeDerived { edges, implied, equiv, tight }
 }
 
