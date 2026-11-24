@@ -109,6 +109,8 @@ pub struct Domain {
     low_water: usize,
     /// 根に戻ったときに適用する大域的な境界の締め付け (列, 上限か, 値)。
     pending_global: Vec<(usize, bool, f64)>,
+    /// 試作 `ENOMOTO_MIP_GLOBALFIX` の `b`: 根の伝播が矛盾した (打ち切り値より良い解がない)。以後 `reset_to_root` のたびに矛盾にする
+    pub root_dead: bool,
     /// 診断用: デバッグ解 (含意の伝播がデバッグ解を切ったら表示する)。
     pub dbg_sol: Option<std::sync::Arc<Vec<f64>>>,
     /// 根に戻った回数 (活動量の誤差の蓄積を防ぐための定期的な再計算に使う)。
@@ -174,6 +176,23 @@ pub fn act_work() -> u64 {
     ACT_WORK.with(|w| w.get())
 }
 
+/// 試作 `ENOMOTO_MIP_GLOBALFIX` (analysis/globalfix_20261124、既定では使わない): 値の文字で部品を選ぶ。
+/// `a` 根のノード (深さ 0) の整数列の締め付けを大域的な境界に入れる、`b` `reset_to_root` で保留中の大域的な締め付けを置いた後に伝播し切って
+/// 大域的な境界にする、`c` 長さ 1 のリテラルの衝突を大域的な固定にする。
+pub(crate) fn globalfix(c: char) -> bool {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| match env_str!("ENOMOTO_MIP_GLOBALFIX") {
+        Some(v) if v != "0" && v != "off" => v.to_string(),
+        _ => String::new(),
+    })
+    .contains(c)
+}
+
+/// [`globalfix`] の数え (全スレッドの合計、`ENOMOTO_MIP_LOG` の終わりに出す): [`b` の伝播の回数, `b` で締めた整数列の境界の数,
+/// `b` で固定した整数列の数, `b` の矛盾の回数, `a` を当てた回数, `a` で大域にした整数列の境界の数, `a` で固定した整数列の数,
+/// `c` で大域に置いた固定の数]
+pub(crate) static GF_STATS: [std::sync::atomic::AtomicU64; 8] = [const { std::sync::atomic::AtomicU64::new(0) }; 8];
+
 /// 診断 `ENOMOTO_MIP_DIAG_GLOBALAUDIT` (analysis/globalaudit_20261124、既定では使わない。解き方は変えない): 大域的に分かった情報を
 /// 捨てている量を数えて `ENOMOTO_MIP_LOG` に出す
 pub(crate) fn globalaudit_on() -> bool {
@@ -221,6 +240,7 @@ impl Domain {
             proof_reason_budget: u64::MAX,
             low_water: 0,
             pending_global: Vec::new(),
+            root_dead: false,
             dbg_sol: None,
             resets: 0,
             global_lo: p.col_lo.clone(),
@@ -598,9 +618,17 @@ impl Domain {
                 applied += 1;
             }
         }
+        // 試作 `ENOMOTO_MIP_GLOBALFIX` の `b` (analysis/globalfix_20261124): 置いた締め付けから行 (と含意) を通して締まる境界を、待ち行列を
+        // 捨てずに根で伝播し切り、大域的な境界にする (`commit_root`)。根の定義域 = 大域的な境界 + 大域的に成り立つ推論なので、どのノード・
+        // どのスレッドでも成り立つ。矛盾したら (打ち切り値より良い解がない) 以後の根への戻りで毎回矛盾にする (`root_dead`)
+        if self.root_dead {
+            self.infeasible = true;
+        } else if applied > 0 && globalfix('b') {
+            self.globalfix_propagate(p);
+        }
         // 診断 `ENOMOTO_MIP_DIAG_GLOBALAUDIT` (analysis/globalaudit_20261124): 下で伝播の待ち行列を捨てるので、置いた締め付けから行を通して
         // 締まるはずの境界は大域的な境界に入らない。写しで伝播してその量を数える (解き方は変えない)
-        if applied > 0 && globalaudit_on() {
+        if applied > 0 && globalaudit_on() && !self.infeasible {
             self.globalaudit_dropped(p, applied);
         }
         self.resets += 1;
@@ -609,6 +637,49 @@ impl Domain {
         }
         self.queue.iter().for_each(|&i| self.in_queue[i] = false);
         self.queue.clear();
+    }
+
+    /// 試作 `ENOMOTO_MIP_GLOBALFIX` の `b`: 根 (記録が空) で待ち行列を伝播し切り (手間の上限で打ち切られたら続けて、最大
+    /// `ENOMOTO_T_MIP_FIXMORE_ROUNDS` (既定 50) 回。FIXMORE の `propagate_all` と同じ)、結果を大域的な境界にする。矛盾なら
+    /// 記録を巻き戻して `root_dead` を立てる。
+    fn globalfix_propagate(&mut self, p: &MipProblem) {
+        use std::sync::atomic::Ordering::Relaxed;
+        debug_assert!(self.stack.is_empty());
+        let rounds = tunable!("ENOMOTO_T_MIP_FIXMORE_ROUNDS", 50usize, usize);
+        let mut ok = true;
+        for _ in 0..rounds {
+            if !self.propagate(p) {
+                ok = false;
+                break;
+            }
+            if !self.has_pending() {
+                break;
+            }
+        }
+        GF_STATS[0].fetch_add(1, Relaxed);
+        if !ok {
+            self.backtrack_to(p, 0);
+            self.root_dead = true;
+            self.infeasible = true;
+            GF_STATS[3].fetch_add(1, Relaxed);
+            return;
+        }
+        let (mut ti, mut fi) = (0u64, 0u64);
+        for c in &self.stack {
+            if p.is_int[c.col] {
+                ti += 1;
+            }
+        }
+        for j in 0..p.n {
+            if p.is_int[j] && self.lo[j] == self.up[j] && self.global_lo[j] < self.global_up[j] {
+                fi += 1;
+            }
+        }
+        GF_STATS[1].fetch_add(ti, Relaxed);
+        GF_STATS[2].fetch_add(fi, Relaxed);
+        if !self.stack.is_empty() {
+            self.commit_root();
+        }
     }
 
     /// [`globalaudit_on`] 用: 保留中の大域的な締め付けを置いた直後 (待ち行列を捨てる前) の定義域の写しを伝播し、締まる境界を数える。
