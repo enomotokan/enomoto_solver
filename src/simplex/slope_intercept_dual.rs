@@ -4146,8 +4146,27 @@ impl PartialOrd for Cand {
 }
 impl Ord for Cand {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.ratio.total_cmp(&other.ratio).then_with(|| self.j.cmp(&other.j))
+        self.ratio.total_cmp(&other.ratio).then_with(|| stable_tie_key(self.j).cmp(&stable_tie_key(other.j)))
     }
+}
+
+/// 比の同点を決める列の鍵。既定は列の番号。試作 `ENOMOTO_SIMPLEX_STABLE_TIE=h` では列の番号を混ぜた値 (splitmix64、分解の並びに依らず、
+/// 番号の大小にも偏らない): 同点をいつも小さい番号で決めると (Bland の規則に近い)、退化した LP で同じ列の組を回り続ける
+/// (neos-827175 の根のカットの LP が 238 → 12018 反復)
+#[inline(always)]
+fn stable_tie_key(j: usize) -> u64 {
+    if !stable_tie_hash() {
+        return j as u64;
+    }
+    let mut z = (j as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+fn stable_tie_hash() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_SIMPLEX_STABLE_TIE").is_some_and(|v| v.contains('h')))
 }
 
 /// 離基行候補 `row` についての試行 BTRAN + PRICE +(BFRT なしの)比率テスト。基底や非基底状態は
@@ -7037,6 +7056,10 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         // 比が平坦な窓の中で |ピボット| 最大の候補を探してそれでピボットする。それより前の
         // 候補はフリップする(パス 1 が `k_star` までのフリップで `w_r` を超えないことを
         // 示しているので、より短い接頭辞も超えない)。`best_idx`: 実際にピボットする候補の位置。
+        if env_str!("ENOMOTO_DEBUG_TIE_CANDS").is_some() && iterlog_on() {
+            let v: Vec<String> = sorted.iter().take(k_star + 3).map(|c| format!("{}:{:.17e}:{:.17e}", c.j, c.ratio, c.hat_alpha)).collect();
+            eprintln!("TIECANDS it={iter_idx} k_star={k_star} n={n_candidates} w_r={:.17e} {}", w_r.base, v.join(" "));
+        }
         let mut best_idx = k_star;
         timed!(profile_phases, prof_phases::BFRT, {
             let min_ratio = sorted[k_star].ratio - tunable!("ENOMOTO_T_HARRIS_RATIO_TOL", HARRIS_RATIO_TOL, f64);
@@ -7045,12 +7068,27 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 window_start -= 1;
             }
             let mut best_abs = sorted[k_star].hat_alpha.abs();
+            if stable_tie_on() {
+                // 試作 `ENOMOTO_SIMPLEX_STABLE_TIE`: |alpha| も相対 [`LEX_REL_TOL`] で比べ、同点 (丸めだけの違い) は窓の中の並び
+                // (`(ratio, j)` の昇順) の先頭を選ぶ (既定は窓の最後 `k_star` から始めて真に大きいものだけ選ぶので、
+                // 1 と 1 + 2e-15 のような丸めの差で入る列が変わる)
+                best_idx = window_start;
+                best_abs = sorted[window_start].hat_alpha.abs();
+                for (idx, cand) in sorted.iter().enumerate().take(k_star + 1).skip(window_start + 1) {
+                    let abs_a = cand.hat_alpha.abs();
+                    if abs_a > best_abs * (1.0 + LEX_REL_TOL) {
+                        best_abs = abs_a;
+                        best_idx = idx;
+                    }
+                }
+            } else {
             for (idx, cand) in sorted.iter().enumerate().take(k_star + 1).skip(window_start) {
                 let abs_a = cand.hat_alpha.abs();
                 if abs_a > best_abs {
                     best_abs = abs_a;
                     best_idx = idx;
                 }
+            }
             }
             // 試作 `ENOMOTO_SIMPLEX_HARRIS_WIDE=1` (既定では使わない。analysis/rootlp_simplex_fail_20261105.md): 窓の中の最大の
             // |alpha| が `ENOMOTO_T_SIMPLEX_HW_SMALL` (既定 1e-6) 未満なら、比が `ENOMOTO_T_SIMPLEX_HW_TOL` (既定 1e-5) 以内の
@@ -9171,7 +9209,7 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
                 continue;
             }
             let hat_c = (sigma * d[j]).max(0.0);
-            candidates.push(Cand { j, hat_alpha, ratio: hat_c / hat_alpha.abs() });
+            candidates.push(Cand { j, hat_alpha, ratio: stable_tie_snap(hat_c / hat_alpha.abs()) });
         }
         if let Some(zc) = zero_pick {
             candidates.clear();
@@ -9473,7 +9511,36 @@ fn chuzc1_filter_one(j: usize, alpha_j: f64, status: Option<NbStatus>, d_j: f64,
     let hat_alpha = sigma * alpha_j;
     let hat_c = (sigma * d_j).max(0.0) * c_mask;
     let keep = is_nb & !(alpha_j.abs() <= TOL) & !(d_dir_f * hat_alpha >= 0.0);
-    (Cand { j, hat_alpha, ratio: hat_c / hat_alpha.abs() }, keep)
+    (Cand { j, hat_alpha, ratio: stable_tie_snap(hat_c / hat_alpha.abs()) }, keep)
+}
+
+/// 試作 `ENOMOTO_SIMPLEX_STABLE_TIE` (既定では使わない、analysis/luxroot_20261124): 比率テストの同点の決め方を分解の違いに依らなくする。
+/// 比を相対 [`LEX_REL_TOL`] の格子に丸めて (仮数の上位 `ceil(-log2 LEX_REL_TOL)` ビットを残す最近接の丸め)、[`HARRIS_RATIO_TOL`] 未満の
+/// 比は 0 にそろえて、丸めの誤差だけ違う比を同じ値にし、同点は `(ratio, j)` の順の `j` (列の番号) で決める。延ばした分解と一からの分解では FTRAN・BTRAN の丸めが違い、
+/// 数学的に同じ比 (退化した集合分割で多い) の大小が入れ替わって入る列が変わる (nw04 の根のカットの最初の LP の 1 反復目)
+pub(crate) fn stable_tie_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_SIMPLEX_STABLE_TIE").is_some_and(|v| v != "0"))
+}
+
+/// [`stable_tie_on`] のときだけ `v` を相対 [`LEX_REL_TOL`] の格子に丸める (それ以外は `v` のまま)。
+#[inline(always)]
+fn stable_tie_snap(v: f64) -> f64 {
+    if !stable_tie_on() || !v.is_finite() || v == 0.0 {
+        return v;
+    }
+    // 退化した候補の比 (被約費用が丸めの雑音、nw04 で 1e-12〜1e-11) は分解ごとに違う雑音なので、Harris のパス 2 の窓
+    // ([`HARRIS_RATIO_TOL`]、比をこの幅で同じとみなす) より小さい比は 0 にそろえ、同点を列の番号で決める
+    if v.abs() < HARRIS_RATIO_TOL {
+        return 0.0;
+    }
+    static DROP: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    let drop = *DROP.get_or_init(|| 52 - ((-LEX_REL_TOL.log2()).ceil() as u32).min(52));
+    if drop == 0 {
+        return v;
+    }
+    let b = v.to_bits();
+    f64::from_bits((b + (1u64 << (drop - 1))) & !((1u64 << drop) - 1))
 }
 
 /// 列数の多い問題用 (`prefetch_on`): `dist` 列先の `a_p`・`d`・`nb_status` を先読みしながら行う
