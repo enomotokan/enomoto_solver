@@ -18961,12 +18961,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                     };
                     if !ok {
-                        if self.dom.conflict.is_some() {
+                        // 診断 `ENOMOTO_MIP_SB_PROP_NOCONF=1` (sbadapt_20261124): 伝播で切れた子から衝突を作らず、擬似費用にも数えない
+                        let noconf = env_str!("ENOMOTO_MIP_SB_PROP_NOCONF").is_some();
+                        if self.dom.conflict.is_some() && !noconf {
                             self.add_conflict();
                         }
                         self.dom.backtrack_to(self.p, pos);
                         cut[side] = true;
-                        self.pc.add_cutoff(j, is_up);
+                        if !noconf {
+                            self.pc.add_cutoff(j, is_up);
+                        }
                         self.sb_prop_stats[0] += 1;
                         continue;
                     }
@@ -18976,7 +18980,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             side_bd[side].insert(c, (self.dom.lo[c], self.dom.up[c]));
                         }
                     }
-                    if env_str!("ENOMOTO_MIP_SB_PROP_NO_LP").is_none() {
+                    // 診断 `ENOMOTO_MIP_SB_PROP_BT_EARLY=1` (sbadapt_20261124): 伝播は子を切る判定と境界の記録だけに使い、子の LP を解く前に
+                    // 定義域を戻す (子の LP・子の証明は伝播なしの定義域で作る)
+                    if env_str!("ENOMOTO_MIP_SB_PROP_BT_EARLY").is_some() {
+                        self.dom.backtrack_to(self.p, pos);
+                    } else if env_str!("ENOMOTO_MIP_SB_PROP_NO_LP").is_none() {
                         for (c, _, _) in self.dom.changes_since(pos) {
                             self.lp.set_col_bounds(c, self.dom.lo[c], self.dom.up[c]);
                             self.sb_prop_stats[1] += 1;
