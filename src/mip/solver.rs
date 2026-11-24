@@ -4042,8 +4042,11 @@ pub(crate) fn heur1t(c: char) -> bool {
 ///   害の出た側で g のいちばん大きい noswot (0.07) で f_g が 1% になる ln 99 / 0.43 ≈ 10.7 を丸めた。README 2 節)。
 ///   FP・ダイビングの予算の物差し (`P2RIT=a` の前処理の LP の反復へ寄せる割合) と FP の第 3 段のノード・時間の上限に掛ける。
 ///   暫定解なし用のヒューリスティクスを回すか (`POOR_NOINC`) は f_g > 1/2 (= g > b_g、既存の基準のまま)。
-/// - `HEUR1T` の `f` (外側の根から出したサブ MIP の中の robust FJ) はそのまま有効にする (害の出た noswot・pg では道筋が既定と同じで、
-///   f_g を掛けた版は 10teams 種 3 で FJ の 1016 (g = 0.09) のせいで止まり解けなくなった。README 3 節)。
+/// - f_s (`HEUR1T` の `f`、外側の根から出したサブ MIP の中の robust FJ): そのサブ MIP にここまで使った秒 e と FJ の時間の上限の比から
+///   sigmoid(a_s ln(e / 上限)) を上限に掛ける (e = 上限で 1/2)。a_s = `ENOMOTO_T_MIP_HEUR_ADAPT_SUBFJ_A` (2: 害の出た swath1・misc07 の
+///   ln(e / 上限) −1.35・−1.6 で f_s が 0.1 を切る ln 9 / 1.35 ≈ 1.6 を切り上げた。効いた 10teams 種 3 は +0.17 で 0.58)。実行不能な
+///   RENS のサブ MIP (misc07・blend2) で FJ が 3 秒空回りしていた。f_g は使わない (10teams 種 3 は FJ の 1016 (g = 0.09) で f_g が 0.01 になり
+///   解けなくなった。README 3 節)。
 /// - f_t ([`Solver::adapt_tree_f`]): 1 スレッドの外側の木で、木の完了までの見込みの秒 (未処理のノードの重み Σ 2^−深さ ÷ 完了率の平均の速さ)
 ///   と残りの秒の比 r から sigmoid(a_t (ln r − b_t))。a_t = `ENOMOTO_T_MIP_HEUR_ADAPT_TREE_A` (4)、b_t = `ENOMOTO_T_MIP_HEUR_ADAPT_TREE_B` (2)。
 ///   b_t は害の出た pg の ln r の最大 1.50 と効いた neos-1171448 の最小 2.57 の中ほど、a_t はその両端で f_t が 0.1・0.9 になる
@@ -7704,6 +7707,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 1 スレッド 600 秒で 0 ノード。analysis/hang_20261117/README.md の 10・14 節、docs/improvement_history.md)
         let secs = if feas { tunable!("ENOMOTO_T_MIP_ROBUST_FJ_FEAS_SECS", 30.0, f64) } else { tunable!("ENOMOTO_T_MIP_ROBUST_FJ_SECS", 6.0, f64) };
         let cap = secs.min(if left.is_finite() { frac * left } else { tunable!("ENOMOTO_T_MIP_ROBUST_FJ_SECS", 6.0, f64) });
+        // 試作 `ENOMOTO_MIP_HEUR_ADAPT` ([`heur_adapt`]) の f_s: 外側の根から出したサブ MIP の中では、このサブ MIP にここまで使った秒 e と上限の比から
+        // sigmoid(a_s ln(e / 上限)) を上限に掛ける (e = 上限で 1/2、`HEUR1T` の `f` は f_s = 1 に当たる)
+        let el = self.start.elapsed().as_secs_f64();
+        let cap = if self.params.submip && heur_adapt() && !heur1t('f') && cap > 0.0 {
+            let fs = adapt_sigmoid(tunable!("ENOMOTO_T_MIP_HEUR_ADAPT_SUBFJ_A", 2.0, f64) * (el.max(1e-6) / cap).ln());
+            if env_str!("ENOMOTO_MIP_HEUR_ADAPT_DEBUG").is_some() {
+                eprintln!("HEURADAPT subfj: elapsed {el:.3} cap {cap:.3} f_s {fs:.4} -> {:.3} (root lp secs {:.4}, n {} m {})", fs * cap, self.root_lp_secs, self.p.n, self.p.m);
+            }
+            fs * cap
+        } else {
+            cap
+        };
         if cap <= 0.1 {
             return false;
         }
