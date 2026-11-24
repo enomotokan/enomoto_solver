@@ -59,6 +59,7 @@ khb05250・p0201 × 21 設定 × 種 1、上限 10 秒 (`python run.py 0 確か�
 
 - 分担 0〜6: 親が Gm3w・HCoW・HJZ2・HsTC・JhRi・GcYE・Fnaw に割り当てた。分担 7: SCIP-VB (集計役) が回す。
 - 分担 7: 先端 ed107692d (src は 7d54b3ced と同じ) を `maturin develop --release` で入れ、check_default.py で 6 問とも一致を確かめてから回し始めた (2026-11-24)。
+- 分担 1 (HCoW): 先端 ed107692d で `pip install -e .` し、check_default.py で 6 問とも一致を確かめてから回した (2026-11-24、2 時間の上限で 1 回止まり続きから回した)。res_s1.jsonl 462 行 (重複なし)、crash 0、食い違い 0 (最適 339・打ち切り 123)。計測中は python/ を ed107692d のまま保った。
 - 12 番目の試作 (木の中の打ち切り値の判定に利用者・TPRE の打ち切り値も数える、HuKp が作成中) は、名前が届いたら別の小さな台本で P の 1・4 スレッドを足す
   (既定はこの計測の def_t1・def_t4 の行を共有)。
 
