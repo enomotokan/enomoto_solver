@@ -36,6 +36,11 @@
   - 両側矛盾 (打ち切り値より良い解なし) なら、1 スレッドでは暫定解を最適として終える。木を分け合うときは終え方の受け渡しを作っていないので、証明を捨てて続ける (正しさは変わらない)。
 - 固定・締め付けを大域的に置いてよい理由は根の回と同じ (打ち切り値より良い解だけを残す。objprobehull 1.1 節)。
 
+### 2.2 誤答の確かめ
+
+`bash analysis/objprop_20261124/fuzz.sh` (試作を全部: ROOT_OBJPROP_GLOBAL・OBJ_PROP・OBJPROP_REDO=gp・SB_PROBEBD + SB_OBJPROP、見切りを外す MIN_CANDS=0・MAX_GAP=1):
+fuzz 7 本とも誤答 0 (fuzz_tiny 0/400・fuzz_highs 0/300・fuzz_objint 0/1000・fuzz_slack 0・fuzz_tiny2 0/400・fuzz_objint2 0/1000・fuzz_slack2 0)、cargo test 424 通過・失敗 0。
+
 ## 3. P の計測 (58 問 × 種 1〜3 × 60 秒)
 
 設定は cfg.py、分担は plan.py → shards.json (1 スレッドは 3 本同時、4 スレッドは 1 本ずつ)、`python analysis/objprop_20261124/run.py K`、集計は summ.py (protoscreen の写し。
