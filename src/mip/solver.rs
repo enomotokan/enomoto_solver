@@ -22264,12 +22264,28 @@ impl<'a, L: MipLp> Solver<'a, L> {
         } else {
             giveup
         };
+        // 試作 `ENOMOTO_MIP_ROOT_OBJ_PROBE_HULL` (既定では使わない、analysis/objprobehull_20261124): x_j の両側が成り立つとき、各側で
+        // 変わった境界の弱い方 (下限は小さい方、上限は大きい方。[`super::probe_hull_bounds`]、前処理のプロービングと同じ規則) が今の
+        // 境界より締まる列 (0-1・一般整数・連続) を大域的に締める。各側の伝播は打ち切り値つきの目的の伝播を含むので、締めた境界は
+        // 「打ち切り値より良い解」に対して成り立つ (x_j は 0 か 1 なので、そういう解はどちらかの側にあり、その側の伝播の結果を満たす)。
+        // 片側の固定と同じ根拠なので大域的に置く。締めた境界は固定と同じく今の定義域にも入れて伝播し、後の列の試しにも効かせる。
+        // 見切り (GIVEUP) と回りの繰り返しの「得」には、締め付けのうち整数列を固定したものだけを数える (再スタートの判定
+        // [`Self::maybe_restart`] が数えるのも大域的に固定された整数列なので、同じ物差しにする。そこには新たな数え方を足さない:
+        // 締め付けで固定された整数列は大域的な境界の比べでそのまま数えられ、固定でない締め付けは数えない)。
+        // ループの中の試し (`o.in_loop`) では使わない
+        let hull = env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE_HULL").is_some() && !o.in_loop;
+        // 診断: 締めた境界の数・列の数・締めで固定された整数列の数・幅の縮みの合計 (有限から有限)・無限の境界が有限になった数
+        let (mut hull_bounds, mut hull_fixint, mut hull_shrink, mut hull_inf) = (0usize, 0usize, 0.0f64, 0usize);
+        // 診断: 基準 (x_j を置かない伝播) と同じだった整数列の締め付け、基準より締まらず置かなかった連続列の締め付け
+        let (mut hull_same_int, mut hull_skip_cont) = (0usize, 0usize);
+        let mut hull_cols: Vec<bool> = if hull { vec![false; p.n] } else { Vec::new() };
+        let mut hull_ch: [Vec<(usize, bool, f64)>; 2] = [Vec::new(), Vec::new()];
         let mut npass = 0usize;
         for _ in 0..passes {
             npass += 1;
-            let fixed0 = fixed;
+            let fixed0 = fixed + hull_fixint;
             for &j in &cands {
-                if self.time_up() || t0.elapsed().as_secs_f64() > tmax || (fixed == 0 && probed >= giveup) {
+                if self.time_up() || t0.elapsed().as_secs_f64() > tmax || (fixed + hull_fixint == 0 && probed >= giveup) {
                     break;
                 }
                 if self.dom.lo[j] == self.dom.up[j] {
@@ -22292,6 +22308,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         && self.propagate_objective_with(false)
                         && rc_row.as_ref().is_none_or(|(r, u)| self.propagate_le_row(r, *u, false))
                         && cut_rows.iter().all(|(r, u)| self.propagate_le_row(r, *u, false)));
+                    if hull {
+                        hull_ch[k].clear();
+                        if !bad[k] {
+                            hull_ch[k].extend(self.dom.changes_since(pos));
+                        }
+                    }
                     // 含意 (既定で使う、`ENOMOTO_MIP_ROOT_OBJ_PROBE_NO_IMPL` で使わない): 矛盾しなかった側で固定された 0-1 列を含意 (x_j = v => x_c = w) として
                     // 定義域に足し、後の列の試しの伝播に使う (HiGHS はプロービングの含意をクリーク表に入れる)。打ち切り値を
                     // 使って得た含意なので、打ち切り値より良い解でだけ成り立つ (大域的な固定と同じ)
@@ -22335,10 +22357,70 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             break;
                         }
                     }
+                    [false, false] if hull => {
+                        let mut tight = super::probe_hull_bounds(j, &hull_ch[0], &hull_ch[1], &self.dom.lo, &self.dom.up);
+                        // 比べの基準: x_j を置かずに今の定義域で同じ伝播 (行・目的・被約費用の行・カットの行) をした境界。
+                        // 連続列の境界がこれより締まらないなら、それは x_j の試しから来たものでなく「目的値 <= 打ち切り値」を
+                        // 列の境界に言い直しただけ (mas76: 目的の係数 1 の連続列の上限 1e12 -> 打ち切り値。LP に入ると根の下界が
+                        // 下がり、木が 1.5〜3 倍になる)。目的の伝播はノードごとに局所的に効くので、大域的な境界にはしない。
+                        // 整数列は基準と同じでも締める (固定・幅の縮みは探索を減らす。fiber: 基準と同じ固定がノードを減らす)
+                        if !tight.is_empty() {
+                            let pos = self.dom.stack_len();
+                            let ok = self.dom.propagate(p)
+                                && self.propagate_objective_with(false)
+                                && rc_row.as_ref().is_none_or(|(r, u)| self.propagate_le_row(r, *u, false))
+                                && cut_rows.iter().all(|(r, u)| self.propagate_le_row(r, *u, false));
+                            let (rlo, rup) = (self.dom.lo.clone(), self.dom.up.clone());
+                            self.dom.backtrack_to(p, pos);
+                            let n0 = tight.len();
+                            tight.retain(|&(c, upper, v)| {
+                                let same = if upper { !(v < rup[c] - 1e-9 * (1.0 + v.abs())) } else { !(v > rlo[c] + 1e-9 * (1.0 + v.abs())) };
+                                if same && p.is_int[c] {
+                                    hull_same_int += 1;
+                                }
+                                // 基準の伝播が矛盾したら (数値の際どい場合だけのはず) 連続列は締めない
+                                p.is_int[c] || (ok && !same)
+                            });
+                            hull_skip_cont += n0 - tight.len();
+                        }
+                        for &(c, upper, v) in &tight {
+                            let (l0, u0) = (self.dom.global_lo[c], self.dom.global_up[c]);
+                            self.dom.tighten_global(p, c, upper, v);
+                            // 大域的な境界に入った値 (整数列は丸め後) を今の定義域にも置く
+                            let (l1, u1) = (self.dom.global_lo[c], self.dom.global_up[c]);
+                            if l1 == l0 && u1 == u0 {
+                                continue;
+                            }
+                            if upper {
+                                self.dom.tighten_upper(p, c, u1);
+                            } else {
+                                self.dom.tighten_lower(p, c, l1);
+                            }
+                            hull_bounds += 1;
+                            hull_cols[c] = true;
+                            // 診断 `ENOMOTO_MIP_ROOT_OBJ_PROBE_HULL_DEBUG`: 締めた境界を 1 本ずつ出す
+                            if self.params.verbose && env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE_HULL_DEBUG").is_some() {
+                                eprintln!("MIP: objprobe hull: probe x{j}: x{c} ({}, cost {:.6e}) {} [{l0:.10e}, {u0:.10e}] -> [{l1:.10e}, {u1:.10e}]", if p.is_int[c] { "int" } else { "cont" }, p.cost[c], if upper { "upper" } else { "lower" });
+                            }
+                            if p.is_int[c] && l1 == u1 && l0 != u0 {
+                                hull_fixint += 1;
+                            }
+                            let (w0, w1) = (u0 - l0, u1 - l1);
+                            if w0.is_finite() {
+                                hull_shrink += w0 - w1;
+                            } else if (upper && u0.is_infinite() && u1.is_finite()) || (!upper && l0.is_infinite() && l1.is_finite()) {
+                                hull_inf += 1;
+                            }
+                        }
+                        if !tight.is_empty() && !self.dom.propagate(p) {
+                            both = true;
+                            break;
+                        }
+                    }
                     _ => {}
                 }
             }
-            if both || fixed == fixed0 || self.time_up() || t0.elapsed().as_secs_f64() > tmax {
+            if both || fixed + hull_fixint == fixed0 || self.time_up() || t0.elapsed().as_secs_f64() > tmax {
                 break;
             }
         }
@@ -22416,6 +22498,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     t0.elapsed().as_secs_f64()
                 );
             }
+        }
+        if hull && (self.params.verbose || (self.params.submip && env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE_LOG").is_some())) {
+            eprintln!(
+                "MIP: {}root objective probing hull (ENOMOTO_MIP_ROOT_OBJ_PROBE_HULL): {hull_bounds} bounds tightened on {} columns ({} integer, {} continuous), {hull_fixint} integer columns fixed, width shrink {hull_shrink:.6e} (finite), {hull_inf} infinite bounds made finite; integer bounds equal to the propagation without x_j {hull_same_int}, continuous bounds not tighter than it (skipped) {hull_skip_cont}",
+                if self.params.submip { "sub-MIP " } else { "" },
+                hull_cols.iter().filter(|&&b| b).count(),
+                (0..p.n).filter(|&c| hull_cols[c] && p.is_int[c]).count(),
+                (0..p.n).filter(|&c| hull_cols[c] && !p.is_int[c]).count(),
+            );
         }
         if o.in_loop {
             return (both, fixed, probed);
