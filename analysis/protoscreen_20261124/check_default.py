@@ -1,0 +1,29 @@
+"""既定の動きが変わっていないかの確かめ: python check_default.py [環境変数=値 ...]
+入れた当方 (pip install -e . した分岐の先端) で、学習・計測と重ならない P の 6 問を 1 スレッド・種 1・上限 200 秒 (決定的) で解き、状態・ノード数・目的値を
+基準と比べる。基準は analysis/losses_20261123/res_pgocheck.jsonl の lto_v3 の回 (40be041e4 のソース、今回のふるい分けの試作の多くが入る前。
+作り方 (LTO・target-cpu) は道筋を変えないことを buildopt・losses 3.1 節で確かめてある)。
+環境変数を渡すと、その設定で解いて基準と比べる (試作を入れたときにどこから道筋が変わるかを見る用)。"""
+import json, os, subprocess, sys
+from pathlib import Path
+D = Path(__file__).resolve().parent
+WT = D.parents[1]
+sys.path.insert(0, str(WT / "scripts"))
+import run_miplib_benchmark as rb  # noqa: E402
+REF = {}
+for l in open(D.parent / "losses_20261123" / "res_pgocheck.jsonl"):
+    r = json.loads(l)
+    if r["ver"] == "lto_v3" and r["rep"] == 0:
+        REF[r["problem"]] = r["result"]
+extra = dict(a.split("=", 1) for a in sys.argv[1:])
+bad = []
+for p, ref in REF.items():
+    mps = rb.fetch(p, WT / ".miplib_cache")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("ENOMOTO_")}
+    env.update({"ENOMOTO_MIP_THREADS": "1", "ENOMOTO_T_MIP_SEED": "1", **extra})
+    out = subprocess.run([sys.executable, str(WT / "scripts/run_miplib_benchmark.py"), "--worker-ours", str(mps), "--time-limit", "200", "--threads", "1"],
+                         cwd=WT, env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True).stdout
+    res = json.loads([l for l in out.splitlines() if l.startswith("{")][-1])
+    ok = res["status"] == ref["status"] and res["nodes"] == ref["nodes"] and abs((res["objective"] or 0) - (ref["objective"] or 0)) <= 1e-6 * max(1, abs(ref["objective"] or 0))
+    print(f"{p}: {res['status']} ノード {res['nodes']} 目的値 {res['objective']} ({res['time']:.1f} 秒) / 基準 {ref['status']} {ref['nodes']} {ref['objective']} → {'一致' if ok else '違う'}", flush=True)
+    if not ok: bad.append(p)
+print("全部一致 (既定の道筋は基準と同じ)" if not bad else f"違う問題: {bad}")
