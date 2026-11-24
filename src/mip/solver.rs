@@ -784,6 +784,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) nra_stats: [u64; 6],
     /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `r`: 選び直しのラウンドの解き直しで目的値が [伸びた, 伸びなかった] 回
     pub(super) nra_rho: [u64; 2],
+    /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `t` ([`Solver::nra_t_ratio`]): [選び直しのラウンドの下界の伸びの和, その手間 (ticks) の和,
+    /// 普通のノードの下界の伸びの和, その手間の和, 普通のノードの数]
+    pub(super) nra_t: [f64; 5],
     /// 診断用: 効き目で続けるノードの分離の結果の内訳 (打ち切り、伸び/差が 0.02 未満、0.1 未満、0.3 未満、0.3 以上)
     pub(super) nca_hist: [u64; 5],
     /// ノードで加えたカットの非零の数の指数移動平均 (`ENOMOTO_T_MIP_NODE_CUT_ADAPT_DENSITY`、[`Solver::nca_dense`])。
@@ -5646,6 +5649,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         nra_credit: 0.0,
         nra_stats: [0; 6],
         nra_rho: [0; 2],
+        nra_t: [0.0; 5],
         nca_hist: [0; 5],
         tdd: if super::treedepth::on() && !params.submip { Some(Box::default()) } else { None },
         nca_cut_nnz: None,
@@ -9797,6 +9801,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
         1.0 / (1.0 + (-a * (self.nra_share() - b)).exp())
     }
 
+    /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `t` (analysis/nodespeed_20261123/README.md 9.6 節): 選び直しのラウンドの手間あたりの下界の伸び
+    /// g_sel と、普通のノードの手間あたりの下界の伸び g_tree の比 g_sel / g_tree。
+    /// - 手間は決定的な手間の単位 ([`crate::ticks::total`]、およそ CPU のナノ秒) で数える。ラウンドは、選んで戻すところから次の LP の結果まで。
+    ///   普通のノードは、ノードの処理の始めから最初の LP の結果まで。
+    /// - 伸びは、ラウンドなら戻す前の LP の値から解き直した値まで、普通のノードなら親の LP の値 (`lower_bound`) から最初の LP の値まで
+    ///   (どちらも負なら 0、LP で切れたなら切る値 (`prune_limit`) まで、切る値がなければ 0)。
+    /// - 数え始めは、ラウンドの側に「普通のノード 1 個の平均」を事前の観測として足す: g_sel = (G_sel + Ḡ) / (W_sel + W̄)
+    ///   (Ḡ・W̄ は普通のノード 1 個あたりの伸び・手間)。ラウンドの観測がなければ比は 1 (σ の真ん中) で、新しい閾値はない。
+    ///   普通のノードの観測もなければ 1。
+    pub(super) fn nra_t_ratio(&self) -> f64 {
+        let [gs, ws, gt, wt, nt] = self.nra_t;
+        if nt < 1.0 || wt <= 0.0 || gt <= 0.0 {
+            return 1.0;
+        }
+        let (gbar, wbar) = (gt / nt, wt / nt);
+        ((gs + gbar) / (ws + wbar)) / (gt / wt)
+    }
+
     /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT`: このノードでプールの選び直しのラウンドを回すか (持ち分に 1 − f を足し、1 以上なら 1 引いて真)
     fn nra_pool_due(&mut self) -> bool {
         if !nra_on() || self.params.submip {
@@ -9806,7 +9828,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.nra_stats[4] += (f * 1e6) as u64;
         self.nra_stats[5] += 1;
         // `r`: 持ち分を、選び直しのラウンドが目的値を伸ばした割合 ρ = (伸びた + 1) / (回 + 2) 倍にする (戻しても伸びない木では回す頻度を下げる)
-        let rho = if nra_has('r') { (self.nra_rho[0] as f64 + 1.0) / ((self.nra_rho[0] + self.nra_rho[1]) as f64 + 2.0) } else { 1.0 };
+        let rho = if nra_has('t') {
+            // `t`: 持ち分を σ(a ln(g_sel / g_tree)) 倍にする ([`Self::nra_t_ratio`])
+            let a = tunable!("ENOMOTO_T_MIP_NODEROWS_ADAPT_TA", 1.0, f64);
+            let q = self.nra_t_ratio().powf(a);
+            q / (1.0 + q)
+        } else if nra_has('r') {
+            (self.nra_rho[0] as f64 + 1.0) / ((self.nra_rho[0] + self.nra_rho[1]) as f64 + 2.0)
+        } else {
+            1.0
+        };
         self.nra_credit += (1.0 - f) * rho;
         if self.nra_credit >= 1.0 {
             self.nra_credit -= 1.0;
@@ -13712,7 +13743,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if self.nodes % k == 0 {
                         let rho = (self.nra_rho[0] as f64 + 1.0) / ((self.nra_rho[0] + self.nra_rho[1]) as f64 + 2.0);
                         eprintln!(
-                            "NRA_TRACE tid {} nodes {} t {:.2} inf {} bound {} phi {:.4} f {:.4} rho {:.4} rounds {}",
+                            "NRA_TRACE tid {} nodes {} t {:.2} inf {} bound {} phi {:.4} f {:.4} rho {:.4} rounds {} tratio {:.4} gsel {:.3e} wsel {:.3e} gtree {:.3e} wtree {:.3e} ntree {}",
                             self.pool_tid,
                             self.nodes,
                             self.start.elapsed().as_secs_f64(),
@@ -13721,7 +13752,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             self.nra_share(),
                             self.nra_f(),
                             rho,
-                            self.nra_stats[3]
+                            self.nra_stats[3],
+                            self.nra_t_ratio(),
+                            self.nra_t[0],
+                            self.nra_t[1],
+                            self.nra_t[2],
+                            self.nra_t[3],
+                            self.nra_t[4]
                         );
                     }
                 }
@@ -14061,6 +14098,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let nra_pool = self.nra_pool_due();
             // `NODEROWS_ADAPT` の `r`: 選び直しのラウンドの前の目的値 (解き直しで伸びたかを数える)
             let mut nra_pending: Option<f64> = None;
+            // `NODEROWS_ADAPT` の `t`: 選び直しのラウンドの前の目的値と手間 (ticks)、ノードの処理の始めの手間 ([`Self::nra_t_ratio`])
+            let mut nra_t_pending: Option<(f64, f64)> = None;
+            let nra_t_tk0 = crate::ticks::total();
+            let nra_t_on = nra_on() && nra_has('t') && !self.params.submip;
             // ノードの分離でカットを加えた後の解き直しか (その LP の時間を `node_cut_secs` に足す)
             let mut node_cut_resolve: Option<Instant> = None;
             let mut nc_res_it = 0u64;
@@ -14486,6 +14527,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                         self.feat[if st == LpStatus::Infeasible { 1 } else { 0 }] += 1;
                         self.nra_leaf(st == LpStatus::Infeasible);
+                        if nra_t_on {
+                            let lim = self.prune_limit();
+                            let tk = crate::ticks::total();
+                            if let Some((obj0, tk0)) = nra_t_pending.take() {
+                                self.nra_t[0] += if lim.is_finite() { (lim - obj0).max(0.0) } else { 0.0 };
+                                self.nra_t[1] += tk - tk0;
+                            } else if resolves == 0 {
+                                self.nra_t[2] += if lim.is_finite() { (lim - node.lower_bound).max(0.0) } else { 0.0 };
+                                self.nra_t[3] += tk - nra_t_tk0;
+                                self.nra_t[4] += 1.0;
+                            }
+                        }
                         if tree_log() && !self.params.submip {
                             eprintln!("ENODE d={} r={} lp={} rows={}{}", node.depth, if st == LpStatus::Infeasible { "lpinf" } else { "lpobj" }, self.lp.objective() + self.p.offset, self.lp.num_rows(), self.tl_tail());
                         }
@@ -14527,6 +14580,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 node_obj = self.lp.objective() + self.p.offset;
                 if let Some(obj0) = nra_pending.take() {
                     self.nra_rho[usize::from(node_obj <= obj0 + 1e-6 * (1.0 + obj0.abs()))] += 1;
+                }
+                if nra_t_on {
+                    let tk = crate::ticks::total();
+                    if let Some((obj0, tk0)) = nra_t_pending.take() {
+                        self.nra_t[0] += (node_obj - obj0).max(0.0);
+                        self.nra_t[1] += tk - tk0;
+                    } else if resolves == 0 && node.lower_bound.is_finite() {
+                        self.nra_t[2] += (node_obj - node.lower_bound).max(0.0);
+                        self.nra_t[3] += tk - nra_t_tk0;
+                        self.nra_t[4] += 1.0;
+                    }
                 }
                 // 試作 `ENOMOTO_MIP_POOL_SEL` の `e`: 直前にプールから戻したなら、目的値が伸びたかを見る (許容誤差は行の活動量の判定と同じ
                 // 相対 1e-6)。伸びなければ戻したカットを外して解き直し (外した後の LP の最適値は戻す前と同じ)、このノードと子では戻さない
@@ -15209,7 +15273,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let max_cuts = if self.ncl_removed_now && (ncl_has('a') || rowscope_has('a')) { usize::MAX } else { tunable!("ENOMOTO_T_MIP_POOL_CUTS_PER_NODE", 10usize, usize) };
                     // 試作 `ENOMOTO_MIP_POOL_SEL`: 毎ノード、本数を固定せずカット選びの物差しで選んで戻す
                     let (obj_pre, id_pre) = (node_obj, self.next_cut_id);
+                    let tk_pre = crate::ticks::total();
                     let added = if poolsel_on() || nra_pool { self.pool_select_round(&x) } else { self.pool_cut_round(&x, max_cuts) };
+                    if added && nra_pool && nra_t_on && !poolsel_on() {
+                        nra_t_pending = Some((obj_pre, tk_pre));
+                    }
                     if added && poolsel_has('e') {
                         pse_pending = Some((obj_pre, id_pre));
                     }
