@@ -682,11 +682,15 @@ pub fn solve_mip(
         if let Some(x) = r.x.as_mut() {
             // `ENOMOTO_MIP_LATE_NO_RESOLVE`: 時間を使い切っていれば研磨の LP は解かない (整数の丸めと目的値の計算し直しだけ)。
             // 研磨は元の問題の前処理 + LP で 0.2-0.35 秒かかり、時間の上限の超過の残りの大半だった (uccase12・physiciansched6-2)
-            let late = env_def!("ENOMOTO_MIP_LATE_NO_RESOLVE", "1").is_some() && t_solve.elapsed().as_secs_f64() >= params.time_limit;
+            // 試作 `ENOMOTO_MIP_POLISH_STRICT` (既定では使わない。analysis/nattai_20261125/): 時間を使い切っていても研磨し、研磨の LP に期限を渡さない。
+            // 時間切れの回の暫定解は研磨されず、B&B の LP の許容誤差の範囲の違反 (行ごとには 1e-6 以下) が積もって、目的値が本当の値より
+            // 低いまま返っていた (neos-5188808-nattai: 0.12230 と返した解の整数を固定した LP は 0.12240、既知の最適値 0.110284 より良い 0.110186 も返した)
+            let strict = polish_strict();
+            let late = !strict && env_def!("ENOMOTO_MIP_LATE_NO_RESOLVE", "1").is_some() && t_solve.elapsed().as_secs_f64() >= params.time_limit;
             // `ENOMOTO_MIP_POLISH_DEADLINE` (既定 1、`=0` で以前の形 = 期限なし): 研磨の LP に求解の期限 (始め + 時間の上限) を渡し、
             // 間に合わなければ研磨しない (整数の丸めと目的値の計算し直しだけ)。dano3_3 では MIP が 50〜52 秒で最適で終わった後、整数を固定した
             // LP を基底なしの単体法で解くのに 16〜17 秒かかり、60 秒の上限を越えて 66〜69 秒で返っていた (analysis/ipmx_harm_20261106.md)
-            let dl = (env_def!("ENOMOTO_MIP_POLISH_DEADLINE", "1").is_some() && params.time_limit.is_finite())
+            let dl = (!strict && env_def!("ENOMOTO_MIP_POLISH_DEADLINE", "1").is_some() && params.time_limit.is_finite())
                 .then(|| t_solve + std::time::Duration::from_secs_f64(params.time_limit.clamp(0.0, 1e9)));
             let z = crate::cancel::with_deadline(dl, || polish_solution(variables, objective, constraints, &p, x, !late));
             if solver::end_diag() || params.verbose {
@@ -792,6 +796,12 @@ fn exact_objective(p: &MipProblem, x: &[f64]) -> f64 {
 /// 解き直した解は、元の問題の違反 (境界・行) が増えず目的値が悪くならないとき、または違反が真に減って目的値の悪化が
 /// 相対 1e-6 以下のときに採る。最小化形の目的値を返す
 /// (誤差補償つきの和)。`ENOMOTO_MIP_NO_POLISH` なら丸めと目的値の計算し直しだけ。
+/// 試作 `ENOMOTO_MIP_POLISH_STRICT` (既定では使わない): [`polish_solution`] を時間切れの回でも回し、違反が減る解き直しは目的値が悪くなっても採る
+fn polish_strict() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_MIP_POLISH_STRICT").is_some_and(|v| v != "0"))
+}
+
 fn polish_solution(variables: &[VariableData], objective: &Objective, constraints: &[ConstraintRow], p: &MipProblem, x: &mut Vec<f64>, lp: bool) -> f64 {
     for j in 0..p.n {
         if p.is_int[j] {
@@ -822,7 +832,9 @@ fn polish_solution(variables: &[VariableData], objective: &Objective, constraint
         // 違反の比較には丸め誤差の分 (1e-9) の余裕を持たせる: 元の解の違反がちょうど 0 だと、解き直した解の 1e-15 程度の
         // 丸め誤差だけで捨てていた (bppc4-08 で目的値 59.994 -> 57 の研磨を捨てていた)
         let scale = z.abs().max(1.0);
-        if (vn <= vo.max(1e-9) && zn <= z + 1e-9 * scale) || (vn < vo && zn <= z + 1e-6 * scale) {
+        // `ENOMOTO_MIP_POLISH_STRICT` (試作): 違反が真に減るなら目的値の悪化の大きさによらず採る。違反は行ごとに許容誤差以下でも、
+        // 多くの行で積もると目的値を許容誤差よりずっと大きく動かす (neos-5188808-nattai: 112 行 × 9.5e-7 で 1e-4)
+        if (vn <= vo.max(1e-9) && zn <= z + 1e-9 * scale) || (vn < vo && (polish_strict() || zn <= z + 1e-6 * scale)) {
             *x = xn;
             return zn;
         }
