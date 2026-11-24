@@ -12900,6 +12900,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 試作 `ENOMOTO_MIP_NODE_CLEANUP`: これ以降の番号のカットは木の中で LP に加えたもの
         self.ncl_tree_id0 = self.next_cut_id;
+        // 試作 `ENOMOTO_MIP_LU_EXTEND`: LU の延ばし・縮めは木のノードの LP だけで使う (根の LP・根のカットのループでは使わない)
+        self.lp.set_lu_extend_tree(true);
         if self.params.verbose && !self.params.submip && self.snap.is_none() && self.watch.is_none() && self.pool_tid == 0 {
             eprintln!("TRSTAT: tree start outer {:.2} solve {:.2} restarts {} lb {:.10e} ub {:.10e}", super::outer_elapsed().unwrap_or(f64::NAN), self.tr_t0, self.params.restarts, self.tr_root_lb, self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z));
         }
