@@ -13625,6 +13625,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 得のあった問題は r ≥ 0.76 (多くは ≥ 0.8) だったので、真ん中を両者の間 0.69 に、幅を「害の側の多く (≤ 0.46) で 1 割以下、得の側の多く (≥ 0.8)
             // で 7 割以上」になる 0.1 にした。HiGHS 式の衝突スコア (付け方の切り替えで連続には混ぜられない) は σ ≥ 0.5 の間だけ入れる
             // 部分 MIP (RINS など) では上げない (主の木だけ。部分 MIP で上がると、その結果を通して上がらない問題でも主の道筋が変わった)
+            // 診断 `ENOMOTO_MIP_SBADAPT_DIAG` (analysis/sbadapt_20261124、解き方は変えない): 主の木で 200 ノードごとに、強分枝の試作の効き方を分ける
+            // 特徴の候補 (大きさによらない比) を出す: 双対退化で強分枝を省いた割合、閉じた葉のうち実行不能で閉じた割合、1 ノードあたりに作った
+            // 衝突の数、強分枝の LP の数 / ノード、子の伝播で実行不能になった強分枝の子 / 強分枝の LP
+            if !self.params.submip && self.nodes > 0 && self.nodes % 200 == 0 && env_str!("ENOMOTO_MIP_SBADAPT_DIAG").is_some() {
+                let leaves = (self.pc.objlim_leaves + self.pc.infeasible_leaves).max(1) as f64;
+                eprintln!(
+                    "SBADAPT_FEAT nodes {} t {:.2} deg {:.4} infl {:.4} cpn {:.4} sbpn {:.4} sbinf {:.4} leaves {} sel {}",
+                    self.nodes,
+                    self.start.elapsed().as_secs_f64(),
+                    self.sb_degen_stats[1] as f64 / self.sb_degen_stats[0].max(1) as f64,
+                    self.pc.infeasible_leaves as f64 / leaves,
+                    self.multi_stats[1] as f64 / self.nodes as f64,
+                    self.sb_lps as f64 / self.nodes as f64,
+                    self.sb_prop_stats[0] as f64 / self.sb_lps.max(1) as f64,
+                    self.pc.objlim_leaves + self.pc.infeasible_leaves,
+                    self.sb_degen_stats[0]
+                );
+            }
             if let Some(w) = cw_ramp().filter(|_| !self.params.submip) {
                 let win = tunable!("ENOMOTO_T_MIP_CW_DYN_WINDOW", 200u64, u64).max(1);
                 if self.nodes >= self.cw_dyn_state.1 + win {
