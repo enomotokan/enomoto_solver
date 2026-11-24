@@ -18952,14 +18952,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             self.add_conflict();
                         }
                         self.dom.backtrack_to(self.p, pos);
-                        cut[side] = true;
-                        if !noconf {
-                            self.pc.add_cutoff(j, is_up);
-                        }
                         self.sb_prop_stats[0] += 1;
-                        continue;
+                        // 診断 `ENOMOTO_MIP_SB_PROP_NOCUT=1` (sbadapt_20261124): 伝播で矛盾しても子を切らず、伝播なしの定義域で子の LP を解く
+                        // (切るかどうかと子の証明は LP で決める。既定の強分枝と同じ)
+                        if env_str!("ENOMOTO_MIP_SB_PROP_NOCUT").is_none() {
+                            cut[side] = true;
+                            if !noconf {
+                                self.pc.add_cutoff(j, is_up);
+                            }
+                            continue;
+                        }
                     }
-                    if sb_probebd {
+                    if ok && sb_probebd {
                         let cs: Vec<usize> = self.dom.changes_since(pos).map(|(c, _, _)| c).filter(|&c| c != j).collect();
                         for c in cs {
                             side_bd[side].insert(c, (self.dom.lo[c], self.dom.up[c]));
@@ -18967,7 +18971,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     // 診断 `ENOMOTO_MIP_SB_PROP_BT_EARLY=1` (sbadapt_20261124): 伝播は子を切る判定と境界の記録だけに使い、子の LP を解く前に
                     // 定義域を戻す (子の LP・子の証明は伝播なしの定義域で作る)
-                    if env_str!("ENOMOTO_MIP_SB_PROP_BT_EARLY").is_some() {
+                    if !ok || env_str!("ENOMOTO_MIP_SB_PROP_BT_EARLY").is_some() {
                         self.dom.backtrack_to(self.p, pos);
                     } else if env_str!("ENOMOTO_MIP_SB_PROP_NO_LP").is_none() {
                         for (c, _, _) in self.dom.changes_since(pos) {
