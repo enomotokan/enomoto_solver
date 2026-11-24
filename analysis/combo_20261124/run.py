@@ -1,5 +1,6 @@
 """combo の計測の分担を回す: python analysis/combo_20261124/run.py K (shards.json の K 番目の (問題, 設定, 種, 秒) を順に解き、res_sK.jsonl に足す)。
-止めても同じコマンドで続きから回る (同じ (問題, 設定, 種) の行があれば飛ばす。crash・取得失敗の行は次の回にやり直す)。
+止めても同じコマンドで続きから回る (同じ (問題, 設定, 種) の行があれば飛ばす。crash・取得失敗の行は次の回にやり直す。
+ただし外から -9 で殺された crash (台のメモリ不足の OOM) が 2 回そろった回は、crash で確定してやり直さない)。
 ソルバーは同時に 1 つ (4 スレッドの回は 4 コアを使うので、ほかの計測と並べない)。上限 + 300 秒を過ぎたら打ち切って killed とする。
 行の形は analysis/protoscreen_20261124/run.py と同じ (この台本はその写し)。設定は cfg.py。名前が _t1 で終われば 1 スレッド、_t4 なら 4 スレッド。
 
@@ -30,14 +31,18 @@ else:
     mine = mine[:len(mine) - n_tail]
 OUT = Path(argv[3]) if len(argv) > 3 else D / (f"res_s{k}_tail.jsonl" if TAIL else f"res_s{k}.jsonl")
 done = set()
+oom = {}  # 外から -9 で殺された crash (台のメモリ不足の OOM) の回数。2 回そろった回は crash で確定し、やり直さない (README 8 節)
 # 持ち主と手伝いの両方の行を見る (渡す前に持ち主が回した組・渡した後で手伝いが回した組を、もう一度回さない)
 for F in {OUT, D / f"res_s{k}.jsonl", D / f"res_s{k}_tail.jsonl"}:
     if not F.exists(): continue
     for l in F.read_text().splitlines():
         if not l.strip(): continue
-        r = json.loads(l)
+        r = json.loads(l); key = (r["problem"], r["cfg"], r["seed"])
         if r["result"].get("status") not in ("crash", "fetch_error"):
-            done.add((r["problem"], r["cfg"], r["seed"]))
+            done.add(key)
+        elif r["result"].get("status") == "crash" and r["result"].get("returncode") == -9:
+            oom[key] = oom.get(key, 0) + 1
+            if oom[key] >= 2: done.add(key)
 try:
     COMMIT = subprocess.run(["git", "-C", str(WT), "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
 except Exception:  # noqa: BLE001

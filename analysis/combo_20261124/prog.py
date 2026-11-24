@@ -21,14 +21,19 @@ SH = json.loads((D / "shards.json").read_text())["shards"]
 TO = json.loads((D / "takeover.json").read_text()) if (D / "takeover.json").exists() else {}
 print("分担  済み/回数  実績の比  残りの見積り(時間)  手伝いに渡した組")
 for k, runs in enumerate(SH):
-    rows = {}
+    rows = {}; oom = {}
     for f in (D / f"res_s{k}.jsonl", D / f"res_s{k}_tail.jsonl"):
         if f.exists():
             for l in f.read_text().splitlines():
                 if l.strip():
                     r = json.loads(l)
+                    key = (r["problem"], r["cfg"])
                     if r["result"].get("status") not in ("crash", "fetch_error"):
-                        rows[(r["problem"], r["cfg"])] = r
+                        rows[key] = r
+                    elif r["result"].get("status") == "crash" and r["result"].get("returncode") == -9:
+                        # run.py と同じく、OOM が 2 回そろった回は済んだとみる (wall はその回の最後の行)
+                        oom[key] = oom.get(key, 0) + 1
+                        if oom[key] >= 2: rows[key] = r
     done = [(p, c) for p, c, _, _ in runs if (p, c) in rows]
     e_done = sum(est(p, c) for p, c in done)
     ratio = sum(rows[x]["wall"] for x in done) / e_done if e_done else 1.0
