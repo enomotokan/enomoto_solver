@@ -58,6 +58,12 @@ def parse(err):
             f["zero_obj"] = kv.get("zero_obj") == "true"
             pb, pi = int(kv.get("prune_bound", 0)), int(kv.get("prune_infeas", 0))
             f.update(prune_bound=pb, prune_infeas=pi, phi=pi / (pi + pb) if pi + pb else None, degen=num(kv.get("degen", "nan")))
+            # 1 ノードあたりの衝突の数 (SB_ADAPT の cpn の近い量。FEAT の conflicts は HiGHS 式の衝突解析で作った数)
+            f["cpn"] = int(kv.get("conflicts", 0)) / (int(kv.get("nodes", 0)) + 1)
+            # NODEROWS_ADAPT の φ (nra_share、(実行不能で閉じた葉 + 1) / (閉じた葉 + 2))。試作をつけなくても数えている
+            if "nra_inf" in kv:
+                ni, nb = int(kv["nra_inf"]), int(kv["nra_bound"])
+                f.update(nra_inf=ni, nra_bound=nb, nra_phi=(ni + 1) / (ni + nb + 2))
         elif l.startswith("MIP: branching:") and "sb_sel" not in f:
             m = re.search(r"(\d+) selections, (\d+) without strong branching for dual degeneracy; sb LPs (\d+) iters (\d+)", l)
             if m:
@@ -76,6 +82,18 @@ def parse(err):
             if m:
                 for k, v in zip(("enum_fixed", "enum_tightened", "enum_eqpairs", "enum_pairs"), map(int, m.groups())):
                     f[k] = f.get(k, 0) + v
+        elif l.startswith("MIP: ENUM_ADAPT:"):
+            # ENUM_ADAPT をつけたとき: 最初の周の s と、続けた・止めた回数
+            m = re.search(r" s " + NUM + r" f " + NUM + r" -> (\w+)", l)
+            if m:
+                f.setdefault("enum_adapt_s1", num(m[1]))
+                k = "enum_adapt_" + m[3]
+                f[k] = f.get(k, 0) + 1
+        elif l.startswith("MIP: node rows adapt"):
+            # NODEROWS_ADAPT をつけたとき: 終わりの φ (nra_share) と f の平均
+            m = re.search(r"share " + NUM + r", f now " + NUM + r", mean f " + NUM + r"\)", l)
+            if m:
+                f.update(nra_share=num(m[1]), nra_mean_f=num(m[3]))
         elif l.startswith("MIP: objective propagation:") and "objprop_pruned" not in f:
             m = re.search(r"pruned (\d+) nodes.*node bounds from both children (\d+)", l)
             if m:

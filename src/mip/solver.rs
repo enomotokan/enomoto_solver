@@ -21126,9 +21126,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let deg = if self.feat[4] > 0 { self.feat[3] as f64 / 1000.0 / self.feat[4] as f64 } else { f64::NAN };
         let zero_obj = self.p.cost.iter().all(|&c| c == 0.0);
         format!(
-            "FEAT {tag} tid={} nodes={} prune_bound={} prune_infeas={} int_leaves={} conf_calls={} conflicts={} conf_meanlen={:.1} posgain={}/{} degen={:.3} zero_obj={} obj_step={}",
+            "FEAT {tag} tid={} nodes={} prune_bound={} prune_infeas={} int_leaves={} conf_calls={} conflicts={} conf_meanlen={:.1} posgain={}/{} degen={:.3} zero_obj={} obj_step={} nra_inf={} nra_bound={}",
             self.pool_tid, self.nodes, self.feat[0], self.feat[1], self.feat[2], self.multi_stats[0], self.multi_stats[1],
-            self.multi_stats[3] as f64 / self.multi_stats[1].max(1) as f64, fd.2, fd.3, deg, zero_obj, self.obj_step.is_some()
+            self.multi_stats[3] as f64 / self.multi_stats[1].max(1) as f64, fd.2, fd.3, deg, zero_obj, self.obj_step.is_some(),
+            // 閉じた葉の数 ([`Self::nra_leaf`]、`ENOMOTO_MIP_NODEROWS_ADAPT` の φ の元。試作をつけなくても数えている。analysis/protoscreen_20261124 8 節)
+            self.nra_leaves[0], self.nra_leaves[1]
         )
     }
 
