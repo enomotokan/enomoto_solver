@@ -6,7 +6,7 @@ cd "$(dirname "$0")/../.."
 D=analysis/sbadapt_20261124; tag=$1; p=$2; tl=$3; shift 3
 extra=""; case $p in satellites2*) extra="ENOMOTO_MIP_HO4_ACFIX=d";; esac
 f=$D/logs/${tag}_$p.log
-env $extra "$@" ENOMOTO_MIP_SBADAPT_DIAG=1 ENOMOTO_MIP_LOG=1 ENOMOTO_MIP_THREADS=1 ENOMOTO_T_MIP_SEED=1 python3 scripts/run_miplib_benchmark.py --worker-ours .miplib_cache/$p.mps --time-limit $tl --threads 1 > $f 2>&1
+env ENOMOTO_MIP_SBADAPT_DIAG=1 ENOMOTO_MIP_LOG=1 ENOMOTO_MIP_THREADS=1 ENOMOTO_T_MIP_SEED=1 $extra "$@" python3 scripts/run_miplib_benchmark.py --worker-ours .miplib_cache/$p.mps --time-limit $tl --threads 1 > $f 2>&1
 r=$(grep '^{' $f | tail -1); gzip -f $f
 echo "{\"tag\": \"$tag\", \"problem\": \"$p\", \"tl\": $tl, \"env\": \"$extra $*\", \"result\": ${r:-null}}" >> $D/res.jsonl
 echo "$tag $p $(echo $r | cut -c1-150)"
