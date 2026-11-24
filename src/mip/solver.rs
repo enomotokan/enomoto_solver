@@ -1500,6 +1500,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) hcm_auto: bool,
     /// [`Self::root_obj_probe`] の (試した列, 固定した列)
     root_obj_probe_stats: [u64; 2],
+    /// `ENOMOTO_MIP_ROOT_OBJ_PROBE_HULL=2`: 根の打ち切り値つきプロービングを終えた時点の [`Domain::bimpl_stats`] (木の中で締めた回数を差で出す)
+    hull2_bimpl_at_probe: [u64; 2],
     /// 試作 `ENOMOTO_MIP_OBJPROBE` ([`Self::objprobe_round`]) の状態
     pub(super) objp: ObjProbeState,
     sb_prop_stats: [u64; 5],
@@ -6086,6 +6088,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         cpp: CutPropState::default(),
         hcm_auto: snap.as_ref().is_some_and(|sn| sn.hcm_auto),
         root_obj_probe_stats: [0; 2],
+        hull2_bimpl_at_probe: [0; 2],
         objp: ObjProbeState::default(),
         sb_prop_stats: [0; 5],
         sb_tighten_count: 0,
@@ -12897,6 +12900,21 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_ROOT_OBJ_PROBE_SUBMIP`: サブ MIP (RENS・RINS など) の根でも行う。サブ MIP では渡された打ち切り値
         // (元の問題の暫定解) も使う
         let probe_sub = env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE_SUBMIP").is_some();
+        // 試作 `ENOMOTO_MIP_ROOT_OBJPROP_GLOBAL=1` (既定では使わない、analysis/objprobehull_20261124): 根の打ち切り値つきプロービングの前に、
+        // 根の定義域で目的の伝播 (打ち切り値) をかけ、整数列の境界を大域的に締める ([`Self::root_objprop_global`])
+        if env_str!("ENOMOTO_MIP_ROOT_OBJPROP_GLOBAL").is_some() && self.snap.is_none() && !self.params.submip && self.has_cutoff_value() && !self.dom.infeasible {
+            if self.root_objprop_global().is_none() {
+                // 打ち切り値より良い解はない: 自分の暫定解が最適 (根の打ち切り値つきプロービングの証明と同じ扱い)
+                if let Some(z) = self.incumbent.as_ref().map(|(z, _)| *z) {
+                    if self.shared.as_ref().is_none_or(|s| !(s.best() < z)) {
+                        if self.params.verbose {
+                            eprintln!("MIP: ROOT_OBJPROP_GLOBAL proved the incumbent {z:.10e} optimal ({:.2}s)", self.start.elapsed().as_secs_f64());
+                        }
+                        return self.finish(MipStatus::Optimal, z);
+                    }
+                }
+            }
+        }
         if env_str!("ENOMOTO_MIP_NO_ROOT_OBJ_PROBE").is_none() && self.snap.is_none() && (!self.params.submip || probe_sub) {
             let proved = self.root_obj_probe();
             if dbg_root && !self.dbg_contains() {
@@ -15742,6 +15760,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             };
             let basis = keep_basis.then_some(basis);
             let prot = if keep_basis { self.basis_protected_cuts() } else { None };
+            // 診断 `ENOMOTO_MIP_DIAG_GLOBALAUDIT` (analysis/globalaudit_20261124、解き方は変えない): 根のノードを分枝するときに、根の定義域が
+            // 大域的な境界より締まっている (子に引き継がれず、根へ戻ると捨てる) 列を理由ごとに数える
+            if node.depth == 0 && super::domain::globalaudit_on() && self.params.verbose && !self.params.submip && self.snap.is_none() {
+                self.globalaudit_root();
+            }
             // 強分岐で子の LP が最適まで解けていれば、その値を子の下界にする
             let sb_bounds = self.last_sb.filter(|&(j, _, _)| j == col && env_str!("ENOMOTO_MIP_NO_SB_CHILD_BOUND").is_none());
             let mut of_fixes = std::mem::take(&mut self.of_node_fixes);
@@ -21901,6 +21924,66 @@ impl<'a, L: MipLp> Solver<'a, L> {
         [probed, lps, fixed_total]
     }
 
+    /// 試作 `ENOMOTO_MIP_ROOT_OBJPROP_GLOBAL=1`: 根の定義域で行と目的 (`目的値 <= 打ち切り値`) の伝播をかけ、締まった整数列の境界を
+    /// 大域的に置く。目的の伝播は既定では木でも根でも使っておらず (`ENOMOTO_MIP_OBJ_PROP`)、根の打ち切り値つきプロービングの各側の試しの
+    /// 中だけで使われていたので、x_j を置かずに出る固定 (fiber で 113 本中 106 本) が大域的な境界に入っていなかった。打ち切り値より良い解に
+    /// 対して成り立つので、片側の固定と同じく大域的に置いてよい。連続列は置かない (目的の切りを境界に言い直しただけになり、LP に入ると
+    /// 害がある: mas76、[`Self::obj_probe_core`] の `ENOMOTO_MIP_ROOT_OBJ_PROBE_HULL` の注釈)。伝播が矛盾すれば打ち切り値より良い解はないので、
+    /// `None` を返す (定義域は戻したまま。呼び手が暫定解を最適とする)。それ以外は (締めた整数列の境界, 固定された整数列) を返す
+    fn root_objprop_global(&mut self) -> Option<(usize, usize)> {
+        let p = self.p;
+        let t0 = Instant::now();
+        let pos = self.dom.stack_len();
+        let ok = self.dom.propagate(p) && self.propagate_objective_with(false);
+        if !ok {
+            self.dom.backtrack_to(p, pos);
+            if self.params.verbose {
+                eprintln!("MIP: ROOT_OBJPROP_GLOBAL: the objective propagation at the root is infeasible (no solution better than the cutoff)");
+            }
+            return None;
+        }
+        let mut best: std::collections::BTreeMap<(usize, bool), f64> = std::collections::BTreeMap::new();
+        for (c, upper, v) in self.dom.changes_since(pos) {
+            if p.is_int[c] {
+                best.insert((c, upper), v);
+            }
+        }
+        self.dom.backtrack_to(p, pos);
+        let (mut nb, mut nfix, mut shrink) = (0usize, 0usize, 0.0f64);
+        for (&(c, upper), &v) in &best {
+            let (l0, u0) = (self.dom.global_lo[c], self.dom.global_up[c]);
+            self.dom.tighten_global(p, c, upper, v);
+            let (l1, u1) = (self.dom.global_lo[c], self.dom.global_up[c]);
+            if l1 == l0 && u1 == u0 {
+                continue;
+            }
+            if upper {
+                self.dom.tighten_upper(p, c, u1);
+            } else {
+                self.dom.tighten_lower(p, c, l1);
+            }
+            nb += 1;
+            nfix += (l1 == u1 && l0 != u0) as usize;
+            if (u0 - l0).is_finite() {
+                shrink += (u0 - l0) - (u1 - l1);
+            }
+        }
+        let ok = self.dom.propagate(p);
+        if self.params.verbose {
+            eprintln!(
+                "MIP: ROOT_OBJPROP_GLOBAL: {nb} integer bounds tightened globally, {nfix} integer columns fixed, width shrink {shrink:.6e}{} (cutoff {:.10e}, {:.2}s)",
+                if ok { "" } else { ", infeasible" },
+                self.prune_limit(),
+                t0.elapsed().as_secs_f64()
+            );
+        }
+        if !ok {
+            // 大域的な締め付けの後の伝播が矛盾: 打ち切り値より良い解はない (上の矛盾と同じ)
+            return None;
+        }
+        Some((nb, nfix))
+    }
+
     /// どちらの値でも矛盾する列が見つかった (打ち切り値より良い解がない) なら真。
     fn root_obj_probe(&mut self) -> bool {
         let o = ObjProbeOpts {
@@ -22373,6 +22456,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 締め付けで固定された整数列は大域的な境界の比べでそのまま数えられ、固定でない締め付けは数えない)。
         // ループの中の試し (`o.in_loop`) では使わない
         let hull = env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE_HULL").is_some() && !o.in_loop;
+        // `ENOMOTO_MIP_ROOT_OBJ_PROBE_HULL=2`: 共通の境界に加えて、両側の境界から導かれる変数の境界の式
+        // `y >= l0 + (l1 - l0) x_j`・`y <= u0 + (u1 - u0) x_j` を、含意 `x_j = v ⇒ y >= l_v` / `y <= u_v` (片側が真に強い向きだけ) の形で
+        // 定義域の表 ([`Domain::add_bound_implications`]) に残し、木の伝播で使う (x_j の固定から y を締める向きと、y の範囲から x_j を
+        // 固定する対偶)。y が 0-1 列の含意 (同値を含む) は既定の含意の学習 (`learn`、含意の表) が既に入れるので、0-1 でない列だけ
+        let hull2 = hull && env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE_HULL").is_some_and(|v| v == "2");
+        // 診断 (=2): 足した含意の本数、そのうち y が両側で固定される等式の列の数、0-1 の y で同値になった組の数 (含意の表に入る)
+        let (mut rel_n, mut rel_eq, mut rel_equiv) = (0usize, 0usize, 0usize);
+        let bimpl0 = self.dom.bimpl_stats;
         // 診断: 締めた境界の数・列の数・締めで固定された整数列の数・幅の縮みの合計 (有限から有限)・無限の境界が有限になった数
         let (mut hull_bounds, mut hull_fixint, mut hull_shrink, mut hull_inf) = (0usize, 0usize, 0.0f64, 0usize);
         // 診断: 基準 (x_j を置かない伝播) と同じだった整数列の締め付け、基準より締まらず置かなかった連続列の締め付け
@@ -22457,6 +22548,45 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                     }
                     [false, false] if hull => {
+                        // =2: 両側の境界 (変わっていなければ今の境界) から含意を作る (締め付けを置く前の境界と比べる)
+                        let mut rels: Vec<(usize, usize, usize, bool, f64)> = Vec::new();
+                        if hull2 {
+                            // 列ごとの [l0, u0, l1, u1] (記録で最後の値 = 最も締まった値)
+                            let mut sb: std::collections::BTreeMap<usize, [f64; 4]> = std::collections::BTreeMap::new();
+                            for (v, ch) in hull_ch.iter().enumerate() {
+                                for &(c, upper, val) in ch {
+                                    if c == j {
+                                        continue;
+                                    }
+                                    let e = sb.entry(c).or_insert([self.dom.lo[c], self.dom.up[c], self.dom.lo[c], self.dom.up[c]]);
+                                    e[2 * v + upper as usize] = val;
+                                }
+                            }
+                            let tol = |v: f64| 1e-9 * (1.0 + v.abs());
+                            for (&c, &[l0, u0, l1, u1]) in &sb {
+                                let bin = p.is_int[c] && self.dom.global_lo[c] >= 0.0 && self.dom.global_up[c] <= 1.0;
+                                if bin {
+                                    if l0 == u0 && l1 == u1 && l0 != l1 {
+                                        rel_equiv += 1;
+                                    }
+                                    continue;
+                                }
+                                let k0 = rels.len();
+                                if l0 > l1 + tol(l0) {
+                                    rels.push((j, 0, c, false, l0));
+                                } else if l1 > l0 + tol(l1) {
+                                    rels.push((j, 1, c, false, l1));
+                                }
+                                if u0 < u1 - tol(u0) {
+                                    rels.push((j, 0, c, true, u0));
+                                } else if u1 < u0 - tol(u1) {
+                                    rels.push((j, 1, c, true, u1));
+                                }
+                                if rels.len() > k0 && (u0 - l0).abs() <= tol(l0) && (u1 - l1).abs() <= tol(l1) {
+                                    rel_eq += 1;
+                                }
+                            }
+                        }
                         let mut tight = super::probe_hull_bounds(j, &hull_ch[0], &hull_ch[1], &self.dom.lo, &self.dom.up);
                         // 比べの基準: x_j を置かずに今の定義域で同じ伝播 (行・目的・被約費用の行・カットの行) をした境界。
                         // 連続列の境界がこれより締まらないなら、それは x_j の試しから来たものでなく「目的値 <= 打ち切り値」を
@@ -22511,7 +22641,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 hull_inf += 1;
                             }
                         }
-                        if !tight.is_empty() && !self.dom.propagate(p) {
+                        if !rels.is_empty() {
+                            rel_n += rels.len();
+                            self.dom.add_bound_implications(p, &rels);
+                        }
+                        if (!tight.is_empty() || !rels.is_empty()) && !self.dom.propagate(p) {
                             both = true;
                             break;
                         }
@@ -22600,16 +22734,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if hull && (self.params.verbose || (self.params.submip && env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE_LOG").is_some())) {
             eprintln!(
-                "MIP: {}root objective probing hull (ENOMOTO_MIP_ROOT_OBJ_PROBE_HULL): {hull_bounds} bounds tightened on {} columns ({} integer, {} continuous), {hull_fixint} integer columns fixed, width shrink {hull_shrink:.6e} (finite), {hull_inf} infinite bounds made finite; integer bounds equal to the propagation without x_j {hull_same_int}, continuous bounds not tighter than it (skipped) {hull_skip_cont}",
+                "MIP: {}root objective probing hull (ENOMOTO_MIP_ROOT_OBJ_PROBE_HULL): {hull_bounds} bounds tightened on {} columns ({} integer, {} continuous), {hull_fixint} integer columns fixed, width shrink {hull_shrink:.6e} (finite), {hull_inf} infinite bounds made finite; integer bounds equal to the propagation without x_j {hull_same_int}, continuous bounds not tighter than it (skipped) {hull_skip_cont}; =2: {rel_n} bound implications added ({rel_eq} columns with an equation, total in the table {}), binary equivalences {rel_equiv} (in the implication table), tightened by them during this probing {:?}",
                 if self.params.submip { "sub-MIP " } else { "" },
                 hull_cols.iter().filter(|&&b| b).count(),
                 (0..p.n).filter(|&c| hull_cols[c] && p.is_int[c]).count(),
                 (0..p.n).filter(|&c| hull_cols[c] && !p.is_int[c]).count(),
+                self.dom.bound_implication_count(),
+                [self.dom.bimpl_stats[0] - bimpl0[0], self.dom.bimpl_stats[1] - bimpl0[1]],
             );
         }
         if o.in_loop {
             return (both, fixed, probed);
         }
+        self.hull2_bimpl_at_probe = self.dom.bimpl_stats;
         self.root_obj_probe_stats = [probed as u64, fixed as u64];
         if self.params.verbose || (self.params.submip && env_str!("ENOMOTO_MIP_ROOT_OBJ_PROBE_LOG").is_some()) {
             eprintln!(
@@ -23517,6 +23654,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return false;
         }
         let ok = self.lit_conflicts.add(&l, self.importing);
+        // 診断 `ENOMOTO_MIP_DIAG_GLOBALAUDIT` (analysis/globalaudit_20261124): 長さ 1 の衝突 (大域的な固定) を数える
+        if ok && super::domain::globalaudit_on() {
+            use std::sync::atomic::Ordering::Relaxed;
+            let g = &super::domain::GA_CONF;
+            g[0].fetch_add(1, Relaxed);
+            if l.len() == 1 {
+                g[1].fetch_add(1, Relaxed);
+                g[2].fetch_add(self.importing as u64, Relaxed);
+            }
+        }
         if ok {
             self.lit_stats[0] += 1;
             // 作ったときには知らせず、刈り込み・締め付けに使われたときに知らせる (`ENOMOTO_MIP_TREE_SHARE_LITS_AT_ONCE` なら作ったときに)
@@ -24140,6 +24287,75 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP: RSTCRIT t: newly fixed columns hold {nnz_new} of {nnz_free} nonzeros ({:.1}%) at node {}; node limit of the tree restart ignored", 100.0 * s, self.nodes);
         }
         big
+    }
+
+    /// 診断 `ENOMOTO_MIP_DIAG_GLOBALAUDIT` (analysis/globalaudit_20261124): 根のノード (深さ 0) を分枝する時点で、定義域が大域的な境界より
+    /// 締まっている列を、その境界を最後に変えた記録の理由ごとに数えて出す。深さ 0 の変更はすべて根で (打ち切り値より良い解について)
+    /// 成り立つが、子には分枝だけが渡り、`reset_to_root` で巻き戻すので、大域的な境界に入れていない分は木では捨てることになる。
+    /// 理由の文字は [`Domain::reason_counts_int`] と同じ (B 決定・含意 (-1)、R 行、L 局所の被約費用、S 強分枝、O オービトープ、P 双対証明、
+    /// F リテラルの衝突、J 目的の伝播、E その他、C カットプール。P・C は通し番号つきの理由も含む)
+    fn globalaudit_root(&self) {
+        let p = self.p;
+        let d = &self.dom;
+        let len = d.stack_len();
+        // (列, 上限か) ごとの最後の記録の位置と理由
+        let mut last: std::collections::HashMap<(usize, bool), (usize, i32)> = std::collections::HashMap::new();
+        for k in 0..len {
+            let (j, upper, _, r) = d.trail_entry(k);
+            last.insert((j, upper), (k, r));
+        }
+        let cls = |r: i32| -> usize {
+            match r {
+                r if super::domain::proof_reason_id(r).is_some() => 5,
+                r if super::domain::cut_reason_id(r).is_some() => 9,
+                -1 => 0,
+                r if r >= 0 => 1,
+                -3 => 2,
+                -4 => 3,
+                -5 => 4,
+                -6 => 5,
+                -7 => 6,
+                -8 => 7,
+                -9 => 9,
+                _ => 8,
+            }
+        };
+        let (mut tight, mut fixed, mut cont) = ([0usize; 10], [0usize; 10], 0usize);
+        let mut no_rec = 0usize;
+        for j in 0..p.n {
+            let lo_t = d.lo[j] > d.global_lo[j];
+            let up_t = d.up[j] < d.global_up[j];
+            if !(lo_t || up_t) {
+                continue;
+            }
+            if !p.is_int[j] {
+                cont += 1;
+                continue;
+            }
+            let a = if lo_t { last.get(&(j, false)).copied() } else { None };
+            let b = if up_t { last.get(&(j, true)).copied() } else { None };
+            let Some((_, r)) = [a, b].into_iter().flatten().max_by_key(|e| e.0) else {
+                no_rec += 1;
+                continue;
+            };
+            tight[cls(r)] += 1;
+            if d.lo[j] == d.up[j] && d.global_lo[j] < d.global_up[j] {
+                fixed[cls(r)] += 1;
+            }
+        }
+        let nm = ['B', 'R', 'L', 'S', 'O', 'P', 'F', 'J', 'E', 'C'];
+        let fmt = |c: &[usize; 10]| nm.iter().zip(c).filter(|(_, &v)| v > 0).map(|(n, v)| format!("{n}{v}")).collect::<Vec<_>>().join(",");
+        let (nt, nf) = (tight.iter().sum::<usize>(), fixed.iter().sum::<usize>());
+        eprintln!(
+            "MIP: GLOBALAUDIT root: at the root branching (restart {}, trail {len}): integer columns tighter than the global bounds {nt} [{}], of which fixed {nf} [{}] (no trail entry {no_rec}); continuous columns tighter {cont}; globally newly fixed integers {}, restart expected now {} / with the local fixes {} ({:.2}s)",
+            self.params.restarts,
+            fmt(&tight),
+            fmt(&fixed),
+            self.newly_fixed_ints(),
+            self.restart_expected(0),
+            self.restart_expected(nf),
+            self.start.elapsed().as_secs_f64()
+        );
     }
 
     /// 根の LP を解く前から新たに大域固定された整数列の数 ([`Self::maybe_restart`] の判定と同じ数え方)。
@@ -28505,6 +28721,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: GAP1 {}: child selection down {} up {}; branching selections {}, with ties {} (candidates in ties {}), changed by the queue counts {}; objective proofs not violated beyond the tolerance {}", super::pseudocost::gap1(), self.gap1_stats[0], self.gap1_stats[1], self.gap1_stats[2], self.gap1_stats[3], self.gap1_stats[4], self.gap1_stats[5], self.gap1_stats[6]);
             }
             eprintln!("MIP: objective propagation: pruned {} nodes, tightened {} bounds; strong branching children infeasible by propagation {}, propagated bounds passed to child LPs {}, node bounds from both children {} (ENOMOTO_MIP_SB_PROBEBD), chained by node propagation {}, nodes pruned {} (=2)", self.obj_prop_stats[0], self.obj_prop_stats[1], self.sb_prop_stats[0], self.sb_prop_stats[1], self.sb_prop_stats[2], self.sb_prop_stats[3], self.sb_prop_stats[4]);
+            if self.dom.bound_implication_count() > 0 {
+                let (a, b) = (self.dom.bimpl_stats, self.hull2_bimpl_at_probe);
+                eprintln!("MIP: ROOT_OBJ_PROBE_HULL=2: {} bound implications in the table; tightened after the root objective probing: from x_j to y {}, contrapositive (y to x_j) {}; total {a:?}", self.dom.bound_implication_count(), a[0] - b[0], a[1] - b[1]);
+            }
             if s3propstat() {
                 let g = |k: usize| S3PROP[k].load(std::sync::atomic::Ordering::Relaxed);
                 eprintln!("MIP: S3PROPSTAT row propagation at nodes (all threads): infeasible {}, tightened integer {} continuous {}", g(0), g(1), g(2));
@@ -28628,6 +28848,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 LPINF_HIST.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect::<Vec<_>>()
             );
             eprintln!("MIP: sibling backtracks {}; basis restores {} (basic count mismatch {}), first LP iterations after a restore {}", self.sibling_backtracks, self.restore_stats.0, self.restore_stats.1, self.restore_stats.2);
+            if super::domain::globalaudit_on() {
+                let g: Vec<u64> = super::domain::GA_RESET.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
+                eprintln!(
+                    "MIP: GLOBALAUDIT reset: returns to the root with pending global tightenings {} (tightenings applied {}); dropped propagation would tighten integer bounds {} (fixing {} integer columns), continuous bounds {}, infeasible {} (all threads, cumulative)",
+                    g[0], g[1], g[2], g[3], g[5], g[4]
+                );
+                let c: Vec<u64> = super::domain::GA_CONF.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
+                eprintln!("MIP: GLOBALAUDIT conflicts: literal conflicts added {}, of length 1 (global fixings kept only in the pool) {} (imported {}) (all threads, cumulative)", c[0], c[1], c[2]);
+            }
             if super::separation::hl2_d2_any() {
                 let d = &self.d2_stats;
                 eprintln!("MIP: HL2_D2: protected inactive cuts kept {} (dropped by the D2a limits {}); D2b: rows stored {}, restores with re-added rows {} ({} rows), failed for missing rows {}, protection count mismatch {}, still mismatched {}", d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]);
