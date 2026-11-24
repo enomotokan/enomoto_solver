@@ -72,3 +72,23 @@ khb05250・p0201 × 21 設定 × 種 1、上限 10 秒 (`python run.py 0 確か�
   回し方 `python run.py K shards_c12.json res_c12_sK.jsonl` (K = 0・1)。既定は shards.json の def_t1・def_t4 の行を共有する (同じ分担ではないので組ではない)。
 - shards.json (1〜11 番) は作り直していない (分担 0〜7 はすでに回し始めている)。summ.py は res_s*.jsonl と res_c12_s*.jsonl の両方を読む。
 - ビルド: この試作の入った先端で作り直してから回す (分担 7 を回している間は作り直さない)。
+
+## 8. 特徴の値を測る台本 (feat.py、条件付き候補の切り分け用)
+
+条件付き候補の試作で、効いた問題と害の出た問題を分けられそうな問題の特徴を、既定の求解の診断ログ (`ENOMOTO_MIP_LOG=1`・`ENOMOTO_MIP_FEAT_DIAG`) から
+1 問 1 行で拾う。時間ではなく数え上げなので、機械の揺れには左右されにくい。
+
+```
+python analysis/protoscreen_20261124/feat.py                         # P 58 問、既定、1 スレッド・種 1・60 秒 → feat.jsonl (止めても続きから)
+python analysis/protoscreen_20261124/feat.py --tag enum --env ENOMOTO_MIP_ENUM_PRESOLVE=all   # 列挙の得 (固定・締め付け・同値な組・衝突の組)
+python analysis/protoscreen_20261124/feat.py --tag sbpb --env ENOMOTO_MIP_SB_PROBEBD=1        # 強分枝の両方の子から置いた境界の数
+```
+
+- 拾う特徴: zero_obj (目的が全部 0)、phi (閉じたノードのうち実行不能で閉じた割合、FEAT の prune_infeas / (prune_infeas + prune_bound))、
+  degen (FEAT の双対退化の平均)、sb_degen_share (分枝の選びのうち双対退化で強分枝を省いた割合)、sb_lps・sb_iters、node_lps・mean_rows・iters_per_lp・final_rows、
+  restart_newly_fixed・restart_threshold (最初の restart check)、enum_* (列挙の前処理、試作をつけたとき)、sbpb_bounds、objprop_pruned、
+  root_gap (|根の下界 − 既知の最適値| / max(1, |最適値|))、first_solution_time・first_solution_rel、nodes・time・status。
+- 診断の出力が道筋を変えていないか、res_s*.jsonl の def_t1 (種 1) と状態・ノード数を比べて same_path に書く。
+- 確かめ (この環境、結果はコミットしない): p0201・markshare_4_0・mas76 を既定で回すと same_path は 3 問とも真 (分担の def_t1 とノード数が一致)。
+  phi は p0201 0.54・markshare_4_0 1.00・mas76 0.98、sb_degen_share は 0・1.00・0。p0201 に enum をつけた回は enum_* が全部 0 だった。
+  P 全問の計測は割り当てがないのでまだ回していない (58 問 × 60 秒以内、1 時間弱の見積り)。
