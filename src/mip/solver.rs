@@ -620,6 +620,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 根の面の頂点の分離 (面の LP とその頂点での分離) に使った時間の合計と、使った面の頂点の数 (`ENOMOTO_MIP_DEBUG_FACETIME`)
     pub(super) face_secs: f64,
     pub(super) face_used: usize,
+    /// 試作 `ENOMOTO_MIP_CUTROBUST`: このラウンドの面の頂点の分離で解いた面の頂点 ([`super::separation`] の `cutrobust_rescore` で使う)
+    pub(super) face_pts: Vec<Vec<f64>>,
     /// (削除した試作 `ENOMOTO_MIP_FACE_ADAPT` が立てていた。今は立たない) このカットのループでは面の頂点の分離をもうしない (面の LP が解けなかった)
     pub(super) face_off_loop: bool,
     /// 試作 `ENOMOTO_MIP_MPSEP` (既定では使わない、analysis/mpsep_20261106.md): 分離する点が LP の頂点でないとき、[`Self::separate`] が
@@ -917,6 +919,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 試作 `ENOMOTO_MIP_HEUR1T` の `r` ([`heur1t`]): 外側の根のカットの各回の LP の被約費用からためた lurking bound
     /// (列ごとに [上限を下限に締める, 下限を上限に締める] の「その固定が正しくなる打ち切り値」= LP の値 + |被約費用| の最大。なければ -inf)
     pub(super) heur1t_lurk: Vec<[f64; 2]>,
+    /// 試作 `ENOMOTO_MIP_HEUR_ADAPT` ([`heur_adapt`]): 木の完了の見込みからの割合 f_t と、それを測ったときのノード数 (64 ノードおきに測り直す)
+    pub(super) heur_adapt_ft: (u64, f64),
     /// 試作 `ENOMOTO_MIP_RENS_BIGGAP` (P2-HEUR): この求解で既定の RENS (LP で整数値の列を全部固定) をもう回したか
     pub(super) rens_biggap_done: bool,
     /// 直近に主のスレッドで解いたサブ MIP が、ノード上限まで進んだか (停滞・成果連動の打ち切りでなく。[`rens_more_nodes_real`])
@@ -4040,6 +4044,35 @@ pub(crate) fn heur1t(c: char) -> bool {
     V.get_or_init(|| env_str!("ENOMOTO_MIP_HEUR1T").map_or(String::new(), |v| v.to_string())).contains(c)
 }
 
+/// 試作 `ENOMOTO_MIP_HEUR_ADAPT=1` (既定では使わない。analysis/heuradapt_20261124/README.md): 1 スレッドの解探しの試作
+/// (`ENOMOTO_MIP_HEUR1T=fl` と `ENOMOTO_MIP_FP_STAGE3`・`POOR_NOINC`・`P2RIT=a`・`FJSYNC_LABEL` の組) を、使う・使わないの 2 択でなく、
+/// 解いている途中で測る大きさによらない比からシグモイドで決める割合 f で連続に効かせる (前例は `ENOMOTO_MIP_CLIQUE_CUTS=sigmoid`)。
+/// - f_g ([`Solver::adapt_gap_f`]): 暫定解の根の LP からの相対ギャップ g から sigmoid(a_g (g − b_g))。暫定解がなければ 1。
+///   b_g は暫定解なし用のヒューリスティクスを回す既存の基準 `ENOMOTO_T_MIP_FJ_POOR_GAP` (0.5)、a_g は `ENOMOTO_T_MIP_HEUR_ADAPT_GAP_A` (11:
+///   害の出た側で g のいちばん大きい noswot (0.07) で f_g が 1% になる ln 99 / 0.43 ≈ 10.7 を丸めた。README 2 節)。
+///   FP・ダイビングの予算の物差し (`P2RIT=a` の前処理の LP の反復へ寄せる割合) と FP の第 3 段のノード・時間の上限に掛ける。
+///   暫定解なし用のヒューリスティクスを回すか (`POOR_NOINC`) は f_g > 1/2 (= g > b_g、既存の基準のまま)。
+/// - f_s (`HEUR1T` の `f`、外側の根から出したサブ MIP の中の robust FJ): そのサブ MIP にここまで使った秒 e と FJ の時間の上限の比から
+///   sigmoid(a_s ln(e / 上限)) を上限に掛ける (e = 上限で 1/2)。a_s = `ENOMOTO_T_MIP_HEUR_ADAPT_SUBFJ_A` (2: 害の出た swath1・misc07 の
+///   ln(e / 上限) −1.35・−1.6 で f_s が 0.1 を切る ln 9 / 1.35 ≈ 1.6 を切り上げた。効いた 10teams 種 3 は +0.17 で 0.58)。実行不能な
+///   RENS のサブ MIP (misc07・blend2) で FJ が 3 秒空回りしていた。f_g は使わない (10teams 種 3 は FJ の 1016 (g = 0.09) で f_g が 0.01 になり
+///   解けなくなった。README 3 節)。
+/// - f_t ([`Solver::adapt_tree_f`]): 1 スレッドの外側の木で、木の完了までの見込みの秒 (未処理のノードの重み Σ 2^−深さ ÷ 完了率の平均の速さ)
+///   と残りの秒の比 r から sigmoid(a_t (ln r − b_t))。a_t = `ENOMOTO_T_MIP_HEUR_ADAPT_TREE_A` (4)、b_t = `ENOMOTO_T_MIP_HEUR_ADAPT_TREE_B` (2)。
+///   b_t は害の出た pg の ln r の最大 1.50 と効いた neos-1171448 の最小 2.57 の中ほど、a_t はその両端で f_t が 0.1・0.9 になる
+///   ln 9 / 0.535 ≈ 4.1 を丸めた (README 2 節)。木の中の大近傍探索の時間の割合を、既定の割合から
+///   4 スレッドのヒューリスティクス役の割合 (`ENOMOTO_T_MIP_HEUR_ROLE_FRAC`) へ f_t だけ寄せる (`HEUR1T` の `l` は f_t = 1 に当たる)。
+///   木を始めて 1 秒・全体の時間の `ENOMOTO_T_MIP_HEUR_TRIG_WARM_FRAC` (5%) までは測らず f_t = 0 (役の起動の判定と同じ温まり。ノード数の下限は使わない)。
+/// - `FJSYNC_LABEL` (同期の FJ の解の名札) はそのまま有効にする。
+pub(crate) fn heur_adapt() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_MIP_HEUR_ADAPT").is_some_and(|v| v != "0"))
+}
+
+fn adapt_sigmoid(z: f64) -> f64 {
+    1.0 / (1.0 + (-z.clamp(-50.0, 50.0)).exp())
+}
+
 pub(crate) fn subcap(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     V.get_or_init(|| env_str!("ENOMOTO_MIP_SUBCAP").map_or(String::new(), |v| v.to_string())).contains(c)
@@ -4674,6 +4707,7 @@ impl SubmipCtl {
         self.outer_t1 = t1;
         self
     }
+
     pub(crate) fn with_nosol(mut self, secs: Option<f64>) -> Self {
         self.nosol_deadline = secs.filter(|s| s.is_finite() && *s >= 0.0).map(|s| Instant::now() + std::time::Duration::from_secs_f64(s));
         self
@@ -5516,6 +5550,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         fc_network: false,
         face_secs: 0.0,
         face_used: 0,
+        face_pts: Vec::new(),
         face_off_loop: false,
         sep_act_override: None,
         tab_calls: 0,
@@ -5680,6 +5715,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         rens_node_limited: false,
         heur1t_seen: Vec::new(),
         heur1t_lurk: Vec::new(),
+        heur_adapt_ft: (0, 0.0),
         rens_biggap_done: false,
         submip_full_nodes: false,
         rens_spawn_node_limit: 0,
@@ -6935,7 +6971,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// [`Self::optface_alt`] の本体。入れ替えの上限 `k`、時間の上限 `cap` 秒 (そのまま使う)、`verbose` なら 1 行の記録を出す。
     pub(super) fn optface_alt_ext(&self, tag: &str, mode: char, seed: u64, cap: f64, k: usize, verbose: bool) -> (Option<L>, usize) {
         let mut alt = self.lp.clone();
-        let sample = tunable!("ENOMOTO_T_MIP_OPTFACE_SAMPLE", 8usize, usize);
+        // `q` (試作 `ENOMOTO_MIP_CUTVERT`) は候補を全部比べる
+        let sample = if mode == 'q' { usize::MAX } else { tunable!("ENOMOTO_T_MIP_OPTFACE_SAMPLE", 8usize, usize) };
         // 試作 `ENOMOTO_MIP_TICKS` の `m` ([`super::ticks_on`]): 移動の時間の上限 `cap` 秒を同じ量の手間の期限にし、時間は 10 倍の安全網にする
         // (`ENOMOTO_MIP_TICKS` の `m` は、呼び手 (`mpsep_extra`) が入れ替えの数で止めるので、ここでは手間の期限を付けない)
         let tk_m = false;
@@ -7696,6 +7733,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 1 スレッド 600 秒で 0 ノード。analysis/hang_20261117/README.md の 10・14 節、docs/improvement_history.md)
         let secs = if feas { tunable!("ENOMOTO_T_MIP_ROBUST_FJ_FEAS_SECS", 30.0, f64) } else { tunable!("ENOMOTO_T_MIP_ROBUST_FJ_SECS", 6.0, f64) };
         let cap = secs.min(if left.is_finite() { frac * left } else { tunable!("ENOMOTO_T_MIP_ROBUST_FJ_SECS", 6.0, f64) });
+        // 試作 `ENOMOTO_MIP_HEUR_ADAPT` ([`heur_adapt`]) の f_s: 外側の根から出したサブ MIP の中では、このサブ MIP にここまで使った秒 e と上限の比から
+        // sigmoid(a_s ln(e / 上限)) を上限に掛ける (e = 上限で 1/2、`HEUR1T` の `f` は f_s = 1 に当たる)
+        let el = self.start.elapsed().as_secs_f64();
+        let cap = if self.params.submip && heur_adapt() && !heur1t('f') && cap > 0.0 {
+            let fs = adapt_sigmoid(tunable!("ENOMOTO_T_MIP_HEUR_ADAPT_SUBFJ_A", 2.0, f64) * (el.max(1e-6) / cap).ln());
+            if env_str!("ENOMOTO_MIP_HEUR_ADAPT_DEBUG").is_some() {
+                eprintln!("HEURADAPT subfj: elapsed {el:.3} cap {cap:.3} f_s {fs:.4} -> {:.3} (root lp secs {:.4}, n {} m {})", fs * cap, self.root_lp_secs, self.p.n, self.p.m);
+            }
+            fs * cap
+        } else {
+            cap
+        };
         if cap <= 0.1 {
             return false;
         }
@@ -10951,6 +11000,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 潜りの手間の上限・LNS の予算などが数分の 1 に縮む。ns1208400 は 4 スレッドだけ基底が渡って 1782 → 388 反復)
         self.root_lp_iters = if probe_kind != "none" && env_str!("ENOMOTO_MIP_P2RIT").is_some() {
             root_iters.max(super::HO4_PROBE_ITERS.with(|c| c.get()))
+        } else if probe_kind != "none" && heur_adapt() {
+            // 試作 `ENOMOTO_MIP_HEUR_ADAPT`: 前処理の LP の最初の LP の反復へ f_g だけ寄せる
+            let full = root_iters.max(super::HO4_PROBE_ITERS.with(|c| c.get()));
+            root_iters + (self.adapt_gap_f() * (full - root_iters) as f64).round() as u64
         } else {
             root_iters
         };
@@ -10958,7 +11011,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `1000 + 5 × 根の LP の反復`、ダイビングの `2 × 根の LP の反復 + 1000` など) も、上の物差し (前処理の LP の最初の LP の反復) で決める。
         // `P2RIT` (値なし) は `self.root_lp_iters` だけを変え、この局所の `root_iters` は温め直した根の LP の反復のままだった
         // (CMS750_4 の 1 スレッド: 根の LP が前処理の LP の基底から 1 反復で終わり、FP の LP が予算約 1000 反復で 2 回目に打ち切られていた)
-        let root_iters = if env_str!("ENOMOTO_MIP_P2RIT").is_some_and(|v| v.contains('a')) { self.root_lp_iters } else { root_iters };
+        let root_iters = if env_str!("ENOMOTO_MIP_P2RIT").is_some_and(|v| v.contains('a')) || heur_adapt() { self.root_lp_iters } else { root_iters };
         self.root_lp_secs = t_root_lp.elapsed().as_secs_f64();
         self.root_lp_ticks = crate::ticks::total() - tk_root_lp;
         if !self.params.submip {
@@ -11997,7 +12050,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // (ダイビング・FP・locks・clique・vbounds) と並列のサブ MIP の後ろへ回す (`f` の位置では blend2・flugpl のように
                 // 後ろの安いものがすぐ見つける問題でも FJ が最大 6 秒空回りした)
                 // 試作 `ENOMOTO_MIP_HEUR1T` の `f` ([`heur1t`]): 外側の根から出したサブ MIP ([`submip_outcome_stop`] の対象) でも回す
-                if robust('g') && (!self.params.submip || (heur1t('f') && self.root_submip.is_some())) && self.incumbent.is_none() {
+                if robust('g') && (!self.params.submip || ((heur1t('f') || heur_adapt()) && self.root_submip.is_some())) && self.incumbent.is_none() {
                     heur!("robust FJ", self.robust_fj_retry());
                 }
                 self.poll_find_thread();
@@ -13590,6 +13643,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if first {
                 self.tprof.tree_start_s = self.start.elapsed().as_secs_f64();
+                // 試作 `ENOMOTO_MIP_HEUR_ADAPT` の診断: 木の始めの f_g と、その元の量
+                if !self.params.submip && (env_str!("ENOMOTO_MIP_HEUR_ADAPT_DEBUG").is_some() || (heur_adapt() && self.params.verbose)) {
+                    let z = self.incumbent.as_ref().map(|(z, _)| *z);
+                    eprintln!("HEURADAPT root: tree start {:.2}s incumbent {z:?} root lp {:.10e} f_g {:.4} root heur iters {} root lp iters {}", self.tprof.tree_start_s, self.fj_poor_lb, self.adapt_gap_f(), self.heur_iters, self.root_lp_iters);
+                }
             }
             first = false;
             self.nodes += 1;
@@ -14697,6 +14755,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // 割合 (`ENOMOTO_T_MIP_HEUR_ROLE_FRAC`、[`heur_role_count`]) まで上げる (暫定解があるときだけ。役も暫定解があるときだけ就く)
                     let frac = if heur1t('l') && !self.params.submip && self.pool.is_none() && self.params.threads <= 1 && self.incumbent.is_some() {
                         frac.max(tunable!("ENOMOTO_T_MIP_HEUR_ROLE_FRAC", 0.25, f64))
+                    } else if heur_adapt() && !self.params.submip && self.pool.is_none() && self.params.threads <= 1 && self.incumbent.is_some() {
+                        // 試作 `ENOMOTO_MIP_HEUR_ADAPT` の f_t: ヒューリスティクス役の割合へ f_t だけ寄せる
+                        let ft = self.adapt_tree_f(Some(&node));
+                        frac + ft * (tunable!("ENOMOTO_T_MIP_HEUR_ROLE_FRAC", 0.25, f64) - frac).max(0.0)
                     } else {
                         frac
                     };
@@ -25280,12 +25342,63 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// (shifting) が FJ の解を少し良くすると止まる (CMS750_4 の 1 スレッド: FJ 767 → shifting 604、根の LP 250 で、FP もダイビングも回らず
     /// 600 秒で 525 止まり。SCIP は FP で 278 を出す)
     pub(super) fn poor_any(&self) -> bool {
-        if env_str!("ENOMOTO_MIP_POOR_NOINC").is_none_or(|v| v == "0") || self.nodes > 1 || self.params.submip || !self.fj_poor_lb.is_finite() {
+        let adapt = heur_adapt();
+        if (env_str!("ENOMOTO_MIP_POOR_NOINC").is_none_or(|v| v == "0") && !adapt) || self.nodes > 1 || self.params.submip || !self.fj_poor_lb.is_finite() {
             return false;
         }
         let Some((z, _)) = self.incumbent.as_ref() else { return false };
+        // 試作 `ENOMOTO_MIP_HEUR_ADAPT`: f_g > 1/2 (g > b_g と同じ)
+        if adapt {
+            return self.adapt_gap_f() > 0.5;
+        }
         let lb = self.fj_poor_lb;
         (z - lb) / z.abs().max(lb.abs()).max(1.0) > tunable!("ENOMOTO_T_MIP_FJ_POOR_GAP", 0.5, f64)
+    }
+
+    /// 試作 `ENOMOTO_MIP_HEUR_ADAPT` ([`heur_adapt`]) の f_g: 暫定解の根の LP の値からの相対ギャップ g = (z − lb) / max(|z|, |lb|, 1) から
+    /// sigmoid(a_g (g − b_g))。暫定解がないか根の LP の値がまだなければ 1 (暫定解なし用のヒューリスティクスは既定でも全部回る)
+    pub(super) fn adapt_gap_f(&self) -> f64 {
+        let Some((z, _)) = self.incumbent.as_ref() else { return 1.0 };
+        let lb = self.fj_poor_lb;
+        if !lb.is_finite() || !z.is_finite() {
+            return 1.0;
+        }
+        let g = (z - lb) / z.abs().max(lb.abs()).max(1.0);
+        let a = tunable!("ENOMOTO_T_MIP_HEUR_ADAPT_GAP_A", 11.0, f64);
+        adapt_sigmoid(a * (g - tunable!("ENOMOTO_T_MIP_FJ_POOR_GAP", 0.5, f64)))
+    }
+
+    /// 試作 `ENOMOTO_MIP_HEUR_ADAPT` ([`heur_adapt`]) の f_t (1 スレッドの外側の木、64 ノードおきに測り直す)。`cur` は今のノード
+    fn adapt_tree_f(&mut self, cur: Option<&OpenNode>) -> f64 {
+        if self.nodes < self.heur_adapt_ft.0 + 64 && self.heur_adapt_ft.0 > 0 {
+            return self.heur_adapt_ft.1;
+        }
+        let now = self.start.elapsed().as_secs_f64();
+        let tree_el = now - self.tprof.tree_start_s;
+        let left = match self.deadline {
+            Some(d) => d.saturating_duration_since(Instant::now()).as_secs_f64(),
+            None => tunable!("ENOMOTO_T_MIP_HEUR_TRIG_NOLIMIT_MULT", 10.0, f64) * tree_el,
+        };
+        let w: f64 = self.queue.iter().chain(cur).map(|n| 0.5f64.powi(n.depth.min(2000) as i32)).sum();
+        let done = (1.0 - w).max(0.0);
+        let v = if tree_el > 0.0 { done / tree_el } else { 0.0 };
+        let est = if v > 1e-12 { w.max(0.0) / v } else { f64::INFINITY };
+        // 温まり: 木を始めて 1 秒・全体の時間の `ENOMOTO_T_MIP_HEUR_TRIG_WARM_FRAC` (5%) (役の起動の判定と同じ。ノード数の下限 100 は
+        // 使わない: 1 ノード 0.17 秒の neos-1171448 では 100 ノードまで 15 秒かかり、その間の最初の大近傍探索 (50・100 ノード目) が既定の割合になった)
+        let warm = tree_el >= 1.0 && tree_el >= tunable!("ENOMOTO_T_MIP_HEUR_TRIG_WARM_FRAC", 0.05, f64) * (tree_el + left);
+        let f = if !warm {
+            0.0
+        } else if left <= 0.0 || !est.is_finite() {
+            1.0
+        } else {
+            let lr = (est.max(1e-9) / left).ln();
+            adapt_sigmoid(tunable!("ENOMOTO_T_MIP_HEUR_ADAPT_TREE_A", 4.0, f64) * (lr - tunable!("ENOMOTO_T_MIP_HEUR_ADAPT_TREE_B", 2.0, f64)))
+        };
+        if self.params.verbose || env_str!("ENOMOTO_MIP_HEUR_ADAPT_DEBUG").is_some() {
+            eprintln!("HEURADAPT tree: nodes {} secs {now:.2} tree {tree_el:.2} open {} w {w:.3e} done {done:.3e} est {est:.3e} left {left:.2} warm {warm} f_t {f:.4}", self.nodes, self.queue.len());
+        }
+        self.heur_adapt_ft = (self.nodes, f);
+        f
     }
 
     /// `ENOMOTO_MIP_FJ_POOR_NOINC` (試作): 根で、暫定解が Feasibility Jump のものだけで、その目的値が根の LP の値から大きく

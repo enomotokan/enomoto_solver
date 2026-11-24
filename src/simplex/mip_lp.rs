@@ -985,7 +985,7 @@ impl TwoStageLp {
     /// 試作 `ENOMOTO_MIP_LU_EXTEND`: 行の追加・削除の始めに、今の基底に対する分解の列順・行順を用意する (持ち越し中のものか、
     /// 今の基底と同じ基底の LU のキャッシュから)。使えなければ `None`。
     fn lu_ext_start(&mut self) -> Option<(Vec<usize>, Vec<usize>, usize, Vec<usize>)> {
-        if !lu_extend_on() || !self.lu_ext_tree {
+        if !lu_extend_on() || !(self.lu_ext_tree || lu_extend_root()) {
             return None;
         }
         let b = self.basis.as_ref()?;
@@ -3751,14 +3751,43 @@ impl TwoStageLp {
                         let mv: f64 = alpha.iter().enumerate().filter(|&(p, _)| basis[p] < n).map(|(_, a)| a.abs()).sum::<f64>() + if q < n { 1.0 } else { 0.0 };
                         (t * mv).min(1e12) + if t > 1e-9 { 1e6 } else { 0.0 } + noise
                     }
+                    // 試作 `ENOMOTO_MIP_CUTVERT=q` (analysis/cutrobust_20261124): 整数列の分数の度合い Σ min(f, 1 − f) の増え
+                    // (入る変数と基底の整数列の値の動きから計算する。増えない入れ替えは選ばず、局所最大で止まる)
+                    'q' => {
+                        let phi = |v: usize, zv: f64| -> f64 {
+                            if v >= n || !is_int.get(v).copied().unwrap_or(false) {
+                                return 0.0;
+                            }
+                            let xv = zv + self.shift[v];
+                            let f = xv - xv.floor();
+                            if f < 1e-6 || f > 1.0 - 1e-6 { 0.0 } else { f.min(1.0 - f) }
+                        };
+                        let mut g = phi(q, z[q] + dir * t) - phi(q, z[q]);
+                        if t > 0.0 {
+                            for (p, &a) in alpha.iter().enumerate() {
+                                if a != 0.0 {
+                                    let v = basis[p];
+                                    g += phi(v, z[v] - dir * a * t) - phi(v, z[v]);
+                                }
+                            }
+                        }
+                        g
+                    }
                     _ => noise,
                 };
+                if mode == 'q' && score <= 1e-9 {
+                    continue;
+                }
                 if best.as_ref().is_none_or(|b| score > b.5) {
                     best = Some((q, dir, t, r, alpha, score));
                 }
                 if mode == 'r' && best.is_some() {
                     break;
                 }
+            }
+            if mode == 'q' && best.is_none() {
+                // 分数の度合いを増やす入れ替えがない (局所最大)
+                break;
             }
             let Some((q, dir, t, r, alpha, _)) = best else {
                 // 引いた候補がどれも動けない: 引いた分を除いて続ける
@@ -4156,4 +4185,11 @@ pub(crate) fn freerow_off(c: char) -> bool {
 pub(crate) fn lu_extend_on() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_str!("ENOMOTO_MIP_LU_EXTEND").is_some_and(|v| v != "0"))
+}
+
+/// 試作 `ENOMOTO_MIP_LU_EXTEND=r` (確かめ用、analysis/luxroot_20261124): 延ばし・縮めを根の LP・根のカットのループでも使う
+/// (直す前の形。単体法の道筋が分解の違いで変わるかを調べる)
+pub(crate) fn lu_extend_root() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_MIP_LU_EXTEND").is_some_and(|v| v.contains('r')))
 }
