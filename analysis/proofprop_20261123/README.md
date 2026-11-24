@@ -66,7 +66,9 @@
   (取り込みの古いものから捨てる)。新しい閾値はなく、1 スレッドの本数 (PROOFCOST の上限) に揃える形。道筋は変わる。
 - 比べ (`cmp_i.txt`、2 回ずつ): 1 スレッドは同じ (使わない)。4 スレッド: mas76 0.95 (1 ノードあたりの時間 69.5 → 58.7 µs、ただしノードは 16 万 → 18 万)、
   pk1 0.85 (1 ノード 86.9 → 84.9 µs)、noswot 0.74 (揺れが大きい: 4.6〜17.5 秒)、fhnw 1.00。4 スレッドの揺れが大きく、2 回では決められない。
-- 確かめ: cargo test 423 通過 (`cargo_test.txt`)。fuzz 7 本 (`ENOMOTO_MIP_PROOFPROP=i`、`fuzz.sh`): `fuzz_i.out`。
+- 確かめ: cargo test 423 通過 (`cargo_test.txt`)。fuzz 7 本 (`ENOMOTO_MIP_PROOFPROP=i`、`fuzz.sh`、`fuzz_i.out`): fuzz_tiny 0/400・
+  fuzz_highs 0/300・fuzz_objint 0/1000・fuzz_slack 不一致 0/1000・fuzz_tiny2 0/400・fuzz_objint2 0/1000・fuzz_slack2 不一致 0/1000。
+- 次の手: `i` は P・M の 4 スレッドの広い計測で決める (1 ノードは軽くなるが、刈る力が落ちてノードが増える問題がある)。
 
 ## 5. HiGHS・SCIP との比べ (読んだ範囲、未計測)
 
