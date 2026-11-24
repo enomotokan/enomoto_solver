@@ -207,5 +207,6 @@ noswot が 4 スレッドで 2.6 倍、mzzv42z が 1.25 倍遅かった。2 択�
 - 適応形は効く 3 問で試作と同じ周を回す (1 スレッドは同じ下界・同じ根)。istanbul・ns1830653 の 4 スレッドの差は道筋の揺れ (同じ周の数・同じ前処理後の大きさ)。
 - mzzv42z: 1 周目 (CLQPRB を含めて 9〜10 秒、既定のプロービングと同じ仕事 + 列挙) の後で止まり、前処理は既定 + 1〜2.6 秒。1 スレッドは既定でも 59.5 秒で上限すれすれ。
 - noswot の 4 スレッドの 5.5 秒は 8.1 節の道筋の揺れ (列挙は何も見つけない)。
-- 誤答の確かめ: `fuzz_adapt.sh` (fuzz 7 本を ENUM_ADAPT=1 で、cargo test を既定と ENUM_ADAPT=1 で)。結果は下に足す。
+- 誤答の確かめ: `fuzz_adapt.sh` (fuzz 7 本を ENUM_ADAPT=1 で、cargo test を既定と ENUM_ADAPT=1 で)。fuzz_tiny 0/400・fuzz_highs 0/300・fuzz_objint 0/1000・fuzz_slack 0/1000・
+  fuzz_tiny2 0/400・fuzz_objint2 0/1000・fuzz_slack2 0/1000 (どれも誤答 0)。cargo test --release --lib は既定・ENUM_ADAPT=1 とも 424 通過・0 失敗 (ブランチの先頭 14e9e0e58 で)。
 - P・M の計測はまだ (親が後でまとめて組む)。
