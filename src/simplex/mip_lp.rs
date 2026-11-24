@@ -985,7 +985,7 @@ impl TwoStageLp {
     /// 試作 `ENOMOTO_MIP_LU_EXTEND`: 行の追加・削除の始めに、今の基底に対する分解の列順・行順を用意する (持ち越し中のものか、
     /// 今の基底と同じ基底の LU のキャッシュから)。使えなければ `None`。
     fn lu_ext_start(&mut self) -> Option<(Vec<usize>, Vec<usize>, usize, Vec<usize>)> {
-        if !lu_extend_on() || !self.lu_ext_tree {
+        if !lu_extend_on() || !(self.lu_ext_tree || lu_extend_root()) {
             return None;
         }
         let b = self.basis.as_ref()?;
@@ -4185,4 +4185,11 @@ pub(crate) fn freerow_off(c: char) -> bool {
 pub(crate) fn lu_extend_on() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_str!("ENOMOTO_MIP_LU_EXTEND").is_some_and(|v| v != "0"))
+}
+
+/// 試作 `ENOMOTO_MIP_LU_EXTEND=r` (確かめ用、analysis/luxroot_20261124): 延ばし・縮めを根の LP・根のカットのループでも使う
+/// (直す前の形。単体法の道筋が分解の違いで変わるかを調べる)
+pub(crate) fn lu_extend_root() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_MIP_LU_EXTEND").is_some_and(|v| v.contains('r')))
 }
