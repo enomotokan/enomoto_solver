@@ -66,7 +66,12 @@ for th, name in (("t1", "1 スレッド"), ("t4", "4 スレッド")):
     print("| 集合 | 組 | 比 | 95% 区間 | 解けた数 既定 → combo | 既定だけ | combo だけ | 1.25 倍超の遅れ | 0.8 倍未満 | 目安 |")
     print("|---|---:|---:|---|---|---:|---:|---:|---:|---|")
     detail = {}
-    for sname, S in SETS:
+    # 記録が無効な回 (crash・killed・取得失敗。台のメモリ不足の OOM もここに入る) が def と combo の両方である組は、
+    # ふだんは解けなかった回 (上限の秒) として数える。比の計算から外した形も、240 問全部と M に併記する。
+    inv = lambda r: st(r) in ("", "crash", "killed", "error", "fetch_error")
+    both_inv = {p for (p, c, s) in R if c == cmb and (p, base, s) in R and inv(R[(p, cmb, s)]) and inv(R[(p, base, s)])}
+    sets = SETS + ([(SETS[1][0] + "、両方無効の組を除く", SETS[1][1] - both_inv), (SETS[0][0] + "、両方無効の組を除く", SETS[0][1] - both_inv)] if both_inv else [])
+    for sname, S in sets:
         prs = sorted({p for (p, c, s) in R if c == cmb and p in S and (p, base, s) in R})
         if not prs:
             print(f"| {sname} | 0 | | | | | | | | |"); continue
@@ -83,6 +88,8 @@ for th, name in (("t1", "1 スレッド"), ("t4", "4 スレッド")):
         print(f"| {sname} | {len(prs)} | {math.exp(m):.3f} | [{math.exp(m - 1.96 * se):.3f}, {hi:.3f}] | {nb} → {nc} | {len(ob)} | {len(oc)} | {len(slow)} | {len(good)} | "
               + ("候補" if not why and not bad else "外れ (" + "・".join(why + (["食い違い"] if bad else [])) + ")") + " |")
         detail[sname] = (lr, ob, oc, slow, good)
+    if both_inv:
+        print(f"\n両方とも記録が無効な組 {len(both_inv)}: " + "; ".join(f"{p} (combo {st(R[(p, cmb, 1)])} / 既定 {st(R[(p, base, 1)])})" for p in sorted(both_inv)))
     if "240 問全部" in detail:
         lr, ob, oc, slow, good = detail["240 問全部"]
         tag = lambda p: "M" if p in SETS[0][1] else "残り"
