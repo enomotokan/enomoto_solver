@@ -1185,7 +1185,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         self.lp.set_costs(&p.cost);
         self.lp.restore_state(&saved);
-        if !found && !self.time_up() && env_str!("ENOMOTO_MIP_FP_STAGE3").is_some_and(|v| v != "0") {
+        if !found && !self.time_up() && (env_str!("ENOMOTO_MIP_FP_STAGE3").is_some_and(|v| v != "0") || super::solver::heur_adapt()) {
             if let Some(r) = best_r {
                 found = self.fp_stage3(&r);
             }
@@ -1239,9 +1239,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             Some(d) => d.saturating_duration_since(std::time::Instant::now()).as_secs_f64(),
             None => f64::INFINITY,
         };
+        // 試作 `ENOMOTO_MIP_HEUR_ADAPT` ([`super::solver::heur_adapt`]): ノードと時間の上限に f_g を掛ける (`FP_STAGE3` だけなら 1)
+        let fa = if super::solver::heur_adapt() && env_str!("ENOMOTO_MIP_FP_STAGE3").is_none() { self.adapt_gap_f() } else { 1.0 };
         let params = super::solver::MipParams {
-            time_limit: (0.1 * remaining).min(10.0),
-            node_limit: 500,
+            time_limit: fa * (0.1 * remaining).min(10.0),
+            node_limit: ((500.0 * fa).round() as u64).max(1),
             rel_gap: 0.0,
             abs_gap: 1e-9,
             verbose: false,
@@ -1287,7 +1289,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 試作 `ENOMOTO_MIP_FJSYNC_LABEL=1` (既定では使わない。analysis/presym_20261123): 主のスレッドで同期して回した FJ (1 スレッドの道) の解にも、
                 // FJ のスレッドの解と同じ名札を付ける。名札がないと「FJ の解だけ」(`inc_only_fj`) にならず、質の悪い FJ の解でも
                 // 暫定解なし用のヒューリスティクス (`ENOMOTO_MIP_FJ_POOR_NOINC` など) が働かない (CMS750_4 の 1 スレッドは FJ の 767 から 600 秒動けなかった)
-                let label = env_str!("ENOMOTO_MIP_FJSYNC_LABEL").is_some_and(|v| v != "0");
+                let label = env_str!("ENOMOTO_MIP_FJSYNC_LABEL").is_some_and(|v| v != "0") || super::solver::heur_adapt();
                 if label {
                     self.heur_label = "feasibility jump";
                 }
