@@ -102,7 +102,10 @@
 
 ## 5. 確かめ
 
-(check.sh の結果を書く)
+`bash analysis/cutrobust_20261124/check.sh` (ビルド c5cac73f2 の作業ツリー、計測の後に単独で):
+- MIP の fuzz 7 本 (fuzz_tiny 400×2・mip_fuzz_vs_highs 300・fuzz_objint 1000×2・fuzz_slack 1000×2) を、A (`CUTVERT=q` + `CLQROW=1`) と B (`CUTROBUST=g` + `CLQROW=2`) で: すべて誤答 0。
+- `cargo test --release --lib`: A つき・既定とも 424 通過・失敗 0。
+- 既定 (環境変数なし) の道は変えていない (`tf2` が `tf` と 9 通りとも同じラウンド・同じ根の下界)。
 
 ## 6. 見立て (推測)
 
