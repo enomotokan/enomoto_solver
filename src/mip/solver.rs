@@ -782,6 +782,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) nra_credit: f64,
     /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の数: [片づけた回, 外した行, 外さなかった行, 選び直しのラウンド, f の和 (× 1e6), f を見た回]
     pub(super) nra_stats: [u64; 6],
+    /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `k` (analysis/comboharm_20261124): NODEROWS_ADAPT が LP から外した行 (指紋 → (係数 (列の昇順), 右辺))。
+    /// 木の中の再スタートの判定 `K` で、今の LP 解で締まっているものを効いているカットの行に足す ([`Solver::nra_k_tight`])
+    pub(super) nra_removed: std::collections::HashMap<u64, (Vec<(usize, f64)>, f64)>,
     /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `r`: 選び直しのラウンドの解き直しで目的値が [伸びた, 伸びなかった] 回
     pub(super) nra_rho: [u64; 2],
     /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `t` ([`Solver::nra_t_ratio`]): [選び直しのラウンドの下界の伸びの和, その手間 (ticks) の和,
@@ -5672,6 +5675,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         nra_leaves: [0; 2],
         nra_credit: 0.0,
         nra_stats: [0; 6],
+        nra_removed: std::collections::HashMap::new(),
         nra_rho: [0; 2],
         nra_t: [0.0; 5],
         nca_hist: [0; 5],
@@ -9801,9 +9805,47 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.ncl_stats[2] += kept;
         }
         if cnt > 0 {
+            // `NODEROWS_ADAPT` の `k`: 外す行を取っておく (上限は d2b と同じく LP の行の 2 倍 + 1000。超えたら全部捨てて数え直す)
+            if frac.is_some() && nra_has('k') {
+                if self.nra_removed.len() > 2 * self.lp.num_rows() + 1000 {
+                    self.nra_removed.clear();
+                }
+                for i in m0..mr {
+                    if remove[i] {
+                        let (_, up) = self.lp.row_bounds(i);
+                        if up.is_finite() {
+                            let mut c = self.lp.row(i);
+                            c.sort_by_key(|&(j, _)| j);
+                            self.nra_removed.insert(super::separation::cut_fingerprint(&c, up), (c, up));
+                        }
+                    }
+                }
+            }
             self.delete_lp_rows(&remove);
             self.ncl_removed_now = true;
         }
+    }
+
+    /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `k` (analysis/comboharm_20261124): NODEROWS_ADAPT が外した行 (今の LP にないもの) のうち、
+    /// 今の LP 解で締まっている (または破られた) ものの数。木の中の再スタートの判定 `K` の「効いているカットの行」に足し、
+    /// NODEROWS_ADAPT の有無で判定の物差しが変わらないようにする (外した行はプールに残り、再スタートしなければ戻りうる)
+    fn nra_k_tight(&self) -> usize {
+        if self.nra_removed.is_empty() {
+            return 0;
+        }
+        let m0 = self.p.m;
+        let in_lp: std::collections::HashSet<u64> = (m0..self.lp.num_rows())
+            .map(|i| {
+                let mut c = self.lp.row(i);
+                c.sort_by_key(|&(j, _)| j);
+                super::separation::cut_fingerprint(&c, self.lp.row_bounds(i).1)
+            })
+            .collect();
+        let x = self.lp.col_values();
+        self.nra_removed
+            .iter()
+            .filter(|(k, (c, u))| !in_lp.contains(k) && c.iter().map(|&(j, a)| a * x[j]).sum::<f64>() >= u - 1e-6 * (1.0 + u.abs()))
+            .count()
     }
 
     /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT`: 閉じた葉を数える (`inf`: 実行不能で閉じた (伝播・LP の実行不能・強分枝の伝播・強分枝の引き継ぎ)、
@@ -27988,6 +28030,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         } else {
             0
         };
+        // 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `k`: NODEROWS_ADAPT が外した行のうち今の LP 解で締まっているものも数える
+        let tcuts_nra = if guard.contains('K') || log { self.nra_k_tight() } else { 0 };
+        let tcuts = tcuts + tcuts_nra;
         let rowdrop_ok = (rowdrop as f64) >= tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_CROWS", 0.1, f64) * self.p.m as f64;
         let mut stop: Option<char> = None;
         for c in guard.chars() {
@@ -28068,7 +28113,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.tr_rstop = stop == Some('R');
         if log {
             eprintln!(
-                "TRSTAT: {why} outer {:.2} solve {solve_t:.2} root {:.2} tree {tree_t:.2} restarts {} nodes {done} open {open} q {q:.4} est {:.0} est_left {est_left:.2} est_left_h {est_left_h:.1} lb {lb:.10e} root_lb {:.10e} ub {ub:.10e} gap {gap:.3e} newly {newly}/{free0} ({:.4}) cuts {cuts}/{} tcuts {tcuts} rowdrop {rowdrop} est_r {est_r:.2} left {left:.1} guard {}",
+                "TRSTAT: {why} outer {:.2} solve {solve_t:.2} root {:.2} tree {tree_t:.2} restarts {} nodes {done} open {open} q {q:.4} est {:.0} est_left {est_left:.2} est_left_h {est_left_h:.1} lb {lb:.10e} root_lb {:.10e} ub {ub:.10e} gap {gap:.3e} newly {newly}/{free0} ({:.4}) cuts {cuts}/{} tcuts {tcuts} (nra {tcuts_nra}) rowdrop {rowdrop} est_r {est_r:.2} left {left:.1} guard {}",
                 super::outer_elapsed().unwrap_or(f64::NAN),
                 self.tr_t0,
                 self.params.restarts,
