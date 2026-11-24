@@ -18961,8 +18961,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                     };
                     if !ok {
-                        // 診断 `ENOMOTO_MIP_SB_PROP_NOCONF=1` (sbadapt_20261124): 伝播で切れた子から衝突を作らず、擬似費用にも数えない
+                        // 診断 `ENOMOTO_MIP_SB_PROP_NOCONF=1` (sbadapt_20261124): 伝播で切れた子から衝突を作らない。
+                        // 試作 `ENOMOTO_MIP_SB_PROP_NOPSC=1` (同): 伝播で切れた子を擬似費用の学習 (打ち切りの回数 `add_cutoff`) に使わない。
+                        // 擬似費用の値と観測の回数は、伝播で切れた子でも LP で実行不能だった子でも、もともと更新しない
+                        // (SCIP も実行不能な子では擬似費用を更新しない)。NOPSC を足す前の NOCONF は両方を外していた (= いまの NOCONF + NOPSC、README 6 節)
                         let noconf = env_str!("ENOMOTO_MIP_SB_PROP_NOCONF").is_some();
+                        let nopsc = env_str!("ENOMOTO_MIP_SB_PROP_NOPSC").is_some();
                         if self.dom.conflict.is_some() && !noconf {
                             self.add_conflict();
                         }
@@ -18972,7 +18976,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         // (切るかどうかと子の証明は LP で決める。既定の強分枝と同じ)
                         if env_str!("ENOMOTO_MIP_SB_PROP_NOCUT").is_none() {
                             cut[side] = true;
-                            if !noconf {
+                            if !nopsc {
                                 self.pc.add_cutoff(j, is_up);
                             }
                             continue;
