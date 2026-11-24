@@ -258,6 +258,20 @@ fn aggrsel() -> bool {
 /// SCIP の sepa_aggregation の止め方・選び方にする。(1) 段の上限 (6) を外し、消せる連続変数 (境界から離れたもの) が無くなるか相手の行が無くなるまで足す
 /// (行は 1 本 1 度)。(2) 始点の行と相手の行を SCIP の行の点数 (`ENOMOTO_MIP_AGGRSEL` の点数に密度・すき間の項を足したもの) で選ぶ。(3) 境界から最も遠い
 /// 連続変数を消す行が無ければ次に遠いものを試す。istanbul-no-cutoff では SCIP の段の上限 0・1・6 で根が 85.7・114.9・136.6 と伸びる
+/// 試作 `ENOMOTO_MIP_CUTROBUST` (既定では使わない、analysis/cutrobust_20261124): 根の LP が双対退化して最適面が広いとき、
+/// 候補のカットを最適面の複数の点 (今の頂点 x* と、面の頂点の分離が解いた頂点) で測って選ぶ ([`Solver::cutrobust_rescore`])。
+/// 1 本のカットで LP の下界が上がるのは、そのカットが最適面を丸ごと切るとき (面の全ての点で違反するとき) だけなので、
+/// 頂点 1 つでの違反ではなく、手元の面の点での違反の最小を効き目とみる。値:
+/// - `m`: 手元の面の点の全部で違反する候補が 1 本でもあれば、それだけを残し、効き目をその最小にする (なければ何もしない)
+/// - `a`: 効き目を手元の点での効き目の平均にする (候補は捨てない。効き目を使う選び方 (hybrid) にだけ効く)
+/// - `g`: LP が双対退化している (被約費用 0 の非基底がある) ラウンドで、候補を 1 本ずつ LP (の写し) に足して解き直し、
+///   下界の伸び (カット 1 本を足した LP の値 − 今の値) を測る。この値は着いた頂点・基底によらない (LP とカットだけで決まる)。
+///   伸びが正の候補が 1 本でもあれば、伸びが 0 の候補 (最適面の中で頂点を移すだけのカット) を捨てる。測るのは効き目の大きい順に、
+///   面の LP と同じ時間の上限 (全体の 2%、最低 1 秒) まで (測れなかった候補は捨てない)
+pub(super) fn cutrobust_mode() -> Option<char> {
+    env_str!("ENOMOTO_MIP_CUTROBUST").and_then(|v| v.chars().next()).filter(|c| matches!(c, 'm' | 'a' | 'g'))
+}
+
 fn scipagg_on() -> bool {
     env_str!("ENOMOTO_MIP_SCIPAGG").is_some()
 }
@@ -3103,6 +3117,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if let Some(dir) = &dump_cands {
                 let txt: String = cands.iter().chain(face_cands.iter()).map(|c| format!("{} {:.6e} {:.17e} {}\n", c.src, c.efficacy, c.rhs, c.coefs.iter().map(|&(j, a)| format!("{j}:{a:.17e}")).collect::<Vec<_>>().join(" "))).collect();
                 let _ = std::fs::write(format!("{dir}/cands_r{round}.txt"), txt);
+            }
+            // 試作 `ENOMOTO_MIP_CUTROBUST` ([`cutrobust_mode`]、analysis/cutrobust_20261124): 候補の効き目を、今の頂点 x* だけでなく
+            // 最適面の上で分離に使った頂点 (面の頂点の分離 `separate_face_split` が解いた頂点) でも測り、最適面を丸ごと切るカットを選ぶ
+            if !self.params.submip {
+                if let Some(mode) = cutrobust_mode() {
+                    self.cutrobust_rescore(mode, &x, &mut cands, round);
+                }
             }
             // 効き目の大きい順に、平行なものを除いて選ぶ
             let max_cuts = if self.rch_part('N') { tunable!("ENOMOTO_T_MIP_ROOT_CUT_HIGHS_MAX_CUTS", if self.pool_part('N') { 1000usize } else { 500 }, usize) } else { tunable!("ENOMOTO_T_MIP_ROOT_MAX_CUTS", 50usize, usize) }.min(p.m.max(50));
@@ -6278,6 +6299,147 @@ impl<'a, L: MipLp> Solver<'a, L> {
         (self.mpsep_width(), nb)
     }
 
+    /// 試作 `ENOMOTO_MIP_CUTROBUST` ([`cutrobust_mode`]): 候補 `cands` の効き目を、今の頂点 `x` と面の頂点 (`self.face_pts`、
+    /// このラウンドの [`Self::separate_face_split`] が解いた頂点) で測り直す。面の頂点がなければ何もしない。
+    /// 点の数・ずらし方は面の頂点の分離 (`ENOMOTO_MIP_FACE_SEP`、既定 `int2`) のまま (新しい閾値は作らない)。
+    /// 違反の判定は根のループの他の箇所と同じ `1e-6 (1 + |右辺|)`。
+    fn cutrobust_rescore(&mut self, mode: char, x: &[f64], cands: &mut Vec<Candidate>, round: usize) {
+        if mode == 'g' {
+            self.cutrobust_gain(x, cands, round);
+            return;
+        }
+        if self.face_pts.is_empty() || cands.is_empty() {
+            return;
+        }
+        let n = x.len();
+        let pts: Vec<&[f64]> = std::iter::once(x).chain(self.face_pts.iter().filter(|v| v.len() == n).map(|v| v.as_slice())).collect();
+        if pts.len() < 2 {
+            return;
+        }
+        let ncand = cands.len();
+        // 各候補の (各点での効き目の最小, 平均, 全点で違反するか)
+        let meas: Vec<(f64, f64, bool)> = cands
+            .iter()
+            .map(|c| {
+                let norm = c.coefs.iter().map(|&(_, a)| a * a).sum::<f64>().sqrt().max(1e-300);
+                let tol = 1e-6 * (1.0 + c.rhs.abs());
+                let (mut mn, mut sum, mut all) = (f64::INFINITY, 0.0, true);
+                for pt in &pts {
+                    let act: f64 = c.coefs.iter().map(|&(j, a)| a * pt.get(j).copied().unwrap_or(0.0)).sum();
+                    let v = act - c.rhs;
+                    all &= v > tol;
+                    mn = mn.min(v / norm);
+                    sum += v / norm;
+                }
+                (mn, sum / pts.len() as f64, all)
+            })
+            .collect();
+        let nall = meas.iter().zip(cands.iter()).filter(|(m, c)| m.2 && !c.forced).count();
+        match mode {
+            'm' if nall > 0 => {
+                // 全点で違反する候補 (と forced) だけを残し、効き目を最小にする
+                let old = std::mem::take(cands);
+                for (mut c, m) in old.into_iter().zip(&meas) {
+                    if m.2 {
+                        if !c.forced {
+                            c.efficacy = m.0;
+                        }
+                        cands.push(c);
+                    } else if c.forced {
+                        cands.push(c);
+                    }
+                }
+            }
+            'a' => {
+                for (c, m) in cands.iter_mut().zip(&meas) {
+                    if !c.forced {
+                        c.efficacy = m.1;
+                    }
+                }
+            }
+            _ => {}
+        }
+        if self.params.verbose {
+            eprintln!("MIP: cut round {round}: CUTROBUST {mode}: {} points, {ncand} candidates, {nall} violated at all points -> {} kept", pts.len(), cands.len());
+        }
+    }
+
+    /// [`cutrobust_mode`] の `g`: 候補を 1 本ずつ LP の写しに足して解き直し、下界の伸びが 0 の候補を捨てる (伸びが正の候補があるときだけ)
+    fn cutrobust_gain(&mut self, x: &[f64], cands: &mut Vec<Candidate>, round: usize) {
+        let _ = x;
+        if cands.is_empty() || self.mpsep_width() == 0 {
+            return;
+        }
+        let t0 = std::time::Instant::now();
+        let p = self.p;
+        let cap = if self.params.frac_tl().is_finite() { (self.cut_lp_time_frac() * self.params.frac_tl()).max(1.0) } else { f64::INFINITY };
+        let stop = if cap.is_finite() { Some(t0 + std::time::Duration::from_secs_f64(cap)) } else { None };
+        let deadline = match (stop, self.deadline) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let z0 = self.lp.objective();
+        let tol = 1e-7 * (1.0 + z0.abs());
+        let mut ev = self.lp.clone();
+        let st0 = ev.save_state();
+        let nr = ev.num_rows();
+        // 効き目の大きい順に測る
+        let mut order: Vec<usize> = (0..cands.len()).filter(|&k| !cands[k].forced).collect();
+        order.sort_by(|&a, &b| cands[b].efficacy.total_cmp(&cands[a].efficacy));
+        // 0: 測っていない、1: 伸びが正、2: 伸びが 0
+        let mut gain = vec![0u8; cands.len()];
+        let (mut npos, mut nzero, mut iters) = (0usize, 0usize, 0u64);
+        let mut best = 0.0f64;
+        for &k in &order {
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) || self.time_up() {
+                break;
+            }
+            ev.add_rows(&[(cands[k].coefs.clone(), f64::NEG_INFINITY, cands[k].rhs)]);
+            let it0 = ev.total_iterations();
+            let st = ev.solve(&SolveLimits { iteration_limit: 10 * (p.m + p.n) as u64 + 1000, cutoff: f64::INFINITY, deadline });
+            iters += ev.total_iterations() - it0;
+            let z = ev.objective();
+            let mut rm = vec![false; nr + 1];
+            rm[nr] = true;
+            ev.delete_rows(&rm);
+            ev.restore_state(&st0);
+            match st {
+                LpStatus::Optimal if z > z0 + tol => {
+                    gain[k] = 1;
+                    npos += 1;
+                    best = best.max(z - z0);
+                }
+                LpStatus::Optimal => {
+                    gain[k] = 2;
+                    nzero += 1;
+                }
+                // 実行不能 (カットだけで根を閉じる) も伸びが正とみる
+                LpStatus::Infeasible => {
+                    gain[k] = 1;
+                    npos += 1;
+                }
+                _ => {}
+            }
+        }
+        let ncand = cands.len();
+        if npos > 0 && nzero > 0 {
+            let mut k = 0;
+            cands.retain(|_| {
+                let keep = gain[k] != 2;
+                k += 1;
+                keep
+            });
+        }
+        if self.params.verbose {
+            eprintln!(
+                "MIP: cut round {round}: CUTROBUST g: {ncand} candidates, measured {} (gain > 0: {npos}, best {best:.6e}; gain 0: {nzero}) -> {} kept ({iters} iters, {:.2}s)",
+                npos + nzero,
+                cands.len(),
+                t0.elapsed().as_secs_f64()
+            );
+        }
+    }
+
     fn mpsep_width(&self) -> usize {
         let p = self.p;
         let d = self.lp.reduced_costs();
@@ -6485,6 +6647,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             _ => return (self.separate(x, light), Vec::new()),
         };
         let t_prep0 = std::time::Instant::now();
+        self.face_pts.clear();
         let p = self.p;
         let n = p.n;
         let d = self.lp.reduced_costs();
@@ -6613,6 +6776,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             fcands.append(&mut cv);
             used += 1;
+            if cutrobust_mode().is_some() {
+                self.face_pts.push(xv.clone());
+            }
         }
         self.tab_memo_mode = 0;
         self.face_secs += t_face0.elapsed().as_secs_f64();
