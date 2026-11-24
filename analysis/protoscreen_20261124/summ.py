@@ -10,7 +10,7 @@ D = Path(__file__).resolve().parent
 sys.path.insert(0, str(D))
 from cfg import CFGS, P1  # noqa: E402
 TL, SH = 60.0, 10.0
-files = sys.argv[1:] or [str(D / "res_s*.jsonl")]
+files = sys.argv[1:] or [str(D / "res_s*.jsonl"), str(D / "res_c12_s*.jsonl")]
 R = {}
 for f in files:
     for g in glob.glob(f):
