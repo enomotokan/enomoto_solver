@@ -2179,8 +2179,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 試作 `ENOMOTO_MIP_HEUR4` の `o`: `r` で足した既定の形の RENS だけは成果連動で打ち切らない ([`heur4_on`])
         if super::solver::submip_outcome_stop() && !self.params.submip && self.snap.is_none() && self.nodes <= 1 && !HEUR4_NO_OUTCOME.with(|c| c.get()) {
             let c = super::solver::SubmipCtl::new(self.prune_limit()).with_nosol(nosol).with_subcap(self.root_lp_secs).with_subcap_t(self.params.time_limit)
-                .with_outer_t1(super::solver::heur1t('n') && self.params.threads <= 1 && self.pool.is_none())
-                .with_adapt_f(if super::solver::heur_adapt() { self.adapt_gap_f() } else { 1.0 });
+                .with_outer_t1(super::solver::heur1t('n') && self.params.threads <= 1 && self.pool.is_none());
             // 試作 `ENOMOTO_MIP_LOSE6_2_SUBLB`: 目的関数を変えないサブ MIP に外側の下界を渡す
             let c = if super::solver::lose6_2_sublb() && cutoff.is_none() { c.with_outer_lb(self.root_lb_now(), self.bg_watch_job()) } else { c };
             super::solver::ROOT_SUBMIP_CTL.with(|s| *s.borrow_mut() = Some(std::sync::Arc::new(c)));

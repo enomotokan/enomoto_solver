@@ -4040,9 +4040,10 @@ pub(crate) fn heur1t(c: char) -> bool {
 /// - f_g ([`Solver::adapt_gap_f`]): 暫定解の根の LP からの相対ギャップ g から sigmoid(a_g (g − b_g))。暫定解がなければ 1。
 ///   b_g は暫定解なし用のヒューリスティクスを回す既存の基準 `ENOMOTO_T_MIP_FJ_POOR_GAP` (0.5)、a_g は `ENOMOTO_T_MIP_HEUR_ADAPT_GAP_A` (11:
 ///   害の出た側で g のいちばん大きい noswot (0.07) で f_g が 1% になる ln 99 / 0.43 ≈ 10.7 を丸めた。README 2 節)。
-///   FP・ダイビングの予算の物差し (`P2RIT=a` の前処理の LP の反復へ寄せる割合)、FP の第 3 段のノード・時間の上限、外側の根から出した
-///   サブ MIP の中の robust FJ の時間の上限 (`HEUR1T` の `f`) に掛ける。暫定解なし用のヒューリスティクスを回すか (`POOR_NOINC`) は
-///   f_g > 1/2 (= g > b_g、既存の基準のまま)。
+///   FP・ダイビングの予算の物差し (`P2RIT=a` の前処理の LP の反復へ寄せる割合) と FP の第 3 段のノード・時間の上限に掛ける。
+///   暫定解なし用のヒューリスティクスを回すか (`POOR_NOINC`) は f_g > 1/2 (= g > b_g、既存の基準のまま)。
+/// - `HEUR1T` の `f` (外側の根から出したサブ MIP の中の robust FJ) はそのまま有効にする (害の出た noswot・pg では道筋が既定と同じで、
+///   f_g を掛けた版は 10teams 種 3 で FJ の 1016 (g = 0.09) のせいで止まり解けなくなった。README 3 節)。
 /// - f_t ([`Solver::adapt_tree_f`]): 1 スレッドの外側の木で、木の完了までの見込みの秒 (未処理のノードの重み Σ 2^−深さ ÷ 完了率の平均の速さ)
 ///   と残りの秒の比 r から sigmoid(a_t (ln r − b_t))。a_t = `ENOMOTO_T_MIP_HEUR_ADAPT_TREE_A` (4)、b_t = `ENOMOTO_T_MIP_HEUR_ADAPT_TREE_B` (2)。
 ///   b_t は害の出た pg の ln r の最大 1.50 と効いた neos-1171448 の最小 2.57 の中ほど、a_t はその両端で f_t が 0.1・0.9 になる
@@ -4569,8 +4570,6 @@ pub(crate) struct SubmipCtl {
     pub(crate) cap_t: f64,
     /// 試作 `ENOMOTO_MIP_HEUR1T` の `n` ([`heur1t`]): 外側が 1 スレッドで、このサブ MIP を主のスレッドで解く
     pub(crate) outer_t1: bool,
-    /// 試作 `ENOMOTO_MIP_HEUR_ADAPT` ([`heur_adapt`]): 外側の暫定解のギャップからの割合 f_g ([`Solver::adapt_gap_f`]、既定 1)
-    pub(crate) adapt_f: f64,
 }
 
 /// `ENOMOTO_MIP_TREE3_JOINCAP` (試作、既定では使わない。analysis/tree_close3_20261104.md): 外側の根で並列のサブ MIP の終わりを全部待つ
@@ -4628,7 +4627,7 @@ pub(crate) fn erwait_diag() -> bool {
 
 impl SubmipCtl {
     pub(crate) fn new(z: f64) -> Self {
-        SubmipCtl { outer_best: std::sync::atomic::AtomicU64::new(z.to_bits()), nosol_deadline: None, abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)), abort_at: std::sync::atomic::AtomicU64::new(u64::MAX), outer_lb: None, cap_leaves: 0, cap_node_secs: 0.0, t0: Instant::now(), found_at: std::sync::atomic::AtomicU64::new(u64::MAX), cap_t: 0.0, outer_t1: false, adapt_f: 1.0 }
+        SubmipCtl { outer_best: std::sync::atomic::AtomicU64::new(z.to_bits()), nosol_deadline: None, abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)), abort_at: std::sync::atomic::AtomicU64::new(u64::MAX), outer_lb: None, cap_leaves: 0, cap_node_secs: 0.0, t0: Instant::now(), found_at: std::sync::atomic::AtomicU64::new(u64::MAX), cap_t: 0.0, outer_t1: false }
     }
     /// [`subcap`] の `n`・`w` の上限を付ける (`root_lp_secs` は外側の根の LP の秒)
     /// 改良 (11-08) の `T` の上限を付ける (`tl` は外側の時間の上限)
@@ -4695,11 +4694,7 @@ impl SubmipCtl {
         self.outer_t1 = t1;
         self
     }
-    /// 試作 `ENOMOTO_MIP_HEUR_ADAPT` の外側の f_g を渡す
-    pub(crate) fn with_adapt_f(mut self, f: f64) -> Self {
-        self.adapt_f = f;
-        self
-    }
+
     pub(crate) fn with_nosol(mut self, secs: Option<f64>) -> Self {
         self.nosol_deadline = secs.filter(|s| s.is_finite() && *s >= 0.0).map(|s| Instant::now() + std::time::Duration::from_secs_f64(s));
         self
@@ -7709,11 +7704,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 1 スレッド 600 秒で 0 ノード。analysis/hang_20261117/README.md の 10・14 節、docs/improvement_history.md)
         let secs = if feas { tunable!("ENOMOTO_T_MIP_ROBUST_FJ_FEAS_SECS", 30.0, f64) } else { tunable!("ENOMOTO_T_MIP_ROBUST_FJ_SECS", 6.0, f64) };
         let cap = secs.min(if left.is_finite() { frac * left } else { tunable!("ENOMOTO_T_MIP_ROBUST_FJ_SECS", 6.0, f64) });
-        // 試作 `ENOMOTO_MIP_HEUR_ADAPT`: 外側の根から出したサブ MIP の中では、外側の f_g を掛ける (`HEUR1T` の `f` は f_g = 1 に当たる)
-        let cap = match self.root_submip.as_ref().filter(|_| self.params.submip && heur_adapt() && !heur1t('f')) {
-            Some(c) => cap * c.adapt_f,
-            None => cap,
-        };
         if cap <= 0.1 {
             return false;
         }
