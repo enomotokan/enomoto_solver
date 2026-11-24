@@ -9065,6 +9065,30 @@ fn enum_adapt_continue(gain: usize, n: usize, secs: f64, el: f64, verbose: bool,
     go || enum_adapt_log()
 }
 
+/// 試作 `ENOMOTO_MIP_ENUM_ADAPT` の `s` (値に `s` を含む、analysis/comboharm_20261124): 列挙 1 回 ([`enumerate_rows`]) の途中でも、
+/// [`enum_adapt_continue`] と同じシグモイドで止めるかを決める。始めてから `secs` 秒で `gain` 個 (固定・締め付け・同値な組) を得たとき、
+/// c = secs / el (el は列挙の始めの求解の経過時間)、f = sigmoid(a (log10(g / c) − b)) とし、c > max(f, 1/2) なら止める。
+/// 1 周目には前の周の観測がないので、得がまだない間 (と得が少ない間) は中立の点 (s = b、f = 1/2) を下限にする: 得がないまま
+/// 求解の経過時間の半分を列挙に使ったら止める。時計が無ければ止めない
+fn enum_adapt_midstop(gain: usize, n: usize, secs: f64, el: f64) -> bool {
+    if !(el.is_finite() && el > 0.0) {
+        return false;
+    }
+    let c = secs / el;
+    let f = if gain == 0 {
+        0.5
+    } else {
+        let s = ((gain as f64 / n.max(1) as f64) / c.max(1e-300)).log10();
+        let (a, b) = (tunable!("ENOMOTO_T_MIP_ENUM_ADAPT_A", 8.0, f64), tunable!("ENOMOTO_T_MIP_ENUM_ADAPT_B", -0.09, f64));
+        1.0 / (1.0 + (-(a * (s - b)).clamp(-50.0, 50.0)).exp())
+    };
+    c > f.max(0.5)
+}
+
+fn enum_adapt_mid_on() -> bool {
+    enum_adapt_on() && env_str!("ENOMOTO_MIP_ENUM_ADAPT").is_some_and(|v| v.contains('s'))
+}
+
 fn enum_where() -> &'static str {
     if enum_adapt_on() {
         return "loop";
@@ -9354,8 +9378,17 @@ fn enumerate_rows(prob: &MipProblem, dom: &mut domain::Domain, bin0: &[bool], mu
     }
     let mut out: Vec<(usize, bool, f64)> = Vec::new();
     let (mut fails, mut done, mut nsol) = (0usize, 0usize, 0usize);
+    // 試作 `ENOMOTO_MIP_ENUM_ADAPT` の `s` ([`enum_adapt_midstop`]): 列挙の途中の得 (固定・締め付け・同値な組。衝突の組は数えない) と時間
+    let mid = enum_adapt_mid_on();
+    let (te0, el0, mut gain_mid) = (std::time::Instant::now(), enum_elapsed(), 0usize);
     for (i, _) in &keep {
         if done % 16 == 0 && presolve_stop() {
+            break;
+        }
+        if mid && done > 0 && done % 16 == 0 && enum_adapt_midstop(gain_mid, prob.n, te0.elapsed().as_secs_f64(), el0) {
+            if env_str!("ENOMOTO_MIP_LOG").is_some() {
+                eprintln!("MIP: ENUM_ADAPT s: stopped the enumeration after {done} of {} rows: gain {gain_mid} in {:.2}s ({el0:.2}s elapsed at the start)", keep.len(), te0.elapsed().as_secs_f64());
+            }
             break;
         }
         let Some(vars) = row_vars(dom, *i) else { continue };
@@ -9387,6 +9420,7 @@ fn enumerate_rows(prob: &MipProblem, dom: &mut domain::Domain, bin0: &[bool], mu
             return None;
         }
         found += tight.len();
+        gain_mid += tight.len();
         out.extend(tight);
         if let Some(eq) = equiv.as_deref_mut() {
             for a in 0..vars.len() {
@@ -9399,6 +9433,7 @@ fn enumerate_rows(prob: &MipProblem, dom: &mut domain::Domain, bin0: &[bool], mu
                     if same || comp {
                         eq.push((vars[a], vars[b], comp));
                         found += 1;
+                        gain_mid += 1;
                     }
                 }
             }
