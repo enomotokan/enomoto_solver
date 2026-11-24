@@ -3143,6 +3143,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let max_cuts = if adapt_max_cuts > 0 { adapt_max_cuts } else { max_cuts };
             let max_cuts = max_cuts.min(lp_cap_cuts);
             let (forced, cands): (Vec<Candidate>, Vec<Candidate>) = cands.into_iter().partition(|c| c.forced);
+            // 試作 `ENOMOTO_MIP_CLQROW=2` (analysis/cutrobust_20261124): clique の候補は別に選んで足す (本数の上限は同じ)。clique のカットは非零が
+            // 少なく効き目が大きく出るので、同じ枠で選ぶと非零の多い単体表のカット (nw04 では 1 本 6〜8 万) を最良の半分の閾値で押し出す
+            let (clq_sep, cands): (Vec<Candidate>, Vec<Candidate>) = if !self.params.submip && env_str!("ENOMOTO_MIP_CLQROW") == Some("2") {
+                cands.into_iter().partition(|c| c.src % sepprof::SRC_FACE == sepprof::SRC_CLIQUE)
+            } else {
+                (Vec::new(), cands)
+            };
             // `ENOMOTO_T_MIP_CUTSEL_AGG_QUOTA` = q (> 0、試作): 集約した行からのカット (tableau・経路集約) を、分離器ごとに
             // 質の上位 q 本まで、全体の質の閾値 (最良の `ENOMOTO_T_CUTSEL_MIN_REL` 倍) と関係なく先に採る ([`pick_agg_quota`])
             let agg_quota = if (self.params.submip && !self.cut_agg()) || phase2 {
@@ -3210,6 +3217,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 chosen
             };
             let mut chosen = chosen;
+            if !clq_sep.is_empty() {
+                let nclq = clq_sep.len();
+                let extra = select_cuts(clq_sep, max_cuts, p);
+                if self.params.verbose {
+                    eprintln!("MIP: cut round {round}: CLQROW=2: {} of {nclq} clique candidates added separately", extra.len());
+                }
+                for c in extra {
+                    if !chosen.iter().any(|d| cut_parallelism(&c.coefs, &d.coefs) > 0.99) {
+                        chosen.push(c);
+                    }
+                }
+            }
             // 試作 `ENOMOTO_MIP_ROOTCAP` の `d` ([`super::solver::rootcap`]): 根の LP が重い (根の LP の秒 (前処理の LP の最初の LP を含む) が
             // `ENOMOTO_T_MIP_ROOTCAP_DENSE_LP` (2 秒) 以上) 外側の根のカットのループ (裏のカットの写しも) では、1 ラウンドに足すカットの非零の和を
             // max(`ENOMOTO_T_MIP_ROOTCAP_DENSE_FRAC` (0.05) x 元の行列の非零, 1000) までにする (選んだ順に、最初の 1 本は必ず残す)。
