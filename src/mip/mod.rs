@@ -6636,6 +6636,39 @@ struct ProbeSpecCtx<'a> {
     want_equiv: bool,
 }
 
+/// x_j の両側の変更 `ch0`・`ch1` (どちらの側も伝播が成り立ったとき) から、両側の弱い方 (下限は小さい方、上限は大きい方) が
+/// 今の境界 `lo`・`up` より締まる列の境界 (列, 上限か, 値) を列の番号の順に返す ([`probe_derive`] の締め付けの部品。
+/// 根の打ち切り値つきプロービング (`ENOMOTO_MIP_ROOT_OBJ_PROBE_HULL`) でも使う)。同じ列・側が何度も変わったら最後 (最も締まった) の値を使う
+pub(super) fn probe_hull_bounds(j: usize, ch0: &[(usize, bool, f64)], ch1: &[(usize, bool, f64)], lo: &[f64], up: &[f64]) -> Vec<(usize, bool, f64)> {
+    let mut first: std::collections::BTreeMap<(usize, bool), f64> = std::collections::BTreeMap::new();
+    for &(k, upper, v) in ch0 {
+        first.insert((k, upper), v);
+    }
+    let mut last1: std::collections::HashMap<(usize, bool), f64> = std::collections::HashMap::new();
+    for &(k, upper, v) in ch1 {
+        last1.insert((k, upper), v);
+    }
+    let mut tight = Vec::new();
+    for (&(k, upper), &v0) in &first {
+        if k == j {
+            continue;
+        }
+        let Some(&v1) = last1.get(&(k, upper)) else { continue };
+        if upper {
+            let u = v0.max(v1);
+            if u < up[k] - 1e-9 * (1.0 + u.abs()) {
+                tight.push((k, true, u));
+            }
+        } else {
+            let l = v0.min(v1);
+            if l > lo[k] + 1e-9 * (1.0 + l.abs()) {
+                tight.push((k, false, l));
+            }
+        }
+    }
+    tight
+}
+
 /// x_j の両側の変更 `ch0`・`ch1` から [`ProbeDerived`] を作る ([`probe`] の (true, true) の枝と同じ規則。ハッシュ表の順の代わりに
 /// 列の番号の順に並べる)
 fn probe_derive(j: usize, ch0: &[(usize, bool, f64)], ch1: &[(usize, bool, f64)], lo: &[f64], up: &[f64], cx: &ProbeSpecCtx) -> ProbeDerived {
@@ -6703,24 +6736,7 @@ fn probe_derive(j: usize, ch0: &[(usize, bool, f64)], ch1: &[(usize, bool, f64)]
             }
         }
     }
-    let mut tight = Vec::new();
-    for (&(k, upper), &v0) in &first {
-        if k == j {
-            continue;
-        }
-        let Some(&v1) = last1.get(&(k, upper)) else { continue };
-        if upper {
-            let u = v0.max(v1);
-            if u < up[k] - 1e-9 * (1.0 + u.abs()) {
-                tight.push((k, true, u));
-            }
-        } else {
-            let l = v0.min(v1);
-            if l > lo[k] + 1e-9 * (1.0 + l.abs()) {
-                tight.push((k, false, l));
-            }
-        }
-    }
+    let tight = probe_hull_bounds(j, ch0, ch1, lo, up);
     ProbeDerived { edges, implied, equiv, tight }
 }
 
@@ -9049,6 +9065,30 @@ fn enum_adapt_continue(gain: usize, n: usize, secs: f64, el: f64, verbose: bool,
     go || enum_adapt_log()
 }
 
+/// 試作 `ENOMOTO_MIP_ENUM_ADAPT` の `s` (値に `s` を含む、analysis/comboharm_20261124): 列挙 1 回 ([`enumerate_rows`]) の途中でも、
+/// [`enum_adapt_continue`] と同じシグモイドで止めるかを決める。始めてから `secs` 秒で `gain` 個 (固定・締め付け・同値な組) を得たとき、
+/// c = secs / el (el は列挙の始めの求解の経過時間)、f = sigmoid(a (log10(g / c) − b)) とし、c > max(f, 1/2) なら止める。
+/// 1 周目には前の周の観測がないので、得がまだない間 (と得が少ない間) は中立の点 (s = b、f = 1/2) を下限にする: 得がないまま
+/// 求解の経過時間の半分を列挙に使ったら止める。時計が無ければ止めない
+fn enum_adapt_midstop(gain: usize, n: usize, secs: f64, el: f64) -> bool {
+    if !(el.is_finite() && el > 0.0) {
+        return false;
+    }
+    let c = secs / el;
+    let f = if gain == 0 {
+        0.5
+    } else {
+        let s = ((gain as f64 / n.max(1) as f64) / c.max(1e-300)).log10();
+        let (a, b) = (tunable!("ENOMOTO_T_MIP_ENUM_ADAPT_A", 8.0, f64), tunable!("ENOMOTO_T_MIP_ENUM_ADAPT_B", -0.09, f64));
+        1.0 / (1.0 + (-(a * (s - b)).clamp(-50.0, 50.0)).exp())
+    };
+    c > f.max(0.5)
+}
+
+fn enum_adapt_mid_on() -> bool {
+    enum_adapt_on() && env_str!("ENOMOTO_MIP_ENUM_ADAPT").is_some_and(|v| v.contains('s'))
+}
+
 fn enum_where() -> &'static str {
     if enum_adapt_on() {
         return "loop";
@@ -9338,8 +9378,17 @@ fn enumerate_rows(prob: &MipProblem, dom: &mut domain::Domain, bin0: &[bool], mu
     }
     let mut out: Vec<(usize, bool, f64)> = Vec::new();
     let (mut fails, mut done, mut nsol) = (0usize, 0usize, 0usize);
+    // 試作 `ENOMOTO_MIP_ENUM_ADAPT` の `s` ([`enum_adapt_midstop`]): 列挙の途中の得 (固定・締め付け・同値な組。衝突の組は数えない) と時間
+    let mid = enum_adapt_mid_on();
+    let (te0, el0, mut gain_mid) = (std::time::Instant::now(), enum_elapsed(), 0usize);
     for (i, _) in &keep {
         if done % 16 == 0 && presolve_stop() {
+            break;
+        }
+        if mid && done > 0 && done % 16 == 0 && enum_adapt_midstop(gain_mid, prob.n, te0.elapsed().as_secs_f64(), el0) {
+            if env_str!("ENOMOTO_MIP_LOG").is_some() {
+                eprintln!("MIP: ENUM_ADAPT s: stopped the enumeration after {done} of {} rows: gain {gain_mid} in {:.2}s ({el0:.2}s elapsed at the start)", keep.len(), te0.elapsed().as_secs_f64());
+            }
             break;
         }
         let Some(vars) = row_vars(dom, *i) else { continue };
@@ -9371,6 +9420,7 @@ fn enumerate_rows(prob: &MipProblem, dom: &mut domain::Domain, bin0: &[bool], mu
             return None;
         }
         found += tight.len();
+        gain_mid += tight.len();
         out.extend(tight);
         if let Some(eq) = equiv.as_deref_mut() {
             for a in 0..vars.len() {
@@ -9383,6 +9433,7 @@ fn enumerate_rows(prob: &MipProblem, dom: &mut domain::Domain, bin0: &[bool], mu
                     if same || comp {
                         eq.push((vars[a], vars[b], comp));
                         found += 1;
+                        gain_mid += 1;
                     }
                 }
             }
