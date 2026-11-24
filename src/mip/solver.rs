@@ -6938,7 +6938,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// [`Self::optface_alt`] の本体。入れ替えの上限 `k`、時間の上限 `cap` 秒 (そのまま使う)、`verbose` なら 1 行の記録を出す。
     pub(super) fn optface_alt_ext(&self, tag: &str, mode: char, seed: u64, cap: f64, k: usize, verbose: bool) -> (Option<L>, usize) {
         let mut alt = self.lp.clone();
-        let sample = tunable!("ENOMOTO_T_MIP_OPTFACE_SAMPLE", 8usize, usize);
+        // `q` (試作 `ENOMOTO_MIP_CUTVERT`) は候補を全部比べる
+        let sample = if mode == 'q' { usize::MAX } else { tunable!("ENOMOTO_T_MIP_OPTFACE_SAMPLE", 8usize, usize) };
         // 試作 `ENOMOTO_MIP_TICKS` の `m` ([`super::ticks_on`]): 移動の時間の上限 `cap` 秒を同じ量の手間の期限にし、時間は 10 倍の安全網にする
         // (`ENOMOTO_MIP_TICKS` の `m` は、呼び手 (`mpsep_extra`) が入れ替えの数で止めるので、ここでは手間の期限を付けない)
         let tk_m = false;

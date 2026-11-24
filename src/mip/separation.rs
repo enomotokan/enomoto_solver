@@ -272,6 +272,14 @@ pub(super) fn cutrobust_mode() -> Option<char> {
     env_str!("ENOMOTO_MIP_CUTROBUST").and_then(|v| v.chars().next()).filter(|c| matches!(c, 'm' | 'a' | 'g'))
 }
 
+/// 試作 `ENOMOTO_MIP_CUTVERT` (既定では使わない、analysis/cutrobust_20261124): 根のカットのループの各ラウンドで、LP が双対退化している
+/// (被約費用 0 の非基底がある) とき、分離の前に最適面の上の別の頂点へ移る ([`Solver::cutvert_move`])。値:
+/// - `q`: 整数列の分数の度合い Σ min(f, 1 − f) を、双対退化の非基底を入れる軸の入れ替え ([`crate::simplex::mip_lp::TwoStageLp::optface_move`]
+///   の `q`) で局所最大まで増やす (増やす入れ替えがなくなったら止まる。候補は全部比べる)
+pub(super) fn cutvert_mode() -> Option<char> {
+    env_str!("ENOMOTO_MIP_CUTVERT").and_then(|v| v.chars().next()).filter(|c| matches!(c, 'q'))
+}
+
 fn scipagg_on() -> bool {
     env_str!("ENOMOTO_MIP_SCIPAGG").is_some()
 }
@@ -2813,6 +2821,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     clique_fb = false;
                     stall = 0;
                 }
+            }
+            // 試作 `ENOMOTO_MIP_CUTVERT` ([`cutvert_mode`]、analysis/cutrobust_20261124): 分離の前に、最適面の上で整数列の分数の度合いが
+            // 増える頂点へ目的値を変えずに移る (双対退化のラウンドだけ)
+            if !self.params.submip && cutvert_mode().is_some() && self.mpsep_width() > 0 && !self.time_up() {
+                self.cutvert_move(round);
             }
             let x = self.lp.col_values();
             if self.fractional(&x).is_empty() {
@@ -6437,6 +6450,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 cands.len(),
                 t0.elapsed().as_secs_f64()
             );
+        }
+    }
+
+    /// [`cutvert_mode`]: 最適面の上で選んだ頂点へ移り、LP をその写しに置き換える。移動の時間の上限は `ENOMOTO_MIP_MPSEP` の
+    /// 1 回の移動と同じ (根の LP の秒 × 0.25 を 0.01〜0.1 秒に収めたもの、analysis/mpsep_20261106.md で入れ替えの手間から決めた値)、
+    /// 入れ替えの上限は `ENOMOTO_T_MIP_OPTFACE_PIVOTS` (1000、安全網。`q` は局所最大で止まる)
+    fn cutvert_move(&mut self, round: usize) {
+        let Some(mode) = cutvert_mode() else { return };
+        let cap = tunable!("ENOMOTO_T_MIP_MPSEP_MOVE_SECS", (0.25 * self.root_lp_secs).clamp(0.01, 0.1), f64);
+        let k = tunable!("ENOMOTO_T_MIP_OPTFACE_PIVOTS", 1000usize, usize);
+        let nf0 = self.fractional(&self.lp.col_values()).len();
+        let (alt, _) = self.optface_alt_ext(&format!("CUTVERT round {round}"), mode, round as u64 + 1, cap, k, self.params.verbose);
+        if let Some(alt) = alt {
+            if self.params.verbose {
+                eprintln!("MIP: cut round {round}: CUTVERT {mode}: moved, fractional {nf0} -> {}", self.fractional(&alt.col_values()).len());
+            }
+            self.lp = alt;
         }
     }
 
