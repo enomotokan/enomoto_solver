@@ -11325,3 +11325,20 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
   (最適値の少し下 → 実行不能、少し上 → 最適) で誤り 0。MIP の fuzz 7 本すべて誤答 0、LP の fuzz 1000 問 誤答 0、Netlib 93 問すべて最適・目的値は HiGHS と一致。
 - 記録: analysis/ti6_20261124/README.md。
 
+## 2026-11-24: Model.solve() に乱数の種の引数 seed を足す
+
+- 足した: `Model.solve(..., seed: Optional[int] = None)`。
+  - `None` (既定) なら今まで通り。環境変数 `ENOMOTO_T_MIP_SEED` (計測の台本用に残す) があればその値、なければ 0 で、0 は以前と同じ動き。
+  - 範囲は 0 以上 2**64 未満の整数。負の値・2**64 以上は `ValueError`、整数でない値 (`bool` を含む) は `TypeError`。
+  - LP (整数変数のないモデル) では使わない。
+- 通り道: 種を `MipSettings::seed` から `MipParams::seed` に入れて下まで渡す。
+  - 環境変数を直接読んでいた次の所を、パラメータの値を使う形にした: 木のヒューリスティクスの乱数、prechain の FJ・Local-MIP のスレッド、TPRE の 2 か所、`attach_prechain`。
+  - サブ MIP には親の種を渡す。前処理の中の VB01 のサブ MIP には thread_local で渡す。
+- 1 スレッドなら同じ種で同じ結果 (再現できる)。2 スレッド以上では同じ種でもスレッドのタイミングで揺れうる。
+  種を変えて回すと、問題ごとの時間の揺れを確かめられる (README.md・README.ja.md の「乱数の種 (`seed`)」)。
+- 確かめ (analysis/seedarg_20261124):
+  - 変更前の版と、種 0 で 5 問 (1 スレッド) のノード数・目的値が一致。
+  - 種 1 は環境変数と引数で一致し、2026-11-23 の計測とも一致。
+  - tests/test_seed.py を足し、pytest 64 件通過 (同じ種で 2 回一致、種でノード数が変わる、範囲・型の誤り)。
+  - cargo test 423 通過。fuzz 7 本は誤答 0 (既定・種 7)。
+- 記録: analysis/seedarg_20261124/README.md。
