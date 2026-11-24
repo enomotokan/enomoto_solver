@@ -41,6 +41,8 @@
    (40be041e4 のソース、今回の試作の多くが入る前。作り方は道筋を変えない)。「全部一致」を確かめてから回す。
    - 2026-11-24 に先端 7d54b3ced で回した: 6 問とも一致 (ノード 0・0・7・3・6333・236024)。試作は既定オフのとき既定の道筋を変えていない。
    - 分担 4: 先端 ed107692d で `pip install -e .` し、check_default.py で 6 問とも一致を確かめてから回した (2026-11-24 01:44 開始)。
+   - 分担 3: 先端 ed107692d で `pip install -e .` し、check_default.py で 6 問とも一致を確かめてから回した (2026-11-24 01:45 開始、04:33 に 462 回とも済み、crash 0・食い違い 0)。
+   - 分担 2: 先端 ed107692d で `pip install -e .` し、check_default.py で 6 問とも一致を確かめてから回した (2026-11-24 01:42 開始、04:35 に 441 回とも済み、crash 0・食い違い 0、再開なし。計測中は作業ツリーに先端をマージせず python/ は ed107692d のまま)。
    - 環境変数を渡すと (`python check_default.py ENOMOTO_MIP_POOL_SEL=1`)、その試作でどの問題から道筋が変わるかを見られる。
 
 ## 4. 集計 (summ.py)
@@ -71,3 +73,23 @@ khb05250・p0201 × 21 設定 × 種 1、上限 10 秒 (`python run.py 0 確か�
   回し方 `python run.py K shards_c12.json res_c12_sK.jsonl` (K = 0・1)。既定は shards.json の def_t1・def_t4 の行を共有する (同じ分担ではないので組ではない)。
 - shards.json (1〜11 番) は作り直していない (分担 0〜7 はすでに回し始めている)。summ.py は res_s*.jsonl と res_c12_s*.jsonl の両方を読む。
 - ビルド: この試作の入った先端で作り直してから回す (分担 7 を回している間は作り直さない)。
+
+## 8. 特徴の値を測る台本 (feat.py、条件付き候補の切り分け用)
+
+条件付き候補の試作で、効いた問題と害の出た問題を分けられそうな問題の特徴を、既定の求解の診断ログ (`ENOMOTO_MIP_LOG=1`・`ENOMOTO_MIP_FEAT_DIAG`) から
+1 問 1 行で拾う。時間ではなく数え上げなので、機械の揺れには左右されにくい。
+
+```
+python analysis/protoscreen_20261124/feat.py                         # P 58 問、既定、1 スレッド・種 1・60 秒 → feat.jsonl (止めても続きから)
+python analysis/protoscreen_20261124/feat.py --tag enum --env ENOMOTO_MIP_ENUM_PRESOLVE=all   # 列挙の得 (固定・締め付け・同値な組・衝突の組)
+python analysis/protoscreen_20261124/feat.py --tag sbpb --env ENOMOTO_MIP_SB_PROBEBD=1        # 強分枝の両方の子から置いた境界の数
+```
+
+- 拾う特徴: zero_obj (目的が全部 0)、phi (閉じたノードのうち実行不能で閉じた割合、FEAT の prune_infeas / (prune_infeas + prune_bound))、
+  degen (FEAT の双対退化の平均)、sb_degen_share (分枝の選びのうち双対退化で強分枝を省いた割合)、sb_lps・sb_iters、node_lps・mean_rows・iters_per_lp・final_rows、
+  restart_newly_fixed・restart_threshold (最初の restart check)、enum_* (列挙の前処理、試作をつけたとき)、sbpb_bounds、objprop_pruned、
+  root_gap (|根の下界 − 既知の最適値| / max(1, |最適値|))、first_solution_time・first_solution_rel、nodes・time・status。
+- 診断の出力が道筋を変えていないか、res_s*.jsonl の def_t1 (種 1) と状態・ノード数を比べて same_path に書く。
+- 確かめ (この環境、結果はコミットしない): p0201・markshare_4_0・mas76 を既定で回すと same_path は 3 問とも真 (分担の def_t1 とノード数が一致)。
+  phi は p0201 0.54・markshare_4_0 1.00・mas76 0.98、sb_degen_share は 0・1.00・0。p0201 に enum をつけた回は enum_* が全部 0 だった。
+  P 全問の計測は割り当てがないのでまだ回していない (58 問 × 60 秒以内、1 時間弱の見積り)。
