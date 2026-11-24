@@ -13705,6 +13705,27 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if sb_adapt_on() && !self.params.submip {
                 self.pc.cw_floor = tunable!("ENOMOTO_T_MIP_SBAD_CW", 0.01, f64) * self.sbad_f().1;
             }
+            // 診断 `ENOMOTO_MIP_NRA_TRACE=K` (analysis/nodespeed_20261123 9.5 節、解き方は変えない): K ノードごとに、スレッドごとの
+            // NODEROWS_ADAPT の φ・f・ρ の推移を 1 行ずつ出す (φ・f は試作をつけなくても数えている)
+            if !self.params.submip && self.nodes > 0 {
+                if let Some(k) = env_str!("ENOMOTO_MIP_NRA_TRACE").and_then(|v| v.parse::<u64>().ok()).filter(|&k| k > 0) {
+                    if self.nodes % k == 0 {
+                        let rho = (self.nra_rho[0] as f64 + 1.0) / ((self.nra_rho[0] + self.nra_rho[1]) as f64 + 2.0);
+                        eprintln!(
+                            "NRA_TRACE tid {} nodes {} t {:.2} inf {} bound {} phi {:.4} f {:.4} rho {:.4} rounds {}",
+                            self.pool_tid,
+                            self.nodes,
+                            self.start.elapsed().as_secs_f64(),
+                            self.nra_leaves[0],
+                            self.nra_leaves[1],
+                            self.nra_share(),
+                            self.nra_f(),
+                            rho,
+                            self.nra_stats[3]
+                        );
+                    }
+                }
+            }
             // 診断 `ENOMOTO_MIP_SBADAPT_DIAG` (analysis/sbadapt_20261124、解き方は変えない): 主の木で 200 ノードごとに、強分枝の試作の効き方を分ける
             // 特徴の候補 (大きさによらない比) を出す: 双対退化で強分枝を省いた割合、閉じた葉のうち実行不能で閉じた割合、1 ノードあたりに作った
             // 衝突の数、強分枝の LP の数 / ノード、子の伝播で実行不能になった強分枝の子 / 強分枝の LP
