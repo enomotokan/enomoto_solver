@@ -15,6 +15,7 @@ CFGS = {
     "cp": {"ENOMOTO_MIP_CONFCUT": "1p"},
     "cn": {"ENOMOTO_MIP_CONFCUT": "1n"},
     "cpn": {"ENOMOTO_MIP_CONFCUT": "1pn"},
+    "cq": {"ENOMOTO_MIP_CONFCUT": "1", "ENOMOTO_MIP_CONFCUT_DIAG": "2"},
     "t4": {"ENOMOTO_MIP_CONFCUT_DIAG": "1", "ENOMOTO_MIP_TREE4_PROOFCUT": "1"},
 }
 args = sys.argv[1:]
