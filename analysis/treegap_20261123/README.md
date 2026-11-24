@@ -199,3 +199,4 @@ SCIP の `probingbounds` に当たる。src/mip/solver.rs `select_branch_inner`�
   - 悪くなる回: 10teams の普段の形 (2.3 倍遅い)、30n20b8 の打ち切り (時間切れ)。
   - 10teams・mcsched では共通の境界が 0 なので、差は子の伝播 (`SB_PROP` の部分) から来ている。
 - **結論:** 連鎖 (`=2`) は足しても何も締まらないので、残す意味はない。差を生んでいるのは、子の伝播で子の LP と評価が変わる部分。
+- 確かめ (`ENOMOTO_MIP_SB_PROBEBD=2` を付けて): fuzz 7 本 (release019 の fuzz.sh と同じ組) bad 0。cargo test --release --lib は 424 通過・0 失敗。
