@@ -23831,9 +23831,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 試作 `ENOMOTO_MIP_GLOBALFIX` の `c` (analysis/globalfix_20261124): 長さ 1 の衝突 (大域的に成り立つリテラルを除いた後) は、そのリテラルの
         // 否定が全ての (打ち切り値より良い) 解で成り立つ = 大域的な固定。否定はプールの伝播 (conflict_pool.rs の「否定」) と同じ形
         // (`x <= v` の否定は整数列 `x >= floor(v) + 1`・連続列 `x >= v`)。プールにもそのまま入れる (ほかの振る舞いは変えない)
-        if l.len() == 1 && super::domain::globalfix('c') {
+        // `k` は `c` を整数列だけにしたもの (連続列は大域にせずプールだけに入れる。`a` が連続列を除くのと同じ理由。pk1 で `c` の大域的な締め付けの
+        // ほとんどが連続列の少しずつの締め付けだった)
+        if l.len() == 1 && (super::domain::globalfix('c') || (super::domain::globalfix('k') && self.p.is_int[l[0].0])) {
             let (j, upper, v) = l[0];
             let int = self.p.is_int[j];
+            if !int {
+                super::domain::GF_STATS[8].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             if upper {
                 self.dom.tighten_global(self.p, j, false, if int { v.floor() + 1.0 } else { v });
             } else {
@@ -29090,7 +29095,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     g[0], g[1], g[2], g[3], g[5], g[4]
                 );
                 let f: Vec<u64> = super::domain::GF_STATS.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
-                eprintln!("MIP: GLOBALAUDIT globalfix: b: propagations {} (integer bounds {}, newly fixed integers {}, infeasible {}); a: root nodes {} (integer bounds {}, newly fixed {}); c: global fixings {} (all threads, cumulative)", f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]);
+                eprintln!("MIP: GLOBALAUDIT globalfix: b: propagations {} (integer bounds {}, newly fixed integers {}, infeasible {}); a: root nodes {} (integer bounds {}, newly fixed {}); c/k: global fixings {} (continuous columns {}) (all threads, cumulative)", f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[8]);
                 let c: Vec<u64> = super::domain::GA_CONF.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
                 eprintln!("MIP: GLOBALAUDIT conflicts: literal conflicts added {}, of length 1 (global fixings kept only in the pool) {} (imported {}) (all threads, cumulative)", c[0], c[1], c[2]);
             }
