@@ -4110,6 +4110,13 @@ pub(crate) fn heur_adapt() -> bool {
     *V.get_or_init(|| env_str!("ENOMOTO_MIP_HEUR_ADAPT").is_some_and(|v| v != "0"))
 }
 
+/// 試作 `ENOMOTO_MIP_HEUR_ADAPT` の値の文字 (`=1m` など、[`heur_adapt`] が真のときだけ意味を持つ):
+/// - `m`: FP の第 3 段 (`fp_stage3`) を、外側の根から出したサブ MIP の中では回さない (analysis/comboharm_20261124/neos-1582420.md)
+pub(crate) fn heur_adapt_flag(c: char) -> bool {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    heur_adapt() && V.get_or_init(|| env_str!("ENOMOTO_MIP_HEUR_ADAPT").map_or(String::new(), |v| v.to_string())).contains(c)
+}
+
 fn adapt_sigmoid(z: f64) -> f64 {
     1.0 / (1.0 + (-z.clamp(-50.0, 50.0)).exp())
 }

@@ -73,6 +73,8 @@ struct St<'a> {
     last: Vec<u64>,
     /// lift の掃引で見た非零の数 (手の数に入らない重い部分。[`LocalMip::work_cap`] の数えに使う)
     lift_work: u64,
+    /// 列の走査 ([`St::for_col`]、手のスコアなど) で見た非零の数 (試作 `ENOMOTO_MIP_LMIP_SCORE_TICKS` の手間の数えに使う)
+    col_work: std::cell::Cell<u64>,
 }
 
 impl ChainView for St<'_> {
@@ -189,6 +191,7 @@ impl St<'_> {
 
     /// 列 j の (行, 係数) を目的の行を含めて回す
     fn for_col(&self, j: usize, mut f: impl FnMut(usize, f64)) {
+        self.col_work.set(self.col_work.get() + self.p.cols[j].len() as u64 + 1);
         for &(r, b) in &self.p.cols[j] {
             f(r, b);
         }
@@ -534,7 +537,7 @@ impl<'a> LocalMip<'a> {
         }
         let start: Vec<f64> = (0..n).map(|j| if lb[j].is_finite() { lb[j] } else if ub[j].is_finite() { ub[j] } else { 0.0 }).collect();
         let obj_cols: Vec<(usize, f64)> = (0..n).filter(|&j| p.cost[j] != 0.0).map(|j| (j, p.cost[j])).collect();
-        let mut s = St { p, lo: lb, up: ub, x: start.clone(), act: vec![0.0; m + 1], w: vec![1.0; m + 1], obj_up: f64::INFINITY, vset: Vec::new(), vpos: vec![usize::MAX; m + 1], tabu: vec![[0, 0]; n], rng: seed | 1, obj_cols, moves: 0, lift_d: Vec::new(), lift_at: u64::MAX, lift_mark: Vec::new(), tier2: false, last: vec![0; n], lift_work: 0 };
+        let mut s = St { p, lo: lb, up: ub, x: start.clone(), act: vec![0.0; m + 1], w: vec![1.0; m + 1], obj_up: f64::INFINITY, vset: Vec::new(), vpos: vec![usize::MAX; m + 1], tabu: vec![[0, 0]; n], rng: seed | 1, obj_cols, moves: 0, lift_d: Vec::new(), lift_at: u64::MAX, lift_mark: Vec::new(), tier2: false, last: vec![0; n], lift_work: 0, col_work: std::cell::Cell::new(0) };
         s.reset();
         let set_of = if chain { set_rows(p, &s.lo, &s.up) } else { Vec::new() };
         Some(LocalMip {
@@ -643,6 +646,13 @@ impl<'a> LocalMip<'a> {
         let chain_depth = tunable!("ENOMOTO_T_MIP_LOCALMIP_CHAIN_DEPTH", 32usize, usize);
         let pair_cols = tunable!("ENOMOTO_T_MIP_LOCALMIP_PAIR_COLS", 8usize, usize).max(1);
         let debug = env_str!("ENOMOTO_MIP_LOCALMIP_DEBUG").is_some();
+        // 試作 `ENOMOTO_MIP_LMIP_SCORE_TICKS` (既定では使わない、analysis/comboharm_20261124/app1-1.md): 手間 ([`crate::ticks`]) に、1 手の見当
+        // `step_work` (行・列の平均の長さ x 見る列の数) に加えて、列の走査で実際に見た非零の数 ([`St::for_col`]) を足す。候補の列は違反行の
+        // 非零から選ぶので、選ばれる列の長さの期待は Σ len² / Σ len で、密な列があると平均の長さよりずっと長い (app1-1 は平均 7.4 に対し 429)。
+        // 数えないと手間の期限で止める robust FJ・早めの FJ/Local-MIP (`ENOMOTO_MIP_TICKS` の `f`) で手間が実時間の 1/14 になり、
+        // 上限 3.6 秒が 10 倍の安全網の 36 秒まで回った
+        let score_ticks = env_str!("ENOMOTO_MIP_LMIP_SCORE_TICKS").is_some_and(|v| v != "0");
+        let mut col_counted = self.s.col_work.get();
         // `ENOMOTO_MIP_LMIP2=文字` (試作、既定では使わない。本家 Local-MIP に寄せる): `b` = 暫定解の後、目的の行が違反していれば
         // 目的の全部の列の breakthrough move (目的の行の tight move) を毎回 BMS の候補に入れる (`ENOMOTO_T_MIP_LMIP2_BT_COLS` 本まで、
         // 越えれば抜き取り)、`l` = lift move を最良の 1 手にする (幅は差分更新)、`w` = 目的の行の重みは、違反行が目的の行だけのときに上げる
@@ -703,6 +713,11 @@ impl<'a> LocalMip<'a> {
             if step % 16 == 0 {
                 // 手間の単位 ([`crate::ticks`]): 1 手 = (行の平均の長さ + 列の平均の長さ) x 見る列の数 (の見当)
                 crate::ticks::add(crate::ticks::HEUR, 16 * step_work);
+                if score_ticks {
+                    let cw = s.col_work.get();
+                    crate::ticks::add(crate::ticks::HEUR, cw - col_counted);
+                    col_counted = cw;
+                }
                 // 門の付いたスレッド (試作 `ENOMOTO_MIP_TPRE` の `g` など) では lift の掃引の手間も数える (数えないと手間の進みが壁時計より
                 // ずっと遅く見え、門で主が待つ。10teams で 1 手 0.5 ms のうち大半が掃引)。門のないスレッドの数えは変えない
                 if crate::ticks::has_gate() {
