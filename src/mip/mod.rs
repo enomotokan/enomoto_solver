@@ -961,8 +961,20 @@ pub(super) fn polish_in_problem_warm(p: &MipProblem, x: &mut Vec<f64>, z: f64, b
         }
     }
     let mut lp = crate::simplex::mip_lp::TwoStageLp::new(&lo, &up, &p.cost, &p.rows, &p.row_lo, &p.row_up);
+    // 基底の写し: 固定した整数列は基底から外し (非基底の下限)、カットの行の分は捨てる (行の数の過不足は `set_basis` の修復でスラックを足す・構造列を外す)
+    let mut info = (0usize, 0usize, 0usize);
     if let Some(b) = basis {
-        lp.set_basis(b);
+        let mut b = b.clone();
+        for j in 0..p.n.min(b.col.len()) {
+            if p.is_int[j] && b.col[j] == lp::VarStatus::Basic {
+                b.col[j] = lp::VarStatus::Lower;
+                info.0 += 1;
+            }
+        }
+        info.1 = b.row.len().saturating_sub(p.m);
+        b.row.truncate(p.m);
+        info.2 = b.col.iter().filter(|&&s| s == lp::VarStatus::Basic).count() + b.row.iter().filter(|&&s| s == lp::VarStatus::Basic).count();
+        lp.set_basis(&b);
     }
     let st = lp.solve(&lp::SolveLimits { deadline, ..Default::default() });
     WARM_POLISH[0].fetch_add(1, Ordering::Relaxed);
@@ -980,7 +992,15 @@ pub(super) fn polish_in_problem_warm(p: &MipProblem, x: &mut Vec<f64>, z: f64, b
         let (vo, vn) = (max_violation(p, x), max_violation(p, &xn));
         let scale = z.abs().max(1.0);
         if env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('v')) {
-            eprintln!("MIP: POLISH_WARM: {st:?} {} iters {:.3}s z {z:.10e} -> {zn:.10e} viol {vo:.3e} -> {vn:.3e}", lp.total_iterations(), t.elapsed().as_secs_f64());
+            eprintln!(
+                "MIP: POLISH_WARM: {st:?} {} iters {:.3}s z {z:.10e} -> {zn:.10e} viol {vo:.3e} -> {vn:.3e} (basis: ints taken out {}, cut rows dropped {}, basic {} of {} rows)",
+                lp.total_iterations(),
+                t.elapsed().as_secs_f64(),
+                info.0,
+                info.1,
+                info.2,
+                p.m
+            );
         }
         if (vn <= vo.max(1e-9) && zn <= z + 1e-9 * scale) || vn < vo {
             *x = xn;
