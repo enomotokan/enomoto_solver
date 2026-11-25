@@ -338,6 +338,47 @@ pub(crate) fn timedep(c: char) -> bool {
     env_def!("ENOMOTO_MIP_TIMEDEP", "b").is_some_and(|v| v.contains(c))
 }
 
+/// このスレッドの本当の CPU 時間 (秒、Linux 以外は経過時間)。[`cap_clock`] と違い、`ENOMOTO_MIP_TICKS` の `w` でも手間にしない (診断用)
+pub(crate) fn real_thread_cpu() -> f64 {
+    #[cfg(target_os = "linux")]
+    {
+        #[repr(C)]
+        struct Timespec {
+            tv_sec: i64,
+            tv_nsec: i64,
+        }
+        extern "C" {
+            fn clock_gettime(clk: i32, tp: *mut Timespec) -> i32;
+        }
+        let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+        // SAFETY: `ts` は有効な書き込み先で、clock_gettime はそこに書くだけ
+        if unsafe { clock_gettime(3, &mut ts) } == 0 {
+            return ts.tv_sec as f64 + ts.tv_nsec as f64 * 1e-9;
+        }
+    }
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    EPOCH.get_or_init(std::time::Instant::now).elapsed().as_secs_f64()
+}
+
+thread_local! {
+    /// 診断 [`wc_mark`]: 前の印の (本当の CPU 秒, 手間の合計, 部分ごとの手間)
+    static WC_LAST: std::cell::Cell<Option<(f64, f64, [u64; crate::ticks::NK])>> = const { std::cell::Cell::new(None) };
+}
+
+/// 診断 `ENOMOTO_MIP_WORKCOUNT_DIAG` (analysis/workcount_20261125、解き方は変えない): 前の印からの本当の CPU 時間の増えと、手間 (重み付き、秒) の増えを
+/// `WCDIAG` の行に出す。手間の数えていない処理を、印の間の比 (CPU / 手間) で探す
+pub(crate) fn wc_mark(label: &str, submip: bool) {
+    if env_str!("ENOMOTO_MIP_WORKCOUNT_DIAG").is_none() {
+        return;
+    }
+    let (c, t, r) = (real_thread_cpu(), crate::ticks::total() * 1e-9, crate::ticks::raw());
+    if let Some((c0, t0, r0)) = WC_LAST.with(|w| w.get()) {
+        let parts: Vec<String> = (0..crate::ticks::NK).filter(|&k| r[k] != r0[k]).map(|k| format!("{} {}", crate::ticks::NAMES[k], r[k].wrapping_sub(r0[k]))).collect();
+        eprintln!("WCDIAG {}{label}: cpu {:.3} ticks {:.3} ratio {:.2} | {}", if submip { "sub " } else { "" }, c - c0, t - t0, (c - c0) / (t - t0).max(1e-9), parts.join(" "));
+    }
+    WC_LAST.with(|w| w.set(Some((c, t, r))));
+}
+
 pub(crate) fn cap_clock() -> f64 {
     // 試作 `ENOMOTO_MIP_TICKS` の `w`: このスレッドの CPU 時間の代わりに手間の単位 ([`crate::ticks`]、1 手間 ≒ 1 ns) の秒を返す
     // (根のカットのループ・CUTSEL_PROBE・局所探索などの CPU 時間の上限がまとめて手間になる)
@@ -1954,6 +1995,7 @@ pub(crate) fn rows_fingerprint(rows: &[Vec<(usize, f64)>]) -> u64 {
 }
 
 fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) -> solver::MipResult {
+    wc_mark("before the solve", params.submip);
     let start = RESTART_SOL.with(|s| s.borrow_mut().take());
     if !params.submip {
         // 試作 `ENOMOTO_MIP_VBCLQ` の `e`: この求解の前処理で回したかの印を消す (前の求解の残りを持ち越さない)
@@ -2062,6 +2104,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
         sympre0::diag(p, "before");
     }
     let presolved = if use_presolve { presolve_mip(p, params.verbose, pre_submip, lp_probe_secs) } else { None };
+    wc_mark("presolve", params.submip);
     // `ENOMOTO_MIP_CLQPRB` の `h` (試作、analysis/prbimp_20261113.md §4): `g` で含意を使う形に切り替えた外側の求解では、既定の形の前処理を
     // もう一度回した問題で locks の sub-MIP を解き、元の空間に戻した解を最初の暫定解の候補にする ([`clqprb_shadow_locks`])。
     // 前処理後の空間に写して実行可能なときだけ使う (下の `start` の扱い)
