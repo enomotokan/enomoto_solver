@@ -8069,7 +8069,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 試作 `ENOMOTO_MIP_POLISH_STRICT=2` (analysis/nattai_20261125/): B&B の LP とは別に、整数を固定した問題を一から解き直して
                 // 研磨する。打ち切り値・共有する最良値も研磨した値になる。研磨で目的値が上がって今の暫定解より良くなくなったら受け取らない
                 if super::polish_strict_mode() >= 2 {
-                    if let Some(zn) = super::polish_in_problem(&self.p, &mut x, z) {
+                    // 試作 `ENOMOTO_MIP_POLISH_WARM`: B&B の LP の基底から温めて、求解の期限つきで解く。間に合わなければ (または `e` なら)
+                    // 漏れの見積り ([`Self::leak_estimate`]) で目的値を正す (解は取り替えない)
+                    let warm = super::polish_warm_mode();
+                    if warm > 0 {
+                        let r = if warm == 3 {
+                            super::WarmPolish::NotSolved
+                        } else {
+                            let b = self.lp.basis();
+                            super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), self.deadline)
+                        };
+                        match r {
+                            super::WarmPolish::Replaced(zn) => z = zn,
+                            super::WarmPolish::Kept => {}
+                            super::WarmPolish::NotSolved => {
+                                z += self.leak_estimate(&x);
+                                super::WARM_POLISH[3].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
+                    } else if let Some(zn) = super::polish_in_problem(&self.p, &mut x, z) {
                         z = zn;
                     }
                     if self.incumbent.as_ref().is_some_and(|(inc, _)| z >= *inc - 1e-9 * inc.abs().max(1.0)) {
@@ -8248,6 +8266,30 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         self.lp.restore_state(&saved);
         self.lp.set_total_iterations(it0);
+    }
+
+    /// 試作 `ENOMOTO_MIP_POLISH_WARM` の漏れの見積り: 点 `x` (この問題の空間) の行・列の境界の違反に、今の LP の双対値・被約費用の
+    /// 絶対値を掛けた和。B&B の LP が許容誤差の範囲で行を破って下げた目的値の分を、整数を固定した LP を解かずに見積もる
+    /// (LP の初めの `p.m` 行が問題の行。カットの行は見ない)
+    pub(super) fn leak_estimate(&self, x: &[f64]) -> f64 {
+        let p = self.p;
+        let y = self.lp.row_duals();
+        let d = self.lp.reduced_costs();
+        let mut s = 0.0;
+        for i in 0..p.m.min(y.len()) {
+            let a: f64 = p.rows[i].iter().map(|&(j, c)| c * x[j]).sum();
+            let v = (p.row_lo[i] - a).max(a - p.row_up[i]);
+            if v > 0.0 {
+                s += y[i].abs() * v;
+            }
+        }
+        for j in 0..p.n.min(d.len()) {
+            let v = (p.col_lo[j] - x[j]).max(x[j] - p.col_up[j]);
+            if v > 0.0 {
+                s += d[j].abs() * v;
+            }
+        }
+        s
     }
 
     /// 今の LP の双対値 `y` (費用 `lp_cost` で解いたもの) を使い、整数列を `x` に固定した LP で `x` が最適なことを
@@ -28809,6 +28851,30 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 木の写しから解いた求解が見つけた解を受け取る (止める合図で終わるときも)
         let best_bound = if self.take_inbox() { best_bound.min(self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z)) } else { best_bound };
+        // 試作 `ENOMOTO_MIP_POLISH_WARM` (`ENOMOTO_MIP_POLISH_STRICT` と組): 返す暫定解を、この問題の空間で B&B の LP の基底から温めて研磨する。
+        // 解き直せなければ漏れの見積りを [`super::WARM_LEAK`] に置き、返す前の研磨 (元の問題の空間) が取り替えなければ目的値に足す
+        if super::polish_strict() && super::polish_warm_mode() > 0 && !self.params.submip && self.snap.is_none() {
+            let warm = super::polish_warm_mode();
+            let mut leak = 0.0;
+            if let Some((mut z, mut x)) = self.incumbent.take() {
+                let r = if warm == 3 {
+                    super::WarmPolish::NotSolved
+                } else {
+                    let b = self.lp.basis();
+                    super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), if warm == 2 { self.deadline } else { None })
+                };
+                match r {
+                    super::WarmPolish::Replaced(zn) => z = zn,
+                    super::WarmPolish::Kept => {}
+                    super::WarmPolish::NotSolved => {
+                        leak = self.leak_estimate(&x);
+                        super::WARM_POLISH[3].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                self.incumbent = Some((z, x));
+            }
+            super::WARM_LEAK.store(leak.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        }
         // `ENOMOTO_MIP_BOUND_STEP` (試作): 報告の下界を目的値の刻みの格子の点に切り上げる ([`Self::step_lb`])
         let best_bound = if matches!(status, MipStatus::Optimal | MipStatus::Infeasible) { best_bound } else { self.step_lb(best_bound) };
         if prof_tree_par() && self.snap.is_none() && !self.params.submip && self.watch.is_none() {
