@@ -6,6 +6,11 @@
 2026-11-25: POLISH_STRICT=2 + POLISH_WARM=d の既定化で mik-250-20-75-4 のノード数が変わった (6333 → 6261、目的値は同じ) ので、
 基準を `ref_default.json` (既定化の後のソースで、この台本で解いた 6 問) に取り替えた。前の基準は `--old` で使う
 (`ENOMOTO_MIP_POLISH_STRICT=0 ENOMOTO_MIP_POLISH_WARM=0` を付けると前の基準と全部一致する)。
+2026-11-25 (2 回目): `ENOMOTO_MIP_GLOBALFIX=abc` の既定化で mik-250-20-75-4 のノード数が変わった (6261 → 6157、目的値は同じ。2 回解いて同じ) ので、
+`ref_default.json` を書き直した。`ENOMOTO_MIP_GLOBALFIX=0` を引数で渡すと前の基準 (6261) と全部一致する (analysis/globalfix_20261124 5 節)。
+2026-11-25 (3 回目): `ENOMOTO_MIP_OBJ_PROP=1` + `ENOMOTO_MIP_OBJ_PROP_INT=1` の既定化で mik-250-20-75-4 (6157 → 5856)・markshare_4_0 (236024 → 272319) の
+ノード数が変わった (目的値は同じ。2 回解いて同じ) ので、`ref_default.json` を書き直した。`ENOMOTO_MIP_OBJ_PROP=0` を引数で渡すと 2 回目の基準と全部一致する
+(analysis/objprop_20261124 6 節)。
 `--save` で今の結果を `ref_default.json` に書く (既定の道筋を変えたときだけ。理由をここに書き足す)。"""
 import json, os, subprocess, sys
 from pathlib import Path
