@@ -1,13 +1,25 @@
 """目的の伝播の抜けの直し (analysis/objprop_20261124) の P の設定。名前が _t1 で終われば 1 スレッド、そうでなければ 4 スレッド (run.py の TH)。
 P1 の 6 番目は比べる相手 (既定 def のほかに、その設定とも比べる。summ.py)。"""
 OG = {"ENOMOTO_MIP_ROOT_OBJPROP_GLOBAL": "1"}
+GF = {"ENOMOTO_MIP_GLOBALFIX": "abc"}
 P1 = {  # 番号: (名前, 環境変数, 1 スレッド, 4 スレッド, 記録, もう 1 つの比べる相手)
     1: ("og", OG, True, True, "objprobehull_20261124 7 節", None),
     2: ("ogop", {**OG, "ENOMOTO_MIP_OBJ_PROP": "1"}, True, True, "O1 (ノードの目的の伝播)", "og"),
     3: ("redo", {**OG, "ENOMOTO_MIP_OBJPROP_REDO": "gp"}, True, False, "O6", "og"),
     4: ("sbpb", {**OG, "ENOMOTO_MIP_SB_PROBEBD": "1"}, True, False, "O3 の土台 (強分枝の子の伝播)", "og"),
     5: ("sbpbop", {**OG, "ENOMOTO_MIP_SB_PROBEBD": "1", "ENOMOTO_MIP_SB_OBJPROP": "1"}, True, False, "O3", "sbpb"),
+    # 第 2 段 (shards2.json、plan2.py): 連続列を締めない目的の伝播 (OBJ_PROP_INT) と、監査の GLOBALFIX=abc との組み合わせ
+    6: ("ogopi", {**OG, "ENOMOTO_MIP_OBJ_PROP": "1", "ENOMOTO_MIP_OBJ_PROP_INT": "1"}, True, True, "O1 (連続列を締めない)", "og2"),
+    7: ("sbpbopi", {**OG, "ENOMOTO_MIP_SB_PROBEBD": "1", "ENOMOTO_MIP_SB_OBJPROP": "1", "ENOMOTO_MIP_OBJ_PROP_INT": "1"}, True, False, "O3 (連続列を締めない)", "og2"),
+    8: ("gf", GF, True, True, "監査の A1・A2・C1 (globalfix_20261124)", None),
+    9: ("gfog", {**GF, **OG}, True, True, "GLOBALFIX + O5", "gf"),
+    10: ("gfogop", {**GF, **OG, "ENOMOTO_MIP_OBJ_PROP": "1", "ENOMOTO_MIP_OBJ_PROP_INT": "1"}, True, True, "GLOBALFIX + O5 + O1 (連続列を締めない)", "gfog"),
+    # 第 3 段 (shards3.json、plan3.py): 第 2 段の途中で機械が替わった (2 回の再起動の後、同じノード数の回で時間が 0.82 倍) ので、
+    # 既定と O5 を今の機械・今のビルドで測り直す。6 番以降は d2 (同じスレッドの数) と比べる (summ.py)
+    11: ("d2", {}, True, True, "第 2 段の既定 (今の機械・ビルドし直した版)", "def"),
+    12: ("og2", OG, True, False, "第 2 段の O5", "d2"),
 }
+BASE2 = 6  # この番号以降は既定 d2 と比べる
 CFGS = {"def_t1": {}, "def_t4": {}}
 for k, (name, env, t1, t4, _, _) in P1.items():
     if t1: CFGS[f"{name}_t1"] = env

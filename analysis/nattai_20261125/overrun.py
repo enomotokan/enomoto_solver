@@ -1,5 +1,6 @@
 """POLISH_STRICT の時間の上限の超過を測る: LP の重い問題を 1 スレッド・時間の上限 TL 秒で、既定・STRICT=1・STRICT=2 で 1 回ずつ解き、
-返るまでの時間 (worker の time) と全体の時間 (wall) を overrun.jsonl に足す。使い方: python overrun.py [TL]"""
+返るまでの時間 (worker の time) と全体の時間 (wall) を overrun.jsonl に足す。使い方: python overrun.py [TL] [出力] [問題,...] [設定,...]
+(2026-11-25 追記) 設定に試作 `ENOMOTO_MIP_POLISH_WARM` の組 (s1w1・s1wd・s1we・s2w1・s2wd・s2we) を足した。既定の設定の並びは前と同じ"""
 import json, os, subprocess, sys, time
 from pathlib import Path
 R = Path(__file__).resolve().parents[2]; D = Path(__file__).resolve().parent
@@ -7,11 +8,17 @@ TL = float(sys.argv[1]) if len(sys.argv) > 1 else 60.0
 PROBS = ["dano3_3", "dano3_5", "neos-5114902-kasavu", "s100", "savsched1", "rail02", "neos-5104907-jarama", "buildingenergy",
          "neos-5049753-cuanza", "square47"]
 CFGS = {"def": {}, "s1": {"ENOMOTO_MIP_POLISH_STRICT": "1"}, "s2": {"ENOMOTO_MIP_POLISH_STRICT": "2", "ENOMOTO_MIP_POLISH_STATS": "1"}}
+WARM = {f"s{k}w{w}": {"ENOMOTO_MIP_POLISH_STRICT": str(k), "ENOMOTO_MIP_POLISH_WARM": w, "ENOMOTO_MIP_POLISH_STATS": "1v"} for k in (1, 2) for w in ("1", "d", "e")}
+OUT = sys.argv[2] if len(sys.argv) > 2 else "overrun.jsonl"
+if len(sys.argv) > 3:
+    PROBS = sys.argv[3].split(",")
+if len(sys.argv) > 4:
+    CFGS = {c: {**CFGS, **WARM}[c] for c in sys.argv[4].split(",")}
 sys.path.insert(0, str(R / "scripts"))
 import run_miplib_benchmark as rb
 done = set()
-if (D / "overrun.jsonl").exists():
-    done = {(r["problem"], r["cfg"]) for r in map(json.loads, open(D / "overrun.jsonl"))}
+if (D / OUT).exists():
+    done = {(r["problem"], r["cfg"]) for r in map(json.loads, open(D / OUT))}
 for p in PROBS:
     mps = rb.fetch(p, R / ".miplib_cache")
     for c, env in CFGS.items():
@@ -31,7 +38,11 @@ for p in PROBS:
             if l.startswith("{"):
                 res = json.loads(l); break
         st = [l for l in err.splitlines() if "POLISH_STRICT=2" in l]
+        wm = [l for l in err.splitlines() if "POLISH_WARM" in l]
         row = {"problem": p, "cfg": c, "tl": TL, "wall": round(wall, 2), "result": res, "polish": st[-1] if st else None}
+        if wm:
+            row["warm"] = wm[-1]
+            row["warm_lines"] = wm[:-1][-20:]
         print(json.dumps(row), flush=True)
-        with open(D / "overrun.jsonl", "a") as f:
+        with open(D / OUT, "a") as f:
             f.write(json.dumps(row) + "\n")

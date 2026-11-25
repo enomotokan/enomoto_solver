@@ -12,10 +12,10 @@ import collections, glob, json, math, sys
 from pathlib import Path
 D = Path(__file__).resolve().parent
 sys.path.insert(0, str(D))
-from cfg import CFGS, P1  # noqa: E402
+from cfg import CFGS, P1, BASE2  # noqa: E402
 TL, SH = 60.0, 10.0
 PERPROB = "--perprob" in sys.argv
-files = [a for a in sys.argv[1:] if a != "--perprob"] or [str(D / "res_s*.jsonl")]
+files = [a for a in sys.argv[1:] if a != "--perprob"] or [str(D / "res_s*.jsonl"), str(D / "res2_s*.jsonl"), str(D / "res3_s*.jsonl")]
 R = {}
 for f in files:
     for g in glob.glob(f):
@@ -35,11 +35,12 @@ print(f"行 {len(R)}、crash・取得失敗 {len(crash)} {crash[:10]}")
 print(f"設定ごとの行の数: {dict(collections.Counter(c for _, c, _ in R))}\n")
 rows = []
 for k, (name, env, t1, t4, rec, b2) in P1.items():
-  for bn in ["def"] + ([b2] if b2 else []):
+  first = "d2" if k >= BASE2 and name != "d2" else "def"  # 第 2 段以降の試作は今の機械の既定 d2 と比べる (README 3.2)
+  for bn in [first] + ([b2] if b2 and b2 != first else []):
     for th, on in (("t1", t1), ("t4", t4)):
         if not on: continue
         base, proto = f"{bn}_{th}", f"{name}_{th}"
-        label = name if bn == "def" else f"{name} (対 {bn})"
+        label = name if bn == first else f"{name} (対 {bn})"
         by = collections.defaultdict(list)
         for (p, c, s) in R:
             if c == proto and (p, base, s) in R: by[p].append(s)
