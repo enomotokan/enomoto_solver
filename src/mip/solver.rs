@@ -1123,6 +1123,11 @@ pub(super) struct Solver<'a, L: MipLp> {
     memb_next: f64,
     /// `ENOMOTO_MIP_GAP4` の `i` (試作): 暫定解の整数列を固定した LP ([`Self::resolve_continuous`]) が時間切れになった回数・飛ばした回数
     gap4_inclp: (u32, u32),
+    /// 試作 `ENOMOTO_MIP_POLISH_WARM`: 直前の [`Self::resolve_continuous`] が返した点の、漏れの見積り (その点を出した LP の双対値から) と、
+    /// 整数を固定した LP を解いたならその最適の基底 (研磨の LP を温める)
+    warm_rc: Option<(f64, Option<super::lp::Basis>)>,
+    /// 試作 `ENOMOTO_MIP_POLISH_WARM`: 最後に受け入れた暫定解 (この問題の空間) と、研磨が済んだか (`None`) / 未研磨で漏れの見積り (`Some`)
+    warm_mark: Option<(Vec<f64>, Option<f64>)>,
     /// 診断用 `ENOMOTO_MIP_GAP4_RSS`: 生きている `Solver` の数に数えたか (サブ MIP か)。[`GAP4_LIVE`]
     gap4_live: Option<bool>,
     /// `ENOMOTO_MIP_GAP4` の `k`: 最後の locks の固定率と、根の並列の locks のサブ MIP が実行不能だったか ([`Self::locks_retry`])
@@ -5876,6 +5881,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         mem2_next: 0,
         memb_next: 0.0,
         gap4_inclp: (0, 0),
+        warm_rc: None,
+        warm_mark: None,
         gap4_live: gap4_sub,
         gap4_locks: (0.0, false),
         mem2_keep: (true, true),
@@ -8079,20 +8086,37 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // 漏れの見積り ([`Self::leak_estimate`]) で目的値を正す (解は取り替えない)
                     let warm = super::polish_warm_mode();
                     if warm > 0 {
+                        // 見積り: `resolve_continuous` の LP の双対値から (なければ今の LP の双対値から)。温める基底も、その LP の最適の基底があればそれ
+                        let (est, rb) = match self.warm_rc.take() {
+                            Some((e, b)) => (e, b),
+                            None => (self.leak_estimate(&x), None),
+                        };
                         let r = if warm == 3 {
                             super::WarmPolish::NotSolved
                         } else {
-                            let b = self.lp.basis();
-                            super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), self.deadline)
-                        };
-                        match r {
-                            super::WarmPolish::Replaced(zn) => z = zn,
-                            super::WarmPolish::Kept => {}
-                            super::WarmPolish::NotSolved => {
-                                z += self.leak_estimate(&x);
-                                super::WARM_POLISH[3].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let b = if env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('n')) { Some(self.lp.basis()) } else { rb.or_else(|| Some(self.lp.basis())) };
+                            let r = super::polish_in_problem_warm(&self.p, &mut x, z, b.as_ref(), self.deadline);
+                            // 診断 `ENOMOTO_MIP_POLISH_STATS` の `v`: 見積りと、解き直しで実際に上がった目的値を並べて出す
+                            if env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('v')) {
+                                let got = if let super::WarmPolish::Replaced(zn) = r { format!("{:.3e}", zn - z) } else { "-".into() };
+                                eprintln!("MIP: POLISH_WARM: leak estimate {est:.3e}, objective raised by the LP {got}");
                             }
-                        }
+                            r
+                        };
+                        // 研磨が済めば印は `None`、間に合わなければ (または `e`) 研磨せずに受け取り、見積りを足して未研磨の印をつける
+                        let mark = match r {
+                            super::WarmPolish::Replaced(zn) => {
+                                z = zn;
+                                None
+                            }
+                            super::WarmPolish::Kept => None,
+                            super::WarmPolish::NotSolved => {
+                                z += est;
+                                super::WARM_POLISH[3].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                Some(est)
+                            }
+                        };
+                        self.warm_mark = Some((x.clone(), mark));
                     } else if let Some(zn) = super::polish_in_problem(&self.p, &mut x, z) {
                         z = zn;
                     }
@@ -8206,12 +8230,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 今の LP の双対値で `x` の最適性が示せるなら解かない ([`Self::continuous_optimal_by_duals`])。解き直しの反復は
     /// LP の反復の累計に入れない (累計を基準にするヒューリスティクスの予算などを動かさないため)
     fn resolve_continuous(&mut self, x: &mut Vec<f64>, z: &mut f64) {
+        self.warm_rc = None;
         if self.p.is_int.iter().all(|&b| b) || self.time_up() || env_str!("ENOMOTO_MIP_NO_INC_LP").is_some() {
             return;
         }
         // Feasibility Pump は LP の費用を距離に置き換えたまま解を試すので、元の費用に戻して解く
         let cost = self.lp.costs();
         if env_str!("ENOMOTO_MIP_INC_LP_NO_DUAL_CHECK").is_none() && self.continuous_optimal_by_duals(x, &cost) {
+            // 試作 `ENOMOTO_MIP_POLISH_WARM`: 今の LP の解がそのまま整数を固定した LP の最適なので、今の LP の双対値で見積もる
+            if super::polish_warm_mode() > 0 && cost == self.p.cost {
+                self.warm_rc = Some((self.leak_estimate(x), None));
+            }
             return;
         }
         // `ENOMOTO_MIP_GAP4` の `i` (試作、既定では使わない。analysis/gap4_rootstuck_mem_20261109.md): この LP が時間の上限で
@@ -8265,6 +8294,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 *x = y;
                 *z = zy;
+            }
+            // 試作 `ENOMOTO_MIP_POLISH_WARM`: 漏れはこの LP が許容誤差の範囲で行を破るところで入るので、この LP の最適の双対値で見積もり、
+            // 基底も研磨の LP を温めるのに取っておく
+            if super::polish_warm_mode() > 0 {
+                self.warm_rc = Some((self.leak_estimate(x), Some(self.lp.basis())));
             }
         }
         if swap {
@@ -10024,7 +10058,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT`: このノードでプールの選び直しのラウンドを回すか (持ち分に 1 − f を足し、1 以上なら 1 引いて真)
     fn nra_pool_due(&mut self) -> bool {
-        if !nra_on() || self.params.submip {
+        // 試作 `0` (`=r0` など、analysis/comboharm_20261124/README.md 10.6・10.7 節): 選び直しのラウンドの側を持たず、行を外す側 (割合 f) だけにする。
+        // nra の得は主に外す側から来て (fhnw-binpack4-4・neos5・mik-250)、害はラウンドの側から来た (mc11・beasleyC3)
+        if !nra_on() || self.params.submip || nra_has('0') {
             return false;
         }
         let f = self.nra_f();
@@ -28926,17 +28962,28 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let warm = super::polish_warm_mode();
             let mut leak = 0.0;
             if let Some((mut z, mut x)) = self.incumbent.take() {
-                let r = if warm == 3 {
+                // 木の中の研磨 (`STRICT=2`) の印: `Some(None)` は研磨済み (返す前の研磨は要らない)、`Some(Some(e))` は未研磨で見積り `e`、
+                // `None` は印のない解 (`STRICT=1`、または木の中の研磨を通らずに受け取った解)
+                let mark = self.warm_mark.as_ref().filter(|(xm, _)| *xm == x).map(|(_, m)| *m);
+                let r = if mark == Some(None) {
+                    super::WarmPolish::Kept
+                } else if warm == 3 {
                     super::WarmPolish::NotSolved
                 } else {
                     let b = self.lp.basis();
+                    if env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('v')) {
+                        eprintln!("MIP: POLISH_WARM: final polish from the basis of the last LP (time up {})", self.time_up());
+                    }
                     super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), if warm == 2 { self.deadline } else { None })
                 };
                 match r {
                     super::WarmPolish::Replaced(zn) => z = zn,
                     super::WarmPolish::Kept => {}
                     super::WarmPolish::NotSolved => {
-                        leak = self.leak_estimate(&x);
+                        leak = match mark {
+                            Some(Some(e)) => e,
+                            _ => self.leak_estimate(&x),
+                        };
                         super::WARM_POLISH[3].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                 }

@@ -32,3 +32,22 @@
 - 1 スレッドの差 (22.6 → 27.3 秒) は、並べて回した揺れの中だが、向きは同じ。
 - 直し s は害を一部だけ消す (combo 32.0 → 25.3 秒)。既定 15.7 秒までは戻らない。
 - 仕組み (ログ) は見ていない。heur の分が、先端の HEUR_ADAPT の直し 1m (FP の第 3 段) または LMIP_SCORE_TICKS (app1-1) で消えるかは、ビルドを作り直して確かめる (下の追記)。
+
+## 追記: 先端 3a9fc396f で作り直したビルドで (check_default は 6 問一致)
+
+結果は `res_t4only_v2.jsonl`・`res_t4only_1m.jsonl`・`res_t4only_1mL.jsonl`・`res_t4only_ks1mL.jsonl`。4 スレッド・種 1。
+
+| 形 | 秒 |
+|---|---|
+| 既定 | 15.9 |
+| combo | 33.8 |
+| 既定 + enum + heur | 32.0 |
+| combo、HEUR_ADAPT=1m | 31.9 |
+| 既定 + enum + heur、HEUR_ADAPT=1m | 32.4 |
+| combo、1m + LMIP_SCORE_TICKS=1 | 31.8 |
+| 既定 + enum + heur、1m + LMIP_SCORE_TICKS=1 | 31.9 |
+| combo、直し k・s + 1m + LMIP_SCORE_TICKS=1 | 23.9 |
+
+- heur の分は、1m (FP の第 3 段) でも LMIP_SCORE_TICKS (app1-1 の Local-MIP の手間) でも消えない。swath3・neos-1582420・app1-1 とは別の仕組み。
+- 直しをすべて入れても 23.9 秒で、戻るのは直し s の分 (32 → 24 秒) だけ。
+- 残る害 (既定 15.9 秒に対し約 8 秒) は、heur の根の手間。仕組み (ログ) は未調査。

@@ -577,6 +577,11 @@ impl<'a> LocalMip<'a> {
         self.s.vset.len()
     }
 
+    /// やり直し (restart) の回数
+    pub(super) fn restarts(&self) -> u64 {
+        self.restarts
+    }
+
     /// 目的値の最良
     pub(super) fn best_obj(&self) -> f64 {
         self.best_obj
