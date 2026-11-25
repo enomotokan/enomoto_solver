@@ -25606,6 +25606,45 @@ impl<'a, L: MipLp> Solver<'a, L> {
             row_lo.push(l);
             row_up.push(u);
         }
+        // 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `2` (analysis/comboharm_20261124/README.md 10.8 節): 判定 `K` と同じく、カットプールにあって今の LP にない
+        // カットのうち今の LP 解で締まっているものも持ち込む ([`Self::nra_k2_tight`] と同じ数え方)。nra が LP から外した行は上の LP の行の走査に入らず、
+        // 持ち込まれていなかった
+        if nra_on() && nra_has('2') && !self.params.submip && !keep_all {
+            let m0 = p.m;
+            let in_lp: std::collections::HashSet<u64> = (m0..self.lp.num_rows())
+                .map(|i| {
+                    let mut c = self.lp.row(i);
+                    c.sort_by_key(|&(j, _)| j);
+                    super::separation::cut_fingerprint(&c, self.lp.row_bounds(i).1)
+                })
+                .collect();
+            let x = self.lp.col_values();
+            let mut added = 0usize;
+            for k in 0..self.cut_pool.len() {
+                let (s0, e0) = (self.pool_start[k] as usize, self.pool_start[k + 1] as usize);
+                let r = self.cut_pool[k].1;
+                let act: f64 = (s0..e0).map(|t| self.pool_val[t] * x[self.pool_idx[t] as usize]).sum();
+                if act < r - 1e-6 * (1.0 + r.abs()) {
+                    continue;
+                }
+                let mut c: Vec<(usize, f64)> = (s0..e0).map(|t| (self.pool_idx[t] as usize, self.pool_val[t])).collect();
+                c.sort_by_key(|&(j, _)| j);
+                if in_lp.contains(&super::separation::cut_fingerprint(&c, r)) {
+                    continue;
+                }
+                if cuts_as_rows {
+                    rows.push(c);
+                    row_lo.push(f64::NEG_INFINITY);
+                    row_up.push(r);
+                } else {
+                    carry.push((c, r));
+                }
+                added += 1;
+            }
+            if self.params.verbose {
+                eprintln!("MIP: NODEROWS_ADAPT k2: {added} tight cuts from the cut pool (not in the LP) carried into the restart");
+            }
+        }
         // `ENOMOTO_MIP_RESTART_ROOT_CUTS` の `r` (試作): 木の中の再スタートでは、根の終わりの LP で効いていたカットも持ち込む
         // (今の LP は最後に解いたノードの LP なので、そこで効いていない根のカット・年齢で外れた根のカットが落ちる)
         if restart_root_cuts('r') && self.nodes > 1 && !self.root_end_cuts.is_empty() {
