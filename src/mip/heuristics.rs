@@ -1185,7 +1185,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         self.lp.set_costs(&p.cost);
         self.lp.restore_state(&saved);
-        if !found && !self.time_up() && (env_str!("ENOMOTO_MIP_FP_STAGE3").is_some_and(|v| v != "0") || super::solver::heur_adapt()) {
+        // 試作 `ENOMOTO_MIP_HEUR_ADAPT` の `m` ([`super::solver::heur_adapt_flag`]): 外側の根から出したサブ MIP の中では第 3 段を回さない
+        // (サブ MIP には暫定解がなく f_g = 1 で、第 3 段の孫 MIP がサブ MIP の時間を食う。analysis/comboharm_20261124/neos-1582420.md)
+        let stage3_sub_off = self.params.submip && super::solver::heur_adapt_flag('m') && env_str!("ENOMOTO_MIP_FP_STAGE3").is_none();
+        if !found && !self.time_up() && !stage3_sub_off && (env_str!("ENOMOTO_MIP_FP_STAGE3").is_some_and(|v| v != "0") || super::solver::heur_adapt()) {
             if let Some(r) = best_r {
                 found = self.fp_stage3(&r);
             }
@@ -1202,6 +1205,31 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let p = self.p;
         let n = p.n;
         let (lo, up) = (self.dom.lo.clone(), self.dom.up.clone());
+        let remaining = match self.deadline {
+            Some(d) => d.saturating_duration_since(std::time::Instant::now()).as_secs_f64(),
+            None => f64::INFINITY,
+        };
+        // 試作 `ENOMOTO_MIP_HEUR_ADAPT` ([`super::solver::heur_adapt`]): ノードと時間の上限に f_g を掛ける (`FP_STAGE3` だけなら 1)
+        let fa = if super::solver::heur_adapt() && env_str!("ENOMOTO_MIP_FP_STAGE3").is_none() { self.adapt_gap_f() } else { 1.0 };
+        let mut cap = fa * (0.1 * remaining).min(10.0);
+        // 試作 `ENOMOTO_MIP_FP_STAGE3_LS` (既定では使わない。analysis/fpstage3ls_20261125): 第 3 段を、`r` を出発点にした FJ2・Local-MIP
+        // (前処理の早めの探索 [`super::feas_fj_lmip_early`] の 1 本の形、手間の期限も同じ物差し) で解く。予算は第 3 段のサブ MIP と同じ秒の上限。
+        // `a` (や `1`) = FJ2・Local-MIP だけ、`b` = まず FJ2・Local-MIP (Local-MIP が出発点の周りで行き詰まってやり直すまで)、
+        // 解がなければ残りの上限でサブ MIP
+        let ls = env_str!("ENOMOTO_MIP_FP_STAGE3_LS").filter(|v| *v != "0");
+        if let Some(mode) = ls {
+            let t = std::time::Instant::now();
+            if self.fp_stage3_ls(r, &lo, &up, cap, mode == "b") {
+                return true;
+            }
+            if mode != "b" {
+                return false;
+            }
+            cap -= t.elapsed().as_secs_f64();
+            if cap <= 0.0 || self.time_up() {
+                return false;
+            }
+        }
         let mut cost = vec![0.0; n];
         let mut offset = 0.0;
         let mut nd = 0usize;
@@ -1235,14 +1263,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         let sub = super::problem::MipProblem::from_rows(lo, up, cost, offset, 1.0, p.is_int.clone(), rows, row_lo, row_up);
-        let remaining = match self.deadline {
-            Some(d) => d.saturating_duration_since(std::time::Instant::now()).as_secs_f64(),
-            None => f64::INFINITY,
-        };
-        // 試作 `ENOMOTO_MIP_HEUR_ADAPT` ([`super::solver::heur_adapt`]): ノードと時間の上限に f_g を掛ける (`FP_STAGE3` だけなら 1)
-        let fa = if super::solver::heur_adapt() && env_str!("ENOMOTO_MIP_FP_STAGE3").is_none() { self.adapt_gap_f() } else { 1.0 };
         let params = super::solver::MipParams {
-            time_limit: fa * (0.1 * remaining).min(10.0),
+            time_limit: cap,
             node_limit: ((500.0 * fa).round() as u64).max(1),
             rel_gap: 0.0,
             abs_gap: 1e-9,
@@ -1272,6 +1294,56 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         if self.params.verbose {
             eprintln!("MIP:   FP stage 3: {nd} binary distance terms, status {:?}, nodes {}, objective (distance) {:?}, accepted {ok}", res.status, res.nodes, res.objective);
+        }
+        ok
+    }
+
+    /// 試作 `ENOMOTO_MIP_FP_STAGE3_LS` ([`Self::fp_stage3`]): 今の境界 `lo`/`up` の上で、丸めの点 `r` を出発点に FJ2 と Local-MIP を
+    /// 交互に回す ([`super::feas_fj_lmip_early_from`] の 1 本の形。`ENOMOTO_MIP_TICKS` の `f` なら上限 `cap` 秒を手間で数え、時間は 10 倍の
+    /// 安全網と求解の期限)。目的は元の目的 (サブ MIP の「r からの距離」は分枝限定を r の周りに留めるための目的で、局所探索は出発点で
+    /// もう r の周りにいる。見つけた解はそのまま暫定解の候補なので、元の目的で磨く方が得)。暫定解があれば、サブ MIP と同じく
+    /// 「目的値が暫定解より良い」行を足す。`until_restart` なら Local-MIP のやり直しの判断で止める
+    fn fp_stage3_ls(&mut self, r: &[f64], lo: &[f64], up: &[f64], cap: f64, until_restart: bool) -> bool {
+        let p = self.p;
+        let n = p.n;
+        if cap <= 0.0 || n == 0 {
+            return false;
+        }
+        let mut rows = p.rows.clone();
+        let mut row_lo = p.row_lo.clone();
+        let mut row_up = p.row_up.clone();
+        if let Some((z, _)) = self.incumbent.as_ref() {
+            let step = self.p.objective_step().unwrap_or(0.0);
+            let delta = if step > 0.0 { step } else { 1e-6 * z.abs().max(1.0) };
+            let row: Vec<(usize, f64)> = (0..n).filter(|&j| p.cost[j] != 0.0).map(|j| (j, p.cost[j])).collect();
+            if !row.is_empty() {
+                rows.push(row);
+                row_lo.push(f64::NEG_INFINITY);
+                row_up.push(z - p.offset - delta);
+            }
+        }
+        let q = super::problem::MipProblem::from_rows(lo.to_vec(), up.to_vec(), p.cost.clone(), p.offset, 1.0, p.is_int.clone(), rows, row_lo, row_up);
+        let salt = 0xF953_0000_0000_0003u64 ^ self.params.seed ^ self.rng;
+        self.rand();
+        let t = Instant::now();
+        let debug = env_str!("ENOMOTO_MIP_FP_STAGE3_LS_DEBUG").is_some();
+        let res = super::with_presolve_deadline(self.deadline, || super::feas_fj_lmip_early_from(&q, 1, cap, debug, salt, Some(r), until_restart));
+        let ok = match res {
+            Some(x) => {
+                let keep = self.heur_label;
+                self.heur_label = "FP stage 3 LS";
+                let ok = self.try_incumbent(x);
+                self.heur_label = keep;
+                ok
+            }
+            None => false,
+        };
+        if self.params.verbose || debug {
+            let ncont = (0..n).filter(|&j| !p.is_int[j] && lo[j] < up[j]).count();
+            eprintln!(
+                "MIP:   FP stage 3 LS: cap {cap:.2}s, {:.2}s (ticks: the early FJ/Local-MIP line above), {ncont} free continuous columns, until restart {until_restart}, accepted {ok}",
+                t.elapsed().as_secs_f64()
+            );
         }
         ok
     }

@@ -11,5 +11,16 @@
   "neos-933966 t1": "組み合わせ / 道筋 (部品の足し引きで単調でない。comboharm 9 節)",
   "tbfp-network t4": "未切り分け (1 スレッドでは差なし。comboharm 9 節)",
   "gen-ip054 t4": "未切り分け (1 スレッドでは差が小さい。comboharm 9 節)",
-  "roi2alpha3n4 t4": "未切り分け (1 スレッドでは差が小さい。comboharm 9 節)"
+  "roi2alpha3n4 t4": "未切り分け (1 スレッドでは差が小さい。comboharm 9 節)",
+  "app1-1 t1": "heur+tie の組み合わせ (tie で根の道筋が変わり、heur の RENS の robust FJ の Local-MIP が手間を 1/14 に数えて 36 秒回る。直し案 LMIP_SCORE_TICKS=1 で 69 → 37.5 秒。comboharm app1-1.md)",
+  "app1-1 t4": "heur (同じ仕組み。直し案 LMIP_SCORE_TICKS=1 で 36.2 → 25.1 秒。comboharm app1-1.md)",
+  "neos-1582420": "heur (FP の第 3 段を暫定解なしのサブ MIP でも回し、根の再スタートを逃す。直し案 HEUR_ADAPT=1m で 46 秒・既定並み。comboharm neos-1582420.md)",
+  "mc11 t1": "nra (戻したカットで LP が重くノード 1.5 倍、種 1〜3 で再現。直し k・s では消えず、直し案 w も足りない (86 → 74 秒、既定 48)。回ごとの揺れは HEUR_ADAPT の f_t の壁時計の判定で、試作 1k で消える。comboharm mc11.md・README 10 節)",
+  "h80x6320d t1": "enum (種 1 だけ、道筋の運。再スタート後の列挙で根の道筋が変わる。種 1〜3 の幾何で 1.03。直しなし、k・s も効かない。comboharm h80x6320d.md)",
+  "neos-2978193-inde t1": "sbpb・nra・bfrt の重なり (道筋。証明の木だけ大きい、組は単調でない。3 種の幾何で 46.5 → 75.1 秒。直しなし、k・s も効かない。comboharm neos-2978193-inde.md)",
+  "swath3": "heur (HEUR_ADAPT の FP の第 3 段がサブ MIP の中で満額の孫 MIP を出し、根の道筋が変わる。直し案 HEUR_ADAPT=1m で種 1・3 は既定並み、種 2 は f_t の道筋で残る。4 スレッドは未測。comboharm swath3.md)",
+  "piperout-27 t4": "enum と heur の重なり (根の手間。既定 + enum + heur で combo と同じ。直し s で一部だけ戻る。comboharm piperout-27.md)",
+  "supportcase33 t4": "sbpb (種 1・2 とも、抜くと既定並み・足すと 2 倍。直し k・s は効かない、直しなし。comboharm supportcase33.md)",
+  "fastxgemm-n2r6s0t2 t4": "再現しない (揺れ。1・4 スレッドとも combo が速い。comboharm fastxgemm-n2r6s0t2.md)",
+  "graphdraw-domain t4": "未切り分け (種 1〜3 とも combo が遅い。ppi が疑わしいが抜いても残る。comboharm graphdraw-domain.md)"
 }

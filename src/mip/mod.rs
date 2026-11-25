@@ -685,14 +685,39 @@ pub fn solve_mip(
             // 試作 `ENOMOTO_MIP_POLISH_STRICT` (既定では使わない。analysis/nattai_20261125/): 時間を使い切っていても研磨し、研磨の LP に期限を渡さない。
             // 時間切れの回の暫定解は研磨されず、B&B の LP の許容誤差の範囲の違反 (行ごとには 1e-6 以下) が積もって、目的値が本当の値より
             // 低いまま返っていた (neos-5188808-nattai: 0.12230 と返した解の整数を固定した LP は 0.12240、既知の最適値 0.110284 より良い 0.110186 も返した)
-            let strict = polish_strict();
+            // 試作 `ENOMOTO_MIP_POLISH_WARM`: 返す解は木の求解の終わりに問題の空間で研磨してあるので、ここは既定と同じ扱い (時間を使い切って
+            // いれば解かない・期限を渡す) にし、取り替えなければ木の求解の終わりに置いた漏れの見積り ([`WARM_LEAK`]) を足す
+            let warm = polish_strict() && polish_warm_mode() > 0;
+            let strict = polish_strict() && !warm;
             let late = !strict && env_def!("ENOMOTO_MIP_LATE_NO_RESOLVE", "1").is_some() && t_solve.elapsed().as_secs_f64() >= params.time_limit;
             // `ENOMOTO_MIP_POLISH_DEADLINE` (既定 1、`=0` で以前の形 = 期限なし): 研磨の LP に求解の期限 (始め + 時間の上限) を渡し、
             // 間に合わなければ研磨しない (整数の丸めと目的値の計算し直しだけ)。dano3_3 では MIP が 50〜52 秒で最適で終わった後、整数を固定した
             // LP を基底なしの単体法で解くのに 16〜17 秒かかり、60 秒の上限を越えて 66〜69 秒で返っていた (analysis/ipmx_harm_20261106.md)
             let dl = (!strict && env_def!("ENOMOTO_MIP_POLISH_DEADLINE", "1").is_some() && params.time_limit.is_finite())
                 .then(|| t_solve + std::time::Duration::from_secs_f64(params.time_limit.clamp(0.0, 1e9)));
-            let z = crate::cancel::with_deadline(dl, || polish_solution(variables, objective, constraints, &p, x, !late));
+            let x0 = warm.then(|| x.clone());
+            let mut z = crate::cancel::with_deadline(dl, || polish_solution(variables, objective, constraints, &p, x, !late));
+            if let Some(x0) = x0 {
+                use std::sync::atomic::Ordering;
+                let leak = f64::from_bits(WARM_LEAK.load(Ordering::Relaxed));
+                // 研磨が整数の丸めだけ (連続列が変わらない) なら、漏れは残っている
+                let same = (0..p.n).all(|j| p.is_int[j] || x[j] == x0[j]);
+                if same && leak > 0.0 {
+                    z += leak;
+                }
+                if solver::end_diag() || params.verbose || env_str!("ENOMOTO_MIP_POLISH_STATS").is_some() {
+                    eprintln!(
+                        "MIP: POLISH_WARM: LPs {} (replaced {}, not solved {}), leak estimates {}, {:.3}s, {} iters; final leak estimate {leak:.3e} ({})",
+                        WARM_POLISH[0].load(Ordering::Relaxed),
+                        WARM_POLISH[1].load(Ordering::Relaxed),
+                        WARM_POLISH[2].load(Ordering::Relaxed),
+                        WARM_POLISH[3].load(Ordering::Relaxed),
+                        WARM_POLISH[4].load(Ordering::Relaxed) as f64 / 1e9,
+                        WARM_POLISH[5].load(Ordering::Relaxed),
+                        if same { "added" } else { "not added: polished" }
+                    );
+                }
+            }
             if solver::end_diag() || params.verbose {
                 eprintln!("MIP: polished the solution ({:.2}s)", t_solve.elapsed().as_secs_f64());
             }
@@ -817,7 +842,7 @@ pub(super) fn polish_strict_mode() -> u8 {
     })
 }
 
-fn polish_strict() -> bool {
+pub(super) fn polish_strict() -> bool {
     polish_strict_mode() >= 1
 }
 
@@ -879,6 +904,121 @@ pub(super) fn polish_in_problem(p: &MipProblem, x: &mut Vec<f64>, z: f64) -> Opt
         }
     }
     INC_POLISH[2].fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    out
+}
+
+/// 試作 `ENOMOTO_MIP_POLISH_WARM` (既定では使わない。`ENOMOTO_MIP_POLISH_STRICT` と組で使う。analysis/nattai_20261125/):
+/// 0 = 使わない、1 = 研磨の LP を B&B の LP の基底から温めて解く (返す前の研磨には期限を渡さない)、
+/// 2 (`d`) = 1 に加えて返す前の研磨にも期限を渡し、間に合わなければ漏れの見積り ([`solver::Solver::leak_estimate`]) で目的値を正す、
+/// 3 (`e`) = 研磨の LP を解かず、いつも漏れの見積りで目的値を正す。
+/// 木の中の研磨 (`ENOMOTO_MIP_POLISH_STRICT=2`) には、どれも求解の期限を渡し、間に合わなければ研磨せずに受け取って見積りを足し、
+/// 「未研磨」の印をつける。返す前の研磨は、木の中で研磨が済んだ暫定解なら飛ばす。
+/// 見積りの双対値と温める基底は、暫定解の連続部を出した LP ([`solver::Solver::resolve_continuous`] の整数を固定した LP、
+/// または双対値で最適と示せた今の LP) のもの
+pub(super) fn polish_warm_mode() -> u8 {
+    static V: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    *V.get_or_init(|| match env_str!("ENOMOTO_MIP_POLISH_WARM") {
+        Some(v) if v == "e" => 3,
+        Some(v) if v == "d" => 2,
+        Some(v) if v != "0" => 1,
+        _ => 0,
+    })
+}
+
+/// `ENOMOTO_MIP_POLISH_WARM` で、返す暫定解の目的値に足す漏れの見積り (f64 のビット)。木の求解の終わり ([`solver::Solver::finish`]) で
+/// 主のスレッドが置き、返す前の研磨が解き直した解に取り替えなかったときに足す
+pub(super) static WARM_LEAK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `ENOMOTO_MIP_POLISH_WARM` の集計: 研磨の LP を解いた回数、取り替えた回数、間に合わなかった回数、見積りで正した回数、
+/// かかった時間 (ナノ秒)、単体法の反復の数
+pub(super) static WARM_POLISH: [std::sync::atomic::AtomicU64; 6] = [const { std::sync::atomic::AtomicU64::new(0) }; 6];
+
+/// `ENOMOTO_MIP_POLISH_WARM` の研磨の結果
+pub(super) enum WarmPolish {
+    /// 解き直した解に取り替えた (新しい目的値)
+    Replaced(f64),
+    /// 解き直したが、取り替えなかった
+    Kept,
+    /// 期限までに解けなかった、または解かなかった
+    NotSolved,
+}
+
+/// `ENOMOTO_MIP_POLISH_WARM=1` (試作): 暫定解 `x` (問題 `p` の空間、目的値 `z`) の整数列を固定した `p` を、B&B の LP の基底 `basis`
+/// (カットの行の分は捨てる) から温めて単体法で解く。前処理はしない。`deadline` を過ぎたら打ち切る。採り方は [`polish_in_problem`] と同じ
+pub(super) fn polish_in_problem_warm(p: &MipProblem, x: &mut Vec<f64>, z: f64, basis: Option<&lp::Basis>, deadline: Option<std::time::Instant>) -> WarmPolish {
+    use std::sync::atomic::Ordering;
+    if p.is_int.iter().all(|&b| b) {
+        return WarmPolish::Kept;
+    }
+    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        return WarmPolish::NotSolved;
+    }
+    let t = std::time::Instant::now();
+    let mut lo = p.col_lo.clone();
+    let mut up = p.col_up.clone();
+    for j in 0..p.n {
+        if p.is_int[j] {
+            let v = x[j].round();
+            lo[j] = v;
+            up[j] = v;
+        }
+    }
+    let mut lp = crate::simplex::mip_lp::TwoStageLp::new(&lo, &up, &p.cost, &p.rows, &p.row_lo, &p.row_up);
+    // 基底の写し: 固定した整数列は基底から外し (非基底の下限)、カットの行の分は捨てる (行の数の過不足は `set_basis` の修復でスラックを足す・構造列を外す)
+    let mut info = (0usize, 0usize, 0usize);
+    // 診断 `ENOMOTO_MIP_POLISH_STATS` の `c`: 基底を写さずに解く (温める効き目の比べ)
+    let basis = basis.filter(|_| !env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('c')));
+    if let Some(b) = basis {
+        let mut b = b.clone();
+        for j in 0..p.n.min(b.col.len()) {
+            if p.is_int[j] && b.col[j] == lp::VarStatus::Basic {
+                b.col[j] = lp::VarStatus::Lower;
+                info.0 += 1;
+            }
+        }
+        info.1 = b.row.len().saturating_sub(p.m);
+        b.row.truncate(p.m);
+        info.2 = b.col.iter().filter(|&&s| s == lp::VarStatus::Basic).count() + b.row.iter().filter(|&&s| s == lp::VarStatus::Basic).count();
+        lp.set_basis(&b);
+    }
+    let st = lp.solve(&lp::SolveLimits { deadline, ..Default::default() });
+    WARM_POLISH[0].fetch_add(1, Ordering::Relaxed);
+    WARM_POLISH[5].fetch_add(lp.total_iterations(), Ordering::Relaxed);
+    let mut out = WarmPolish::NotSolved;
+    if st == lp::LpStatus::Optimal {
+        out = WarmPolish::Kept;
+        let mut xn = lp.col_values();
+        for j in 0..p.n {
+            if p.is_int[j] {
+                xn[j] = x[j].round();
+            }
+        }
+        let zn = exact_objective(p, &xn);
+        let (vo, vn) = (max_violation(p, x), max_violation(p, &xn));
+        let scale = z.abs().max(1.0);
+        if env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('v')) {
+            eprintln!(
+                "MIP: POLISH_WARM: {st:?} {} iters {:.3}s z {z:.10e} -> {zn:.10e} viol {vo:.3e} -> {vn:.3e} (basis: ints taken out {}, cut rows dropped {}, basic {} of {} rows)",
+                lp.total_iterations(),
+                t.elapsed().as_secs_f64(),
+                info.0,
+                info.1,
+                info.2,
+                p.m
+            );
+        }
+        if (vn <= vo.max(1e-9) && zn <= z + 1e-9 * scale) || vn < vo {
+            *x = xn;
+            out = WarmPolish::Replaced(zn);
+            WARM_POLISH[1].fetch_add(1, Ordering::Relaxed);
+        }
+    } else {
+        WARM_POLISH[2].fetch_add(1, Ordering::Relaxed);
+        if env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('v')) {
+            eprintln!("MIP: POLISH_WARM: {st:?} {} iters {:.3}s", lp.total_iterations(), t.elapsed().as_secs_f64());
+        }
+    }
+    WARM_POLISH[4].fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
     out
 }
 
@@ -2948,6 +3088,14 @@ pub(crate) fn feas_fj_lmip_early(prob: &MipProblem, threads: usize, cap: f64, ve
 /// [`feas_fj_lmip_early`] の種をずらせる形 (`salt` = 0 なら同じ)。試作 `ENOMOTO_MIP_ROBUST` の `f` (根を暫定解なしで終えるときの
 /// 追加の FJ・Local-MIP、[`solver::robust`]) が、最初の早めの探索と重ならない種で回すのに使う
 pub(crate) fn feas_fj_lmip_early_salt(prob: &MipProblem, threads: usize, cap: f64, verbose: bool, salt: u64) -> Option<Vec<f64>> {
+    feas_fj_lmip_early_from(prob, threads, cap, verbose, salt, None, false)
+}
+
+/// [`feas_fj_lmip_early_salt`] に出発点を付けた形 (試作 `ENOMOTO_MIP_FP_STAGE3_LS`、[`heuristics`] の `fp_stage3`)。
+/// `start` があれば、FJ2 は毎回その点から ([`fj::fj2_search_from`])、Local-MIP もその点から始める ([`localmip::LocalMip::set_start`]、
+/// Local-MIP の中のやり直しもこの点に戻る)。`until_restart` なら、Local-MIP が自分のやり直しの判断 (改善のない手数
+/// `ENOMOTO_T_MIP_LOCALMIP_RESTART`) に着いたところで止める (出発点の周りで行き詰まった印。1 本のときだけ見る)
+pub(crate) fn feas_fj_lmip_early_from(prob: &MipProblem, threads: usize, cap: f64, verbose: bool, salt: u64, start: Option<&[f64]>, until_restart: bool) -> Option<Vec<f64>> {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::{Duration, Instant};
     let t0 = Instant::now();
@@ -2997,7 +3145,7 @@ pub(crate) fn feas_fj_lmip_early_salt(prob: &MipProblem, threads: usize, cap: f6
                 let fj_once = |k: u64| -> bool {
                     let left = t_end.saturating_duration_since(Instant::now()).as_secs_f64();
                     fj_tries.fetch_add(1, Ordering::Relaxed);
-                    match fj::fj2_search(prob, &prob.col_lo, &prob.col_up, left, fj_seed(k), Some(stop)) {
+                    match fj::fj2_search_from(prob, &prob.col_lo, &prob.col_up, start, left, fj_seed(k), Some(stop)) {
                         Some(x) if prob.is_feasible(&x, 1e-6) => {
                             done(x, 1);
                             true
@@ -3015,7 +3163,10 @@ pub(crate) fn feas_fj_lmip_early_salt(prob: &MipProblem, threads: usize, cap: f6
                         return None;
                     }
                     let ti = Instant::now();
-                    let r = localmip::LocalMip::new(prob, &prob.col_lo, &prob.col_up, lm_seed, chain);
+                    let mut r = localmip::LocalMip::new(prob, &prob.col_lo, &prob.col_up, lm_seed, chain);
+                    if let (Some(l), Some(x)) = (r.as_mut(), start) {
+                        l.set_start(x);
+                    }
                     if verbose {
                         eprintln!("MIP:   early Local-MIP thread {t}: initialized in {:.2}s", ti.elapsed().as_secs_f64());
                     }
@@ -3062,6 +3213,9 @@ pub(crate) fn feas_fj_lmip_early_salt(prob: &MipProblem, threads: usize, cap: f6
                             if !over() && timed(2, &mut || lm_run(l, until)) {
                                 break;
                             }
+                        }
+                        if until_restart && lm.as_ref().is_none_or(|l| l.done || l.restarts() > 0) {
+                            break;
                         }
                     }
                     if verbose {
