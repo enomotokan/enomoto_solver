@@ -104,8 +104,10 @@
 ## 3. 正しさ・既定
 
 - fuzz 7 本と cargo test: 直し・試作を全部つけて回した (`fuzz.sh all ENOMOTO_MIP_SUBMIP_TICKS=1 ENOMOTO_MIP_LMIP_SCORE_TICKS=1 ENOMOTO_MIP_SUBMIP_HEUR=l ENOMOTO_MIP_FP_STAGE3=1`、
-  `fuzz_all.out`)。結果は下に追記。
-- 既定の道筋 (`check_default.py`、新しい基準 `ref_default.json`): `check_default.out`。結果は下に追記。
+  `fuzz_all.out`)。
+  - 誤答 0: tiny 0/400・0/400、vs HiGHS 0/300、objint 0/1000・0/1000、slack 0/1000・0/1000。
+  - cargo test は 424 通過・0 失敗・19 無視。
+- 既定の道筋 (`check_default.py`、新しい基準 `ref_default.json`、`check_default.out`): 6 問とも一致 (021152f76 の取り込みの後のビルド)。
 - 試作をつけないとき、新しい数えは何も足さない (`submip_ticks` は環境変数がなければ偽、`finish_cut` の数えも `c` のときだけ)。
 
 ## 4. 再現
