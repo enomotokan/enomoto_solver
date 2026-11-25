@@ -16,19 +16,19 @@ crash・killed・取得失敗 5: [('rail02', 'def_t4', 1, 'crash'), ('neos-34024
 
 両方とも記録が無効な組 1: neos-3402454-bohle (combo killed / 既定 killed)
 
-既定だけ解けた 4: neos-1456979 (M) 1.51: combo time_limit 600.0s / 既定 optimal 393.5s [原因: はっきりしない (別の機械では既定も時間切れ。heur の見込み。comboharm 5 節)]; neos-631710 (残り) 4.20: combo time_limit 600.0s / 既定 optimal 135.4s [原因: nra (NODEROWS_ADAPT=t、木の中の再スタートの判定。直し k で解ける。comboharm 1 節、1 スレッドで確かめ)]; rail507 (M) 1.28: combo time_limit 600.0s / 既定 optimal 466.2s [原因: 未切り分け (既定も上限の近く、直し k・s でも時間切れ。comboharm 9 節)]; rococoC10-001000 (M) 1.66: combo time_limit 600.0s / 既定 optimal 356.6s
+既定だけ解けた 4: neos-1456979 (M) 1.51: combo time_limit 600.0s / 既定 optimal 393.5s [原因: はっきりしない (別の機械では既定も時間切れ。heur の見込み。comboharm 5 節)]; neos-631710 (残り) 4.20: combo time_limit 600.0s / 既定 optimal 135.4s [原因: nra (NODEROWS_ADAPT=t、木の中の再スタートの判定。直し k で解ける。comboharm 1 節、1 スレッドで確かめ)]; rail507 (M) 1.28: combo time_limit 600.0s / 既定 optimal 466.2s [原因: 未切り分け (既定も上限の近く、直し k・s でも時間切れ。comboharm 9 節)]; rococoC10-001000 (M) 1.66: combo time_limit 600.0s / 既定 optimal 356.6s [原因: 主に nra (beasleyC3 と同じ、f ≈ 0 でラウンドが 2715 回。combo でラウンドを止めると 506 秒、既定 485・combo 1481 秒)。ほかに sbpb・bfrt (木の中の再スタートが遅れ持ち越すカットが増える、種 1・2 で再現)。直し k・s は効かない。揺れではない。comboharm rococoC10-001000.md / r0k23 は rococoC10 では未測。直し案 NODEROWS_ADAPT=r0k23 (選び直しのラウンドを止め、判定と持ち越しを直す、既定オフ) で 1 スレッドの 6 問 (mc11・neos-631710・fhnw・mik-250・roll3000・beasleyC3) はすべて既定より速い (comboharm README 10.6〜10.9・11 節)]
 combo だけ解けた 9: 30n20b8 (M) 0.48: combo optimal 285.2s / 既定 time_limit 600.0s; CMS750_4 (M) 0.42: combo optimal 243.7s / 既定 time_limit 600.0s; bnatt400 (M) 0.60: combo optimal 355.7s / 既定 time_limit 600.0s; ex10 (残り) 0.13: combo optimal 69.1s / 既定 time_limit 600.0s; ex9 (残り) 0.07: combo optimal 30.3s / 既定 time_limit 600.0s; fiball (M) 0.54: combo optimal 322.1s / 既定 time_limit 600.0s; istanbul-no-cutoff (M) 0.99: combo optimal 596.1s / 既定 time_limit 600.0s; neos-4738912-atrato (M) 0.92: combo optimal 549.7s / 既定 time_limit 600.0s; netdiversion (残り) 0.94: combo optimal 565.3s / 既定 time_limit 600.0s
 
 1.25 倍超の遅れ 22 問 (240 問全部、比の大きい順):
-   app1-1 (M) 4.28: combo optimal 65.9s / 既定 optimal 7.7s
+   app1-1 (M) 4.28: combo optimal 65.9s / 既定 optimal 7.7s [原因: heur+tie の組み合わせ (tie で根の道筋が変わり、heur の RENS の robust FJ の Local-MIP が手間を 1/14 に数えて 36 秒回る。直し案 LMIP_SCORE_TICKS=1 で 69 → 37.5 秒。comboharm app1-1.md。数え違いは combo・HEUR_ADAPT の下でサブ MIP の robust FJ が回るときだけ当たり、既定の道にはほぼ当たらない: 既定 + LMIP_SCORE_TICKS は 15 問で変化なし、P 58 問 × 種 3 で 1.000 [0.997, 1.002]・解けた数 119 → 120・遅れ 0。analysis/lmipticks_20261125)]
    neos-631710 (残り) 4.20: combo time_limit 600.0s / 既定 optimal 135.4s [原因: nra (NODEROWS_ADAPT=t、木の中の再スタートの判定。直し k で解ける。comboharm 1 節、1 スレッドで確かめ)]
-   mc11 (M) 2.94: combo optimal 136.3s / 既定 optimal 39.7s
-   neos-1582420 (M) 2.23: combo optimal 107.9s / 既定 optimal 43.0s
-   neos-2978193-inde (M) 1.91: combo optimal 77.3s / 既定 optimal 35.8s
-   swath3 (M) 1.80: combo optimal 190.6s / 既定 optimal 101.3s
-   h80x6320d (M) 1.73: combo optimal 66.5s / 既定 optimal 34.1s
-   beasleyC3 (M) 1.69: combo optimal 74.5s / 既定 optimal 40.0s
-   rococoC10-001000 (M) 1.66: combo time_limit 600.0s / 既定 optimal 356.6s
+   mc11 (M) 2.94: combo optimal 136.3s / 既定 optimal 39.7s [原因: nra (戻したカットで LP が重くノード 1.5 倍、種 1〜3 で再現。直し k・s では消えず、直し案 w も足りない (86 → 74 秒、既定 48)。回ごとの揺れは HEUR_ADAPT の f_t の壁時計の判定で、試作 1k で消える。comboharm mc11.md・README 10 節。直し案 NODEROWS_ADAPT=r0k23 (選び直しのラウンドを止め、判定と持ち越しを直す、既定オフ) で 1 スレッドの 6 問 (mc11・neos-631710・fhnw・mik-250・roll3000・beasleyC3) はすべて既定より速い (comboharm README 10.6〜10.9・11 節))]
+   neos-1582420 (M) 2.23: combo optimal 107.9s / 既定 optimal 43.0s [原因: heur (FP の第 3 段を暫定解なしのサブ MIP でも回し、根の再スタートを逃す。直し案 HEUR_ADAPT=1m で 46 秒・既定並み。comboharm neos-1582420.md)]
+   neos-2978193-inde (M) 1.91: combo optimal 77.3s / 既定 optimal 35.8s [原因: sbpb・nra・bfrt の重なり (道筋。証明の木だけ大きい、組は単調でない。3 種の幾何で 46.5 → 75.1 秒。直しなし、k・s も効かない。comboharm neos-2978193-inde.md)]
+   swath3 (M) 1.80: combo optimal 190.6s / 既定 optimal 101.3s [原因: heur (HEUR_ADAPT の FP の第 3 段がサブ MIP の中で満額の孫 MIP を出し、根の道筋が変わる。直し案 HEUR_ADAPT=1m で種 1・3 は既定並み、種 2 は f_t の道筋で残る。4 スレッドは未測。comboharm swath3.md)]
+   h80x6320d (M) 1.73: combo optimal 66.5s / 既定 optimal 34.1s [原因: enum (種 1 だけ、道筋の運。再スタート後の列挙で根の道筋が変わる。種 1〜3 の幾何で 1.03。直しなし、k・s も効かない。comboharm h80x6320d.md)]
+   beasleyC3 (M) 1.69: combo optimal 74.5s / 既定 optimal 40.0s [原因: nra (種 1〜4 で同じ向き。葉が下界で閉じて f ≈ 0、プールを選び直すラウンドが約 270 回回り、戻した行で 1 ノード 15 → 25 ms。直し案 w・e は効かない。comboharm beasleyC3.md。直し案 NODEROWS_ADAPT=r0k23 (選び直しのラウンドを止め、判定と持ち越しを直す、既定オフ) で 1 スレッドの 6 問 (mc11・neos-631710・fhnw・mik-250・roll3000・beasleyC3) はすべて既定より速い (comboharm README 10.6〜10.9・11 節))]
+   rococoC10-001000 (M) 1.66: combo time_limit 600.0s / 既定 optimal 356.6s [原因: 主に nra (beasleyC3 と同じ、f ≈ 0 でラウンドが 2715 回。combo でラウンドを止めると 506 秒、既定 485・combo 1481 秒)。ほかに sbpb・bfrt (木の中の再スタートが遅れ持ち越すカットが増える、種 1・2 で再現)。直し k・s は効かない。揺れではない。comboharm rococoC10-001000.md / r0k23 は rococoC10 では未測。直し案 NODEROWS_ADAPT=r0k23 (選び直しのラウンドを止め、判定と持ち越しを直す、既定オフ) で 1 スレッドの 6 問 (mc11・neos-631710・fhnw・mik-250・roll3000・beasleyC3) はすべて既定より速い (comboharm README 10.6〜10.9・11 節)]
    mushroom-best (M) 1.61: combo optimal 408.0s / 既定 optimal 250.4s [原因: sbpb (強分枝の子の伝播・両方の子の境界で木が 2.1 倍。直しなし。comboharm 3 節)]
    neos-933966 (M) 1.57: combo optimal 258.5s / 既定 optimal 161.4s [原因: 組み合わせ / 道筋 (部品の足し引きで単調でない。comboharm 9 節)]
    neos-1456979 (M) 1.51: combo time_limit 600.0s / 既定 optimal 393.5s [原因: はっきりしない (別の機械では既定も時間切れ。heur の見込み。comboharm 5 節)]
@@ -37,8 +37,8 @@ combo だけ解けた 9: 30n20b8 (M) 0.48: combo optimal 285.2s / 既定 time_li
    neos859080 (M) 1.43: combo infeasible 7.5s / 既定 infeasible 2.2s
    neos-3627168-kasai (M) 1.43: combo optimal 83.2s / 既定 optimal 55.3s
    neos-2987310-joes (残り) 1.41: combo optimal 25.7s / 既定 optimal 15.3s [原因: enum (1 周目の得のない列挙。直し s で既定並み。comboharm 9 節)]
-   neos-950242 (M) 1.40: combo optimal 8.8s / 既定 optimal 3.4s
-   pg5_34 (M) 1.33: combo optimal 522.6s / 既定 optimal 391.7s
+   neos-950242 (M) 1.40: combo optimal 8.8s / 既定 optimal 3.4s [原因: enum (列挙の前の行の並べ替え・重なり外しが 2 乗の手間。直し s の手直し後 (時計を始めから数える) で 1 スレッド 5.0 秒・既定並み。comboharm README 10 節 (追加の問題))]
+   pg5_34 (M) 1.33: combo optimal 522.6s / 既定 optimal 391.7s [原因: 未切り分け (1 スレッドでも少し遅い、ノード +6%。直し k・s では消えない。comboharm README 10 節)]
    rail507 (M) 1.28: combo time_limit 600.0s / 既定 optimal 466.2s [原因: 未切り分け (既定も上限の近く、直し k・s でも時間切れ。comboharm 9 節)]
    chromaticindex512-7 (M) 1.28: combo optimal 257.1s / 既定 optimal 198.7s [原因: 再現しない (別の機械では combo が速い、経過時間に依る判定の揺れ。comboharm 4・7 節)]
    neos-1445765 (M) 1.27: combo optimal 38.8s / 既定 optimal 28.3s
@@ -73,26 +73,26 @@ combo だけ解けた 9: 30n20b8 (M) 0.48: combo optimal 285.2s / 既定 time_li
 
 両方とも記録が無効な組 1: neos-3402454-bohle (combo killed / 既定 crash)
 
-既定だけ解けた 4: chromaticindex1024-7 (M) 1.34: combo time_limit 600.0s / 既定 optimal 444.3s [原因: enum (ENUM_ADAPT の 1 周目が 449 秒列挙。直し s で根を抜ける。comboharm 2 節)]; gen-ip002 (M) 1.28: combo time_limit 600.0s / 既定 optimal 468.1s; neos-631710 (残り) 14.89: combo time_limit 600.0s / 既定 optimal 31.0s [原因: nra (NODEROWS_ADAPT=t、木の中の再スタートの判定。直し k で解ける。comboharm 1 節、1 スレッドで確かめ)]; peg-solitaire-a3 (M) 1.76: combo time_limit 600.0s / 既定 optimal 337.3s
+既定だけ解けた 4: chromaticindex1024-7 (M) 1.34: combo time_limit 600.0s / 既定 optimal 444.3s [原因: enum (ENUM_ADAPT の 1 周目が 449 秒列挙。直し s で根を抜ける。comboharm 2 節)]; gen-ip002 (M) 1.28: combo time_limit 600.0s / 既定 optimal 468.1s [原因: 揺れ (既定は 3 回中 2 回が上限すれすれ、combo の時間切れの界も同じ幅。comboharm gen-ip002.md)]; neos-631710 (残り) 14.89: combo time_limit 600.0s / 既定 optimal 31.0s [原因: nra (NODEROWS_ADAPT=t、木の中の再スタートの判定。直し k で解ける。comboharm 1 節、1 スレッドで確かめ)]; peg-solitaire-a3 (M) 1.76: combo time_limit 600.0s / 既定 optimal 337.3s [原因: 揺れ (4 スレッドの既定も 3 回中 2 回時間切れ。comboharm peg-solitaire-a3.md)]
 combo だけ解けた 4: comp07-2idx (M) 0.08: combo optimal 37.1s / 既定 time_limit 600.0s; csched008 (M) 0.36: combo optimal 211.4s / 既定 time_limit 600.0s; glass4 (M) 0.72: combo optimal 427.8s / 既定 time_limit 600.0s; netdiversion (残り) 0.99: combo optimal 591.3s / 既定 time_limit 600.0s
 
 1.25 倍超の遅れ 27 問 (240 問全部、比の大きい順):
    neos-631710 (残り) 14.89: combo time_limit 600.0s / 既定 optimal 31.0s [原因: nra (NODEROWS_ADAPT=t、木の中の再スタートの判定。直し k で解ける。comboharm 1 節、1 スレッドで確かめ)]
-   neos-950242 (M) 3.08: combo optimal 36.9s / 既定 optimal 5.2s
-   30n20b8 (M) 2.73: combo optimal 512.9s / 既定 optimal 181.3s
-   app1-1 (M) 2.37: combo optimal 34.8s / 既定 optimal 8.9s
-   fastxgemm-n2r6s0t2 (M) 1.99: combo optimal 72.0s / 既定 optimal 31.2s
-   supportcase33 (M) 1.93: combo optimal 196.1s / 既定 optimal 96.7s
+   neos-950242 (M) 3.08: combo optimal 36.9s / 既定 optimal 5.2s [原因: enum (列挙の前の行の並べ替え・重なり外しが 2 乗の手間。直し s の手直し後 (時計を始めから数える) で 1 スレッド 5.0 秒・既定並み。comboharm README 10 節 (追加の問題))]
+   30n20b8 (M) 2.73: combo optimal 512.9s / 既定 optimal 181.3s [原因: sbpb (4 スレッド − sbpb は既定並み、+ sbpb 349・431 秒。ppi は無関係。対策案: sbpb を SB_ADAPT=1 に置き換え (127・175 秒)。comboharm 30n20b8.md)]
+   app1-1 (M) 2.37: combo optimal 34.8s / 既定 optimal 8.9s [原因: heur (同じ仕組み。直し案 LMIP_SCORE_TICKS=1 で 36.2 → 25.1 秒。comboharm app1-1.md。数え違いは combo・HEUR_ADAPT の下でサブ MIP の robust FJ が回るときだけ当たり、既定の道にはほぼ当たらない: 既定 + LMIP_SCORE_TICKS は 15 問で変化なし、P 58 問 × 種 3 で 1.000 [0.997, 1.002]・解けた数 119 → 120・遅れ 0。analysis/lmipticks_20261125)]
+   fastxgemm-n2r6s0t2 (M) 1.99: combo optimal 72.0s / 既定 optimal 31.2s [原因: 再現しない (揺れ。1・4 スレッドとも combo が速い。comboharm fastxgemm-n2r6s0t2.md)]
+   supportcase33 (M) 1.93: combo optimal 196.1s / 既定 optimal 96.7s [原因: sbpb (種 1・2 とも、抜くと既定並み・足すと 2 倍。直し k・s は効かない、直しなし。comboharm supportcase33.md)]
    mushroom-best (M) 1.87: combo optimal 155.5s / 既定 optimal 78.7s
    tbfp-network (M) 1.82: combo optimal 323.2s / 既定 optimal 173.4s [原因: 未切り分け (1 スレッドでは差なし。comboharm 9 節)]
-   swath3 (M) 1.78: combo optimal 86.2s / 既定 optimal 44.1s
-   graphdraw-domain (M) 1.78: combo optimal 585.2s / 既定 optimal 325.0s
-   piperout-27 (M) 1.77: combo optimal 29.3s / 既定 optimal 12.2s
-   peg-solitaire-a3 (M) 1.76: combo time_limit 600.0s / 既定 optimal 337.3s
+   swath3 (M) 1.78: combo optimal 86.2s / 既定 optimal 44.1s [原因: heur (HEUR_ADAPT の FP の第 3 段がサブ MIP の中で満額の孫 MIP を出し、根の道筋が変わる。直し案 HEUR_ADAPT=1m で種 1・3 は既定並み、種 2 は f_t の道筋で残る。4 スレッドは未測。comboharm swath3.md)]
+   graphdraw-domain (M) 1.78: combo optimal 585.2s / 既定 optimal 325.0s [原因: はっきりしない (4 スレッドの道筋の揺れが大きい。cutu・enum・sbpb は抜くと既定並み、heur・nra は抜くと時間切れ。種 1〜3 とも combo が遅い向き。comboharm graphdraw-domain.md)]
+   piperout-27 (M) 1.77: combo optimal 29.3s / 既定 optimal 12.2s [原因: enum と heur の重なり (根の手間。直し s で 32 → 24 秒、heur の分は 1m・LMIP_SCORE_TICKS でも消えない。comboharm piperout-27.md)]
+   peg-solitaire-a3 (M) 1.76: combo time_limit 600.0s / 既定 optimal 337.3s [原因: 揺れ (4 スレッドの既定も 3 回中 2 回時間切れ。comboharm peg-solitaire-a3.md)]
    neos-4738912-atrato (M) 1.75: combo optimal 126.4s / 既定 optimal 67.9s
    gen-ip054 (M) 1.51: combo optimal 400.5s / 既定 optimal 262.4s [原因: 未切り分け (1 スレッドでは差が小さい。comboharm 9 節)]
    gmu-35-40 (M) 1.51: combo optimal 566.3s / 既定 optimal 372.9s [原因: はっきりしない (1 スレッドでは両方時間切れ。comboharm 5 節)]
-   fast0507 (M) 1.47: combo optimal 442.7s / 既定 optimal 298.6s
+   fast0507 (M) 1.47: combo optimal 442.7s / 既定 optimal 298.6s [原因: 未切り分け (1 スレッドでは combo のほうが速い 517 → 345 秒、害は 4 スレッドだけ。comboharm README 10 節)]
    piperout-08 (M) 1.44: combo optimal 27.4s / 既定 optimal 15.9s
    pk1 (M) 1.44: combo optimal 17.9s / 既定 optimal 9.5s
    ns1830653 (M) 1.43: combo optimal 205.2s / 既定 optimal 140.1s
@@ -103,7 +103,7 @@ combo だけ解けた 4: comp07-2idx (M) 0.08: combo optimal 37.1s / 既定 time
    mzzv42z (M) 1.36: combo optimal 76.5s / 既定 optimal 53.7s
    chromaticindex1024-7 (M) 1.34: combo time_limit 600.0s / 既定 optimal 444.3s [原因: enum (ENUM_ADAPT の 1 周目が 449 秒列挙。直し s で根を抜ける。comboharm 2 節)]
    dano3_5 (M) 1.34: combo optimal 534.7s / 既定 optimal 396.1s
-   gen-ip002 (M) 1.28: combo time_limit 600.0s / 既定 optimal 468.1s
+   gen-ip002 (M) 1.28: combo time_limit 600.0s / 既定 optimal 468.1s [原因: 揺れ (既定は 3 回中 2 回が上限すれすれ、combo の時間切れの界も同じ幅。comboharm gen-ip002.md)]
 
 効いた (0.8 倍未満) 16 問 (240 問全部、比の小さい順):
    comp07-2idx (M) 0.08: combo optimal 37.1s / 既定 time_limit 600.0s
@@ -119,6 +119,6 @@ combo だけ解けた 4: comp07-2idx (M) 0.08: combo optimal 37.1s / 既定 time
    glass4 (M) 0.72: combo optimal 427.8s / 既定 time_limit 600.0s
    supportcase26 (M) 0.74: combo optimal 280.0s / 既定 optimal 383.7s
    wachplan (M) 0.74: combo optimal 224.8s / 既定 optimal 305.6s
-   neos-911970 (M) 0.74: combo optimal 7.1s / 既定 optimal 12.9s
+   neos-911970 (M) 0.74: combo optimal 7.1s / 既定 optimal 12.9s [原因: (combo の計測では得 0.74。nra の直し案 r0k23 では 1.3〜1.7 倍の害が出る: φ が木の進みで上がり外す側に切り替わる。comboharm README 10.10 節)]
    istanbul-no-cutoff (M) 0.76: combo optimal 216.6s / 既定 optimal 287.0s
    neos-3627168-kasai (M) 0.77: combo optimal 33.9s / 既定 optimal 46.8s
