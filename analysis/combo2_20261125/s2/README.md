@@ -15,10 +15,21 @@
   - 同じ (問題, スレッド) の def と c2c は、同じ分担で続けて回す。
 - 誰がどの分担を回すかは、親が決める。
 
-## 2. 回し方 (各分担)
+## 2. 版の固定 (親の指示、2026-11-25)
 
-1. ブランチを取り込み、先端で `pip install -e .`。
-   - 既定と c2c は同じ版で回す。版は磨きの既定化 6762d9c3c 以降。
+**版は c8e468e25 に固定する。** 既定と c2c は、この版のソースで作った .so で回す。
+- 第 1 段の版 (a5008f9d8) との違いは、src/mip/solver.rs の試作 `ENOMOTO_MIP_POOL_CLOSE` (既定オフ) だけ。既定と c2c の道筋は変わらないはず。
+- 確かめ (c8e468e25 で `pip install -e .`):
+  - check_default: 全部一致。
+  - c2c の fuzz 7 本と cargo test: (結果をここに書く)
+- 先端がこの後に進んでも、計測のビルドは c8e468e25 のソースで作る。
+  - 先端の src・python/ が c8e468e25 と同じなら (`git diff --stat c8e468e25 HEAD -- src python Cargo.toml Cargo.lock pyproject.toml` が空なら)、そのまま `pip install -e .` でよい。
+  - 違えば、`git checkout c8e468e25 -- src python Cargo.toml Cargo.lock pyproject.toml` で固定の版のソースにしてから `pip install -e .`。そのあと `git checkout HEAD -- src python Cargo.toml Cargo.lock pyproject.toml` で作業ツリーを戻す (.so は作り直さない)。
+- 行の `commit` 欄には回したときの HEAD が入るが、ビルドは c8e468e25 で同じ。
+
+## 3. 回し方 (各分担)
+
+1. ブランチを取り込み、2 節のとおり c8e468e25 のソースで `pip install -e .`。
 2. highspy があるかを確かめる (`python -c "import highspy"`)。なければ `pip install highspy==1.15.1`。
 3. `python analysis/protoscreen_20261124/check_default.py` が「全部一致」になることを確かめる (基準は ref_default.json)。
 4. `python analysis/combo2_20261125/s2/run.py K` → `res_sK.jsonl`。
@@ -30,7 +41,7 @@
 
 c2c の誤答の確かめ (fuzz 7 本・cargo test) は、第 1 段の 3 節で済んでいる (誤答 0、424 通過)。版が変わったら回し直す。
 
-## 3. 集計 (summ.py)
+## 4. 集計 (summ.py)
 
 `python analysis/combo2_20261125/s2/summ.py > summ.txt`。前回の combo の summ.py と同じ表で、スレッド別 (1・4) × 集合別 (M・240 問全部・残り) に出す。
 
