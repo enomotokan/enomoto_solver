@@ -12,14 +12,20 @@ from cfg import C2 as COMBO  # noqa: E402
 NAMES = {"nra": "ENOMOTO_MIP_NODEROWS_ADAPT", "enum": "ENOMOTO_MIP_ENUM_ADAPT", "heur": "ENOMOTO_MIP_HEUR_ADAPT", "fp3ls": "ENOMOTO_MIP_FP_STAGE3_LS",
          "lmip": "ENOMOTO_MIP_LMIP_SCORE_TICKS", "bfrt": "ENOMOTO_MIP_NODELP_BFRT_GROUP", "tie": "ENOMOTO_MIP_CUTSEL_PROBE_TIE_FEWER",
          "cutu": "ENOMOTO_MIP_CUTOFF_USER_TREE", "ppi": "ENOMOTO_MIP_PROOFPROP"}
+# c2c を土台にする形 (親の依頼、blend2): `c2c` = c2 + SB_PROBEBD=1、`c2c-X` = c2c から X を抜く (X に sbpb も使える)、`+sbpb` = 既定に SB_PROBEBD=1
+SBPB = {"ENOMOTO_MIP_SB_PROBEBD": "1"}
 assert set(NAMES.values()) == set(COMBO)
 
 
 def cfg_env(c):
     if c == "def": return {}
     if c == "c2a": return dict(COMBO)
+    if c == "c2c": return dict(COMBO, **SBPB)
+    if c.startswith("c2c-"):
+        x = c[4:]
+        return {k: v for k, v in dict(COMBO, **SBPB).items() if k != ("ENOMOTO_MIP_SB_PROBEBD" if x == "sbpb" else NAMES[x])}
     if c.startswith("-"): return {k: v for k, v in COMBO.items() if k != NAMES[c[1:]]}
-    if c.startswith("+"): return {NAMES[x]: COMBO[NAMES[x]] for x in c[1:].split("+")}
+    if c.startswith("+"): return {k: v for x in c[1:].split("+") for k, v in (SBPB.items() if x == "sbpb" else [(NAMES[x], COMBO[NAMES[x]])])}
     raise ValueError(c)
 
 

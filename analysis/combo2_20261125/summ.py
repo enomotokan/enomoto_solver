@@ -55,7 +55,7 @@ for k, (name, env, t1, t4, rec) in P1.items():
             nb += sum(solved(R[(p, base, s)]) for s in ss); npr += sum(solved(R[(p, proto, s)]) for s in ss)
             raw = [t(R[(p, proto, s)]) / max(t(R[(p, base, s)]), 1e-9) for s in ss]
             if all(x > 1.25 for x in raw) or all(math.exp(x) > 1.25 for x in lr):
-                (slow_path if kind(p, th) == "道筋" else slow).append(f"{p} {[round(x, 2) for x in raw]}")
+                (slow_path if kind(p, th) in ("道筋", "揺れ") else slow).append(f"{p} {[round(x, 2) for x in raw]}")
             for s in ss:
                 a, b = R[(p, proto, s)], R[(p, base, s)]
                 if st(a) == "optimal" and st(b) == "optimal" and obj(a) is not None and obj(b) is not None and not same(obj(a), obj(b)):
@@ -88,7 +88,7 @@ def plist(d, key, th=None):
 
 for th in ("t1", "t4"):
     print(f"== {'1' if th == 't1' else '4'} スレッド (既定 def_{th} との比、1 より小さければ試作が速い)\n")
-    print("| 番号 | 試作 | 回 | 比 | 95% 区間 | 解けた数 既定 → 試作 | 全種 1.25 倍超の遅れ (仕組み・未分類) | 同 (道筋、目安に数えない) | 食い違い | 目安 | 効いた (< 0.8) | 害 (> 1.25) | 条件付き候補 |")
+    print("| 番号 | 試作 | 回 | 比 | 95% 区間 | 解けた数 既定 → 試作 | 全種 1.25 倍超の遅れ (仕組み・未分類) | 同 (道筋・揺れ、目安に数えない) | 食い違い | 目安 | 効いた (< 0.8) | 害 (> 1.25) | 条件付き候補 |")
     print("|---|---|---:|---:|---|---|---|---|---|---|---|---|---|")
     for k, name, t_, d in rows:
         if t_ != th: continue
