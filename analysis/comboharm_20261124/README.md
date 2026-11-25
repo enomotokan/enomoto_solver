@@ -384,3 +384,5 @@ bash analysis/comboharm_20261124/fuzz.sh fix ENOMOTO_MIP_NODEROWS_ADAPT=tk ENOMO
   (既定 232) LP に残り、ノードの LP の反復を 1.5 倍にすること (10.2 節)。ラウンド単位の物差し (伸び / 手間の比、反復の増えの按分、伸びなかったラウンドの行を外す) では
   これを測りきれない。ラウンドをほぼ止めた形 (TA=50) だけが既定並みで、直すには **戻した行ごとの手間あたりの伸び** (行が LP にいる間の下界への寄与と、その行が増やした手間)
   を見る形が要る。これは行ごとの記帳が要る別の試作になるので、ここで区切る。
+- 確かめ: `fuzz.sh tik ENOMOTO_MIP_NODEROWS_ADAPT=tik ENOMOTO_MIP_HEUR_ADAPT=1mk ENOMOTO_MIP_ENUM_ADAPT=1s` (`fuzz_tik.out`): fuzz 7 本は誤答 0
+  (tiny 0/400・0/400、vs HiGHS 0/300、objint 0/1000・0/1000、slack 0/1000・0/1000)、cargo test 424 通過・0 失敗。既定の道筋は 6 問とも基準と一致 (`check_default.py`)。
