@@ -19,8 +19,11 @@
   "h80x6320d t1": "enum (種 1 だけ、道筋の運。再スタート後の列挙で根の道筋が変わる。種 1〜3 の幾何で 1.03。直しなし、k・s も効かない。comboharm h80x6320d.md)",
   "neos-2978193-inde t1": "sbpb・nra・bfrt の重なり (道筋。証明の木だけ大きい、組は単調でない。3 種の幾何で 46.5 → 75.1 秒。直しなし、k・s も効かない。comboharm neos-2978193-inde.md)",
   "swath3": "heur (HEUR_ADAPT の FP の第 3 段がサブ MIP の中で満額の孫 MIP を出し、根の道筋が変わる。直し案 HEUR_ADAPT=1m で種 1・3 は既定並み、種 2 は f_t の道筋で残る。4 スレッドは未測。comboharm swath3.md)",
-  "piperout-27 t4": "enum と heur の重なり (根の手間。既定 + enum + heur で combo と同じ。直し s で一部だけ戻る。comboharm piperout-27.md)",
+  "piperout-27 t4": "enum と heur の重なり (根の手間。直し s で 32 → 24 秒、heur の分は 1m・LMIP_SCORE_TICKS でも消えない。comboharm piperout-27.md)",
   "supportcase33 t4": "sbpb (種 1・2 とも、抜くと既定並み・足すと 2 倍。直し k・s は効かない、直しなし。comboharm supportcase33.md)",
   "fastxgemm-n2r6s0t2 t4": "再現しない (揺れ。1・4 スレッドとも combo が速い。comboharm fastxgemm-n2r6s0t2.md)",
-  "graphdraw-domain t4": "未切り分け (種 1〜3 とも combo が遅い。ppi が疑わしいが抜いても残る。comboharm graphdraw-domain.md)"
+  "graphdraw-domain t4": "はっきりしない (4 スレッドの道筋の揺れが大きい。cutu・enum・sbpb は抜くと既定並み、heur・nra は抜くと時間切れ。種 1〜3 とも combo が遅い向き。comboharm graphdraw-domain.md)",
+  "30n20b8 t4": "sbpb (4 スレッド − sbpb は既定並み、+ sbpb 349・431 秒。ppi は無関係。対策案: sbpb を SB_ADAPT=1 に置き換え (127・175 秒)。comboharm 30n20b8.md)",
+  "peg-solitaire-a3 t4": "揺れ (4 スレッドの既定も 3 回中 2 回時間切れ。comboharm peg-solitaire-a3.md)",
+  "gen-ip002 t4": "揺れ (既定は 3 回中 2 回が上限すれすれ、combo の時間切れの界も同じ幅。comboharm gen-ip002.md)"
 }

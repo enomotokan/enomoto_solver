@@ -911,7 +911,10 @@ pub(super) fn polish_in_problem(p: &MipProblem, x: &mut Vec<f64>, z: f64) -> Opt
 /// 0 = 使わない、1 = 研磨の LP を B&B の LP の基底から温めて解く (返す前の研磨には期限を渡さない)、
 /// 2 (`d`) = 1 に加えて返す前の研磨にも期限を渡し、間に合わなければ漏れの見積り ([`solver::Solver::leak_estimate`]) で目的値を正す、
 /// 3 (`e`) = 研磨の LP を解かず、いつも漏れの見積りで目的値を正す。
-/// 木の中の研磨 (`ENOMOTO_MIP_POLISH_STRICT=2`) には、どれも求解の期限を渡し、間に合わなければ見積りで正す
+/// 木の中の研磨 (`ENOMOTO_MIP_POLISH_STRICT=2`) には、どれも求解の期限を渡し、間に合わなければ研磨せずに受け取って見積りを足し、
+/// 「未研磨」の印をつける。返す前の研磨は、木の中で研磨が済んだ暫定解なら飛ばす。
+/// 見積りの双対値と温める基底は、暫定解の連続部を出した LP ([`solver::Solver::resolve_continuous`] の整数を固定した LP、
+/// または双対値で最適と示せた今の LP) のもの
 pub(super) fn polish_warm_mode() -> u8 {
     static V: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
     *V.get_or_init(|| match env_str!("ENOMOTO_MIP_POLISH_WARM") {
@@ -3085,6 +3088,14 @@ pub(crate) fn feas_fj_lmip_early(prob: &MipProblem, threads: usize, cap: f64, ve
 /// [`feas_fj_lmip_early`] の種をずらせる形 (`salt` = 0 なら同じ)。試作 `ENOMOTO_MIP_ROBUST` の `f` (根を暫定解なしで終えるときの
 /// 追加の FJ・Local-MIP、[`solver::robust`]) が、最初の早めの探索と重ならない種で回すのに使う
 pub(crate) fn feas_fj_lmip_early_salt(prob: &MipProblem, threads: usize, cap: f64, verbose: bool, salt: u64) -> Option<Vec<f64>> {
+    feas_fj_lmip_early_from(prob, threads, cap, verbose, salt, None, false)
+}
+
+/// [`feas_fj_lmip_early_salt`] に出発点を付けた形 (試作 `ENOMOTO_MIP_FP_STAGE3_LS`、[`heuristics`] の `fp_stage3`)。
+/// `start` があれば、FJ2 は毎回その点から ([`fj::fj2_search_from`])、Local-MIP もその点から始める ([`localmip::LocalMip::set_start`]、
+/// Local-MIP の中のやり直しもこの点に戻る)。`until_restart` なら、Local-MIP が自分のやり直しの判断 (改善のない手数
+/// `ENOMOTO_T_MIP_LOCALMIP_RESTART`) に着いたところで止める (出発点の周りで行き詰まった印。1 本のときだけ見る)
+pub(crate) fn feas_fj_lmip_early_from(prob: &MipProblem, threads: usize, cap: f64, verbose: bool, salt: u64, start: Option<&[f64]>, until_restart: bool) -> Option<Vec<f64>> {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::{Duration, Instant};
     let t0 = Instant::now();
@@ -3134,7 +3145,7 @@ pub(crate) fn feas_fj_lmip_early_salt(prob: &MipProblem, threads: usize, cap: f6
                 let fj_once = |k: u64| -> bool {
                     let left = t_end.saturating_duration_since(Instant::now()).as_secs_f64();
                     fj_tries.fetch_add(1, Ordering::Relaxed);
-                    match fj::fj2_search(prob, &prob.col_lo, &prob.col_up, left, fj_seed(k), Some(stop)) {
+                    match fj::fj2_search_from(prob, &prob.col_lo, &prob.col_up, start, left, fj_seed(k), Some(stop)) {
                         Some(x) if prob.is_feasible(&x, 1e-6) => {
                             done(x, 1);
                             true
@@ -3152,7 +3163,10 @@ pub(crate) fn feas_fj_lmip_early_salt(prob: &MipProblem, threads: usize, cap: f6
                         return None;
                     }
                     let ti = Instant::now();
-                    let r = localmip::LocalMip::new(prob, &prob.col_lo, &prob.col_up, lm_seed, chain);
+                    let mut r = localmip::LocalMip::new(prob, &prob.col_lo, &prob.col_up, lm_seed, chain);
+                    if let (Some(l), Some(x)) = (r.as_mut(), start) {
+                        l.set_start(x);
+                    }
                     if verbose {
                         eprintln!("MIP:   early Local-MIP thread {t}: initialized in {:.2}s", ti.elapsed().as_secs_f64());
                     }
@@ -3199,6 +3213,9 @@ pub(crate) fn feas_fj_lmip_early_salt(prob: &MipProblem, threads: usize, cap: f6
                             if !over() && timed(2, &mut || lm_run(l, until)) {
                                 break;
                             }
+                        }
+                        if until_restart && lm.as_ref().is_none_or(|l| l.done || l.restarts() > 0) {
+                            break;
                         }
                     }
                     if verbose {

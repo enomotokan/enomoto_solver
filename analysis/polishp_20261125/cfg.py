@@ -8,3 +8,6 @@ CFGS = {"def_t1": {}, "def_t4": {}}
 for k, (name, env, t1, t4, _) in P1.items():
     if t1: CFGS[f"{name}_t1"] = env
     if t4: CFGS[f"{name}_t4"] = env
+# 超過を抑える試作 `ENOMOTO_MIP_POLISH_WARM=d` の小さな確かめ (2026-11-25、shards_small.json・res_small.jsonl、summ.py の対象外)
+CFGS["s1wd_t1"] = {"ENOMOTO_MIP_POLISH_STRICT": "1", "ENOMOTO_MIP_POLISH_WARM": "d"}
+CFGS["s2wd_t1"] = {"ENOMOTO_MIP_POLISH_STRICT": "2", "ENOMOTO_MIP_POLISH_WARM": "d"}
