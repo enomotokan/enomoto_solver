@@ -16305,7 +16305,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let prot = if keep_basis { self.basis_protected_cuts() } else { None };
             // 診断 `ENOMOTO_MIP_DIAG_GLOBALAUDIT` (analysis/globalaudit_20261124、解き方は変えない): 根のノードを分枝するときに、根の定義域が
             // 大域的な境界より締まっている (子に引き継がれず、根へ戻ると捨てる) 列を理由ごとに数える
-            // 試作 `ENOMOTO_MIP_GLOBALFIX` の `a` (analysis/globalfix_20261124): 根のノードの整数列の締め付けを大域的な境界に入れる
+            // `ENOMOTO_MIP_GLOBALFIX` (2026-11-25 から既定) の `a` (analysis/globalfix_20261124): 根のノードの整数列の締め付けを大域的な境界に入れる
             // (子・根へ戻った後・再スタートの判定・ほかのスレッドにも効く)。診断はその後に数える (大域にない残りを出す)
             if node.depth == 0 && node.changes.is_empty() && super::domain::globalfix('a') && !self.params.submip && self.snap.is_none() && !self.dom.infeasible {
                 self.globalfix_root();
@@ -24286,7 +24286,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if l.is_empty() {
             return false;
         }
-        // 試作 `ENOMOTO_MIP_GLOBALFIX` の `c` (analysis/globalfix_20261124): 長さ 1 の衝突 (大域的に成り立つリテラルを除いた後) は、そのリテラルの
+        // `ENOMOTO_MIP_GLOBALFIX` (2026-11-25 から既定) の `c` (analysis/globalfix_20261124): 長さ 1 の衝突 (大域的に成り立つリテラルを除いた後) は、そのリテラルの
         // 否定が全ての (打ち切り値より良い) 解で成り立つ = 大域的な固定。否定はプールの伝播 (conflict_pool.rs の「否定」) と同じ形
         // (`x <= v` の否定は整数列 `x >= floor(v) + 1`・連続列 `x >= v`)。プールにもそのまま入れる (ほかの振る舞いは変えない)
         // `k` は `c` を整数列だけにしたもの (連続列は大域にせずプールだけに入れる。`a` が連続列を除くのと同じ理由。pk1 で `c` の大域的な締め付けの
@@ -24940,7 +24940,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         big
     }
 
-    /// 試作 `ENOMOTO_MIP_GLOBALFIX` の `a` (analysis/globalfix_20261124): 根のノード (深さ 0、分枝の変更なし) を分枝する時点で、定義域が
+    /// `ENOMOTO_MIP_GLOBALFIX` (2026-11-25 から既定) の `a` (analysis/globalfix_20261124): 根のノード (深さ 0、分枝の変更なし) を分枝する時点で、定義域が
     /// 大域的な境界より締まっている整数列の境界を `tighten_global` で大域的な境界に入れる。根のノードの定義域は「大域的な境界 + 大域的に
     /// 成り立つ推論 (行・双対証明・衝突・カットの伝播) + 打ち切り値より良い解だけを残す推論 (被約費用・強分枝の片側・目的の伝播)」なので、
     /// 打ち切り値より良い全ての解で成り立つ (根の被約費用の固定と同じ根拠)。根のノードの LP の値を子の下界に使うのも同じ前提。

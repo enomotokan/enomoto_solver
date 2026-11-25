@@ -33,6 +33,9 @@ def same(a, b): return abs(a - b) <= 1e-6 * max(1.0, abs(a), abs(b))
 crash = [(p, c, s, st(r)) for (p, c, s), r in R.items() if st(r) in ("", "crash", "error", "fetch_error")]
 print(f"行 {len(R)}、crash・取得失敗 {len(crash)} {crash[:10]}")
 print(f"設定ごとの行の数: {dict(collections.Counter(c for _, c, _ in R))}\n")
+# 害の分け方 (利用者の方針、README 7 節): kind.json の「道筋」の害は、採用の目安の「全種 1.25 倍超の遅れ」に数えず、別の欄に残す。載っていない問題は仕組みの害として数える
+KIND = {k: v for k, v in json.loads((D / "kind.json").read_text()).items() if not k.startswith("_")}
+def kind(p, th): return KIND.get(f"{p} {th}") or KIND.get(p) or ""
 rows = []
 for k, (name, env, t1, t4, rec) in P1.items():
     for th, on in (("t1", t1), ("t4", t4)):
@@ -43,7 +46,7 @@ for k, (name, env, t1, t4, rec) in P1.items():
             if c == proto and (p, base, s) in R: by[p].append(s)
         if not by:
             rows.append((k, name, th, None)); continue
-        logs, slow, bad, nb, npr = [], [], [], 0, 0
+        logs, slow, slow_path, bad, nb, npr = [], [], [], [], 0, 0
         perprob = {}
         for p, ss in by.items():
             lr = [math.log((t(R[(p, proto, s)]) + SH) / (t(R[(p, base, s)]) + SH)) for s in ss]
@@ -52,7 +55,7 @@ for k, (name, env, t1, t4, rec) in P1.items():
             nb += sum(solved(R[(p, base, s)]) for s in ss); npr += sum(solved(R[(p, proto, s)]) for s in ss)
             raw = [t(R[(p, proto, s)]) / max(t(R[(p, base, s)]), 1e-9) for s in ss]
             if all(x > 1.25 for x in raw) or all(math.exp(x) > 1.25 for x in lr):
-                slow.append(f"{p} {[round(x, 2) for x in raw]}")
+                (slow_path if kind(p, th) in ("道筋", "揺れ") else slow).append(f"{p} {[round(x, 2) for x in raw]}")
             for s in ss:
                 a, b = R[(p, proto, s)], R[(p, base, s)]
                 if st(a) == "optimal" and st(b) == "optimal" and obj(a) is not None and obj(b) is not None and not same(obj(a), obj(b)):
@@ -69,7 +72,7 @@ for k, (name, env, t1, t4, rec) in P1.items():
         h = 1.96 * sd / n ** 0.5
         good = sorted((p for p, x in perprob.items() if x < 0.8), key=lambda p: perprob[p])
         harm = sorted((p for p, x in perprob.items() if x > 1.25), key=lambda p: -perprob[p])
-        rows.append((k, name, th, dict(n=n, ratio=math.exp(m), lo=math.exp(m - h), hi=math.exp(m + h), nb=nb, npr=npr, slow=slow, bad=bad,
+        rows.append((k, name, th, dict(n=n, ratio=math.exp(m), lo=math.exp(m - h), hi=math.exp(m + h), nb=nb, npr=npr, slow=slow, slow_path=slow_path, bad=bad,
                                        nrun=sum(len(v) for v in by.values()), perprob=perprob, good=good, harm=harm)))
 # 前回の combo の害の切り分けで分かった原因 (analysis/combo_20261124/cause.json、キーは「問題」か「問題 t1」「問題 t4」)
 CAUSE = json.loads((D.parent / "combo_20261124" / "cause.json").read_text())
@@ -85,15 +88,15 @@ def plist(d, key, th=None):
 
 for th in ("t1", "t4"):
     print(f"== {'1' if th == 't1' else '4'} スレッド (既定 def_{th} との比、1 より小さければ試作が速い)\n")
-    print("| 番号 | 試作 | 回 | 比 | 95% 区間 | 解けた数 既定 → 試作 | 全種 1.25 倍超の遅れ | 食い違い | 目安 | 効いた (< 0.8) | 害 (> 1.25) | 条件付き候補 |")
-    print("|---|---|---:|---:|---|---|---|---|---|---|---|---|")
+    print("| 番号 | 試作 | 回 | 比 | 95% 区間 | 解けた数 既定 → 試作 | 全種 1.25 倍超の遅れ (仕組み・未分類) | 同 (道筋・揺れ、目安に数えない) | 食い違い | 目安 | 効いた (< 0.8) | 害 (> 1.25) | 条件付き候補 |")
+    print("|---|---|---:|---:|---|---|---|---|---|---|---|---|---|")
     for k, name, t_, d in rows:
         if t_ != th: continue
         if d is None:
-            print(f"| {k} | {name} | 0 | — | — | — | — | — | 結果なし | — | — | — |"); continue
+            print(f"| {k} | {name} | 0 | — | — | — | — | — | — | 結果なし | — | — | — |"); continue
         ok = d["hi"] <= 1.05 and d["npr"] >= d["nb"] and not d["slow"] and not d["bad"]
         why = [] if ok else [w for w, c in (("区間上端", d["hi"] > 1.05), ("解けた数", d["npr"] < d["nb"]), ("遅れ", bool(d["slow"])), ("食い違い", bool(d["bad"]))) if c]
-        print(f"| {k} | {name} | {d['nrun']} | {d['ratio']:.3f} | [{d['lo']:.3f}, {d['hi']:.3f}] | {d['nb']} → {d['npr']} | {'; '.join(d['slow']) or 'なし'} | "
+        print(f"| {k} | {name} | {d['nrun']} | {d['ratio']:.3f} | [{d['lo']:.3f}, {d['hi']:.3f}] | {d['nb']} → {d['npr']} | {'; '.join(d['slow']) or 'なし'} | {'; '.join(d['slow_path']) or 'なし'} | "
               f"{'; '.join(d['bad']) or '0'} | {'候補' if ok else '外れ (' + '・'.join(why) + ')'} | "
               f"{plist(d, 'good')} | {plist(d, 'harm', th)} | "
               f"{'○' if (not ok and d['good'] and d['harm'] and not d['bad']) else ''} |")
