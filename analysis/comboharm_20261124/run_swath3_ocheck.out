@@ -1,0 +1,25 @@
+1o 10teams 1 def optimal 6.633758203999605 0 924.0
+1 10teams 1 def optimal 9.185308868999527 0 924.0
+1o 10teams 1 def optimal 5.842670941000506 0 924.0
+1 10teams 1 def optimal 6.290345424000407 0 924.0
+1o 10teams 1 def optimal 4.053158823000558 0 924.0
+1 10teams 1 def optimal 9.944088023999939 0 924.0
+Traceback (most recent call last):
+  File "/home/user/enomoto_solver/analysis/comboharm_20261124/run.py", line 32, in <module>
+    mps = rb.fetch(prob, WT / ".miplib_cache")
+  File "/home/user/enomoto_solver/scripts/run_miplib_benchmark.py", line 67, in fetch
+    with gzip.open(gz, "rb") as src, open(mps, "wb") as dst:
+         ~~~~~~~~~^^^^^^^^^^
+  File "/usr/local/lib/python3.13/gzip.py", line 66, in open
+    binary_file = GzipFile(filename, gz_mode, compresslevel)
+  File "/usr/local/lib/python3.13/gzip.py", line 205, in __init__
+    fileobj = self.myfileobj = builtins.open(filename, mode or 'rb')
+                               ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/home/user/enomoto_solver/.miplib_cache/neos-1171448.mps.gz'
+1 neos-1171448 1 def optimal 105.88187902199934 501 -308.99999999999716
+1 neos-1171448 1 def optimal 42.95172647399977 101 -308.9999999999995
+1o neos-1171448 1 def optimal 43.30473321400041 101 -308.9999999999995
+1 neos-1171448 1 def optimal 92.02040784600013 401 -308.9999999999995
+1o neos-1171448 1 def optimal 92.09860240600028 401 -308.9999999999995
+1o CMS750_4 1 def time_limit 200.01404882600036 6681 458.0
+1 CMS750_4 1 def time_limit 200.02494339999976 7784 338.0

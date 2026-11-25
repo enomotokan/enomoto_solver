@@ -4110,6 +4110,15 @@ pub(crate) fn heur_adapt() -> bool {
     *V.get_or_init(|| env_str!("ENOMOTO_MIP_HEUR_ADAPT").is_some_and(|v| v != "0"))
 }
 
+/// 試作 `ENOMOTO_MIP_HEUR_ADAPT` の文字 (値に含めると効く。`=1o` など):
+/// - `o`: FP の第 3 段 (`fp_stage3`) を外側の求解でだけ回し、サブ MIP の中の FP では回さない (`FP_STAGE3` を直に与えたときは今のまま)。
+///   サブ MIP (RENS・LP face など) は暫定解なしで始まるので f_g = 1 になり、第 3 段は f_g で縮まずに満額 (500 ノード・10 秒) の
+///   孫のサブ MIP を出していた (swath3: analysis/comboharm_20261124/swath3.md)
+pub(crate) fn heur_adapt_has(c: char) -> bool {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    heur_adapt() && V.get_or_init(|| env_str!("ENOMOTO_MIP_HEUR_ADAPT").map_or(String::new(), |v| v.to_string())).contains(c)
+}
+
 fn adapt_sigmoid(z: f64) -> f64 {
     1.0 / (1.0 + (-z.clamp(-50.0, 50.0)).exp())
 }

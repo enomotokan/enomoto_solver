@@ -1185,7 +1185,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         self.lp.set_costs(&p.cost);
         self.lp.restore_state(&saved);
-        if !found && !self.time_up() && (env_str!("ENOMOTO_MIP_FP_STAGE3").is_some_and(|v| v != "0") || super::solver::heur_adapt()) {
+        let st3_env = env_str!("ENOMOTO_MIP_FP_STAGE3").is_some_and(|v| v != "0");
+        // 試作 `ENOMOTO_MIP_HEUR_ADAPT` の `o` ([`super::solver::heur_adapt_has`]): サブ MIP の中では第 3 段を回さない
+        let st3_adapt = super::solver::heur_adapt() && !(self.params.submip && super::solver::heur_adapt_has('o'));
+        if !found && !self.time_up() && (st3_env || st3_adapt) {
+            if env_str!("ENOMOTO_MIP_HEUR_ADAPT_DEBUG").is_some() {
+                eprintln!("HEURADAPT fp_stage3: submip {} incumbent {} f_g {:.4} n {} m {}", self.params.submip, self.incumbent.is_some(), self.adapt_gap_f(), p.n, p.m);
+            }
             if let Some(r) = best_r {
                 found = self.fp_stage3(&r);
             }
