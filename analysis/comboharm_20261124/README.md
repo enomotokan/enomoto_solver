@@ -223,3 +223,5 @@ bash analysis/comboharm_20261124/fuzz.sh fix ENOMOTO_MIP_NODEROWS_ADAPT=tk ENOMO
 
 `CH_EXTRA` は設定の後に足す環境変数 (空白区切り)。直しの確かめの回は、走っている計測の .so を置き換えないよう別の venv に入れたビルドで回した
 (ソースは同じコミット)。
+
+- app1-1 (2026-11-25): 1 スレッドは heur と tie の組み合わせ、4 スレッドは heur。サブ MIP の中の robust FJ の Local-MIP が、密な列で手間を実時間の 1/14 にしか数えず、上限の 10 倍まで回る。直し `ENOMOTO_MIP_LMIP_SCORE_TICKS` (既定オフ)。記録は `app1-1.md`。
