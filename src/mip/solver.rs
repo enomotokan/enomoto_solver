@@ -10068,6 +10068,38 @@ impl<'a, L: MipLp> Solver<'a, L> {
             .count()
     }
 
+    /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `2` (`=r0k2` など、analysis/comboharm_20261124/README.md 10.8 節): 木の中の再スタートの判定 `K` の
+    /// 「効いているカットの行」を、`k` の記帳 ([`Self::nra_k_tight`]) でなくカットプールで数える。プールにあって今の LP にないカットのうち、
+    /// 今の LP 解で締まっている (または破られた) ものの数を返す。プールは nra が LP から外しても消えないので、外したかどうかで判定の物差しが変わらない
+    /// (`k` の記帳は上限 (LP の行の 2 倍 + 1000) を超えると捨てるので、数えきれないことがある)
+    fn nra_k2_tight(&self) -> usize {
+        if self.cut_pool.is_empty() {
+            return 0;
+        }
+        let m0 = self.p.m;
+        let in_lp: std::collections::HashSet<u64> = (m0..self.lp.num_rows())
+            .map(|i| {
+                let mut c = self.lp.row(i);
+                c.sort_by_key(|&(j, _)| j);
+                super::separation::cut_fingerprint(&c, self.lp.row_bounds(i).1)
+            })
+            .collect();
+        let x = self.lp.col_values();
+        (0..self.cut_pool.len())
+            .filter(|&k| {
+                let (s, e) = (self.pool_start[k] as usize, self.pool_start[k + 1] as usize);
+                let r = self.cut_pool[k].1;
+                let act: f64 = (s..e).map(|t| self.pool_val[t] * x[self.pool_idx[t] as usize]).sum();
+                if act < r - 1e-6 * (1.0 + r.abs()) {
+                    return false;
+                }
+                let mut c: Vec<(usize, f64)> = (s..e).map(|t| (self.pool_idx[t] as usize, self.pool_val[t])).collect();
+                c.sort_by_key(|&(j, _)| j);
+                !in_lp.contains(&super::separation::cut_fingerprint(&c, r))
+            })
+            .count()
+    }
+
     /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT`: 閉じた葉を数える (`inf`: 実行不能で閉じた (伝播・LP の実行不能・強分枝の伝播・強分枝の引き継ぎ)、
     /// 偽: 下界で閉じた (取り出したときの下界・LP の目的値・被約費用・整数解・TUBR))。強分枝で閉じたもの (`sb`) は数えない
     pub(super) fn nra_leaf(&mut self, inf: bool) {
@@ -28522,8 +28554,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
         } else {
             0
         };
-        // 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `k`: NODEROWS_ADAPT が外した行のうち今の LP 解で締まっているものも数える
-        let tcuts_nra = if guard.contains('K') || log { self.nra_k_tight() } else { 0 };
+        // 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `k`: NODEROWS_ADAPT が外した行のうち今の LP 解で締まっているものも数える。
+        // `2` (`k2`): 記帳でなくカットプールで数える ([`Self::nra_k2_tight`])
+        let tcuts_nra = if guard.contains('K') || log {
+            if nra_has('2') {
+                self.nra_k2_tight()
+            } else {
+                self.nra_k_tight()
+            }
+        } else {
+            0
+        };
         let tcuts = tcuts + tcuts_nra;
         let rowdrop_ok = (rowdrop as f64) >= tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_CROWS", 0.1, f64) * self.p.m as f64;
         let mut stop: Option<char> = None;
@@ -28605,7 +28646,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.tr_rstop = stop == Some('R');
         if log {
             eprintln!(
-                "TRSTAT: {why} outer {:.2} solve {solve_t:.2} root {:.2} tree {tree_t:.2} restarts {} nodes {done} open {open} q {q:.4} est {:.0} est_left {est_left:.2} est_left_h {est_left_h:.1} lb {lb:.10e} root_lb {:.10e} ub {ub:.10e} gap {gap:.3e} newly {newly}/{free0} ({:.4}) cuts {cuts}/{} tcuts {tcuts} (nra {tcuts_nra}) rowdrop {rowdrop} est_r {est_r:.2} left {left:.1} guard {}",
+                "TRSTAT: {why} outer {:.2} solve {solve_t:.2} root {:.2} tree {tree_t:.2} restarts {} nodes {done} open {open} q {q:.4} est {:.0} est_left {est_left:.2} est_left_h {est_left_h:.1} lb {lb:.10e} root_lb {:.10e} ub {ub:.10e} gap {gap:.3e} newly {newly}/{free0} ({:.4}) cuts {cuts}/{} tcuts {tcuts} (nra {tcuts_nra}, pool {}, rec {}) rowdrop {rowdrop} est_r {est_r:.2} left {left:.1} guard {}",
                 super::outer_elapsed().unwrap_or(f64::NAN),
                 self.tr_t0,
                 self.params.restarts,
@@ -28613,6 +28654,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.tr_root_lb,
                 newly as f64 / free0 as f64,
                 self.p.m,
+                self.cut_pool.len(),
+                self.nra_removed.len(),
                 stop.map_or("pass".to_string(), |c| format!("stop {c}"))
             );
         }
