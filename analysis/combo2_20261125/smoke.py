@@ -20,7 +20,7 @@ a = ap.parse_args()
 one = {k: v for k, v in C2.items() if k not in ("ENOMOTO_MIP_PROOFPROP", "ENOMOTO_MIP_FP_STAGE3_LS")}
 CF = ({"def": {}} | {k.replace("ENOMOTO_MIP_", ""): {k: v} for k, v in one.items()}
       | {"HEUR_ADAPT+FP_STAGE3_LS": {"ENOMOTO_MIP_HEUR_ADAPT": C2["ENOMOTO_MIP_HEUR_ADAPT"], "ENOMOTO_MIP_FP_STAGE3_LS": C2["ENOMOTO_MIP_FP_STAGE3_LS"]}}
-      | {"SB_ADAPT": {"ENOMOTO_MIP_SB_ADAPT": "1"}, "c2a": dict(C2), "c2b": dict(C2, ENOMOTO_MIP_SB_ADAPT="1")})
+      | {"SB_ADAPT": {"ENOMOTO_MIP_SB_ADAPT": "1"}, "c2a": dict(C2), "c2b": dict(C2, ENOMOTO_MIP_SB_ADAPT="1"), "c2c": dict(C2, ENOMOTO_MIP_SB_PROBEBD="1")})
 PAT = {"sbpb": r"node bounds from both children (\d+)", "heurad": r"^HEURADAPT root", "nra": r"node rows adapt", "enumad": r"ENUM_ADAPT:", "tie": r"CUTSEL_TIE: tie true",
        "fp3": r"FP stage 3: ", "fp3ls": r"FP stage 3 LS", "sbad": r"^SBADAPT_FEAT"}
 (D / "logs").mkdir(exist_ok=True)
