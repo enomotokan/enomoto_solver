@@ -809,6 +809,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) pc_gain: [f64; 2],
     /// 試作 `ENOMOTO_MIP_POOL_CLOSE` の数: [戻した回, 刈れた回, 戻した行, 手間 (ticks)]
     pub(super) pc_stats: [f64; 4],
+    /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `p` ([`Solver::nra_leaf`]): 今のノードの (親から受けた) 下界
+    pub(super) nra_cur_lb: f64,
+    /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `p` の数: [実行不能で閉じた葉, そのうち下界で閉じた側に数えた葉]
+    pub(super) nra_p_stats: [u64; 2],
     /// 診断用: 効き目で続けるノードの分離の結果の内訳 (打ち切り、伸び/差が 0.02 未満、0.1 未満、0.3 未満、0.3 以上)
     pub(super) nca_hist: [u64; 5],
     /// ノードで加えたカットの非零の数の指数移動平均 (`ENOMOTO_T_MIP_NODE_CUT_ADAPT_DENSITY`、[`Solver::nca_dense`])。
@@ -5728,6 +5732,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         nra_rm_age: std::collections::HashMap::new(),
         pc_gain: [0.0; 2],
         pc_stats: [0.0; 4],
+        nra_cur_lb: f64::NEG_INFINITY,
+        nra_p_stats: [0; 2],
         nca_hist: [0; 5],
         tdd: if super::treedepth::on() && !params.submip { Some(Box::default()) } else { None },
         nca_cut_nnz: None,
@@ -6366,6 +6372,11 @@ pub(super) fn nra_on() -> bool {
 pub(super) fn pool_close_on() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_str!("ENOMOTO_MIP_POOL_CLOSE").is_some_and(|v| v != "0"))
+}
+
+/// プールから戻すラウンドの伸びを測るか (`POOL_CLOSE` か、`NODEROWS_ADAPT` の `p`)
+pub(super) fn pool_gain_on() -> bool {
+    pool_close_on() || (nra_on() && nra_has('p'))
 }
 
 /// 試作 `ENOMOTO_MIP_NRA_ORDER` = `a`・`b`・`c`・`d` (既定 `a`、analysis/comboharm_20261124/README.md 11 節): NODEROWS_ADAPT の外す行の並べ方
@@ -10148,6 +10159,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 偽: 下界で閉じた (取り出したときの下界・LP の目的値・被約費用・整数解・TUBR))。強分枝で閉じたもの (`sb`) は数えない
     pub(super) fn nra_leaf(&mut self, inf: bool) {
         if !self.params.submip {
+            // 試作 `p` (analysis/comboharm_20261124/README.md 10.11 節): 実行不能で閉じた葉のうち、親から受けた下界 + プールから戻すラウンドで見込める伸び
+            // (`pc_gain` の平均、[`pool_gain_on`]) が打ち切り値に届くものは、下界で閉じた側に数える。nra が行を外すと LP が弱くなり、行がそろっていれば
+            // 親で下界で閉じた部分木が深くまで進んで実行不能で閉じ、φ が上がってさらに外す循環になる (neos-911970)。その分を φ から除く
+            let mut inf = inf;
+            if inf && nra_on() && nra_has('p') {
+                self.nra_p_stats[0] += 1;
+                let lim = self.prune_limit();
+                if self.pc_gain[1] > 0.0 && lim.is_finite() && self.nra_cur_lb + self.pc_gain[0] / self.pc_gain[1] >= lim {
+                    self.nra_p_stats[1] += 1;
+                    inf = false;
+                }
+            }
             self.nra_leaves[usize::from(!inf)] += 1;
         }
     }
@@ -14233,7 +14256,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if self.nodes % k == 0 {
                         let rho = (self.nra_rho[0] as f64 + 1.0) / ((self.nra_rho[0] + self.nra_rho[1]) as f64 + 2.0);
                         eprintln!(
-                            "NRA_TRACE tid {} nodes {} t {:.2} inf {} bound {} phi {:.4} f {:.4} rho {:.4} rounds {} tratio {:.4} gsel {:.3e} wsel {:.3e} gtree {:.3e} wtree {:.3e} ntree {} ibase {} ibar {:.1} e_drop {:?} rm_rows {} rm_nnz {} lp_rows {} lp_nnz {}",
+                            "NRA_TRACE tid {} nodes {} t {:.2} inf {} bound {} phi {:.4} f {:.4} rho {:.4} rounds {} tratio {:.4} gsel {:.3e} wsel {:.3e} gtree {:.3e} wtree {:.3e} ntree {} ibase {} ibar {:.1} e_drop {:?} rm_rows {} rm_nnz {} lp_rows {} lp_nnz {} p_inf {:?} ghat {:.3e}",
                             self.pool_tid,
                             self.nodes,
                             self.start.elapsed().as_secs_f64(),
@@ -14255,7 +14278,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             self.nra_stats[1],
                             self.nra_rm_nnz,
                             self.lp.num_rows(),
-                            (0..self.lp.num_rows()).map(|i| self.lp.row_ref(i).len()).sum::<usize>()
+                            (0..self.lp.num_rows()).map(|i| self.lp.row_ref(i).len()).sum::<usize>(),
+                            self.nra_p_stats,
+                            if self.pc_gain[1] > 0.0 { self.pc_gain[0] / self.pc_gain[1] } else { f64::NAN }
                         );
                     }
                 }
@@ -14592,6 +14617,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let mut pse_pending: Option<(f64, u64)> = None;
             let mut pse_nopool = false;
             // 試作 `ENOMOTO_MIP_NODEROWS_ADAPT`: このノードでプールの選び直しのラウンドを回すか (持ち分 1 − f)
+            self.nra_cur_lb = node.lower_bound;
             let mut nra_pool = self.nra_pool_due();
             // `NODEROWS_ADAPT` の `e`: 選び直しのラウンドの前の目的値と、戻した行の最初の番号 (伸びなければその場で外す)
             let mut nra_e_pending: Option<(f64, u64)> = None;
@@ -15038,7 +15064,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.feat[if st == LpStatus::Infeasible { 1 } else { 0 }] += 1;
                         self.nra_leaf(st == LpStatus::Infeasible);
                         // `POOL_CLOSE`: 戻したラウンド・既定のプールのラウンドの後に LP で切れた: 伸びは打ち切り値まで
-                        if pool_close_on() && !self.params.submip {
+                        if pool_gain_on() && !self.params.submip {
                             let lim = self.prune_limit();
                             for o0 in [pcg_pending.take(), pc_pending.take().map(|(o, _)| o)].into_iter().flatten() {
                                 if lim.is_finite() {
@@ -15898,7 +15924,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let (obj_pre, id_pre) = (node_obj, self.next_cut_id);
                     let tk_pre = crate::ticks::total();
                     let added = if poolsel_on() || nra_pool { self.pool_select_round(&x) } else { self.pool_cut_round(&x, max_cuts) };
-                    if added && pool_close_on() && !nra_pool && !poolsel_on() && !self.params.submip {
+                    if added && pool_gain_on() && !nra_pool && !poolsel_on() && !self.params.submip {
                         pcg_pending = Some(obj_pre);
                     }
                     if added && nra_pool && nra_has('e') && !poolsel_on() {
