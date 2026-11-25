@@ -29147,6 +29147,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let best_bound = if self.take_inbox() { best_bound.min(self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z)) } else { best_bound };
         // 試作 `ENOMOTO_MIP_POLISH_WARM` (`ENOMOTO_MIP_POLISH_STRICT` と組): 返す暫定解を、この問題の空間で B&B の LP の基底から温めて研磨する。
         // 解き直せなければ漏れの見積りを [`super::WARM_LEAK`] に置き、返す前の研磨 (元の問題の空間) が取り替えなければ目的値に足す
+        // 研磨で上げた目的値の幅 (共有の最良値は研磨の前の値のままなので、最後の守りではこの幅を引いて比べる)
+        let mut warm_raise = 0.0;
         if super::polish_strict() && super::polish_warm_mode() > 0 && !self.params.submip && self.snap.is_none() {
             let warm = super::polish_warm_mode();
             let mut leak = 0.0;
@@ -29166,7 +29168,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), if warm == 2 { self.deadline } else { None })
                 };
                 match r {
-                    super::WarmPolish::Replaced(zn) => z = zn,
+                    super::WarmPolish::Replaced(zn) => {
+                        warm_raise = (zn - z).max(0.0);
+                        z = zn;
+                    }
                     super::WarmPolish::Kept => {}
                     super::WarmPolish::NotSolved => {
                         leak = match mark {
@@ -29680,9 +29685,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 最後の守り (全ての終わり方): 共有の最良値が返す解より良ければ、その良い解が主に届いていない。木や根はその値で刈って
         // いるので、返す解を最適とは言えない (木の探索の終わりの確かめを通らない根で終わる道筋で、h80x6320d が 6387.76 (正しくは
         // 6382.10) を最適と報告した。analysis/heur_ls_20261023.md 追記 5)。共有の最良値より良い解はないことは示せているので、
-        // 下界はその値にする。`ENOMOTO_MIP_NO_FINAL_SHARED_CHECK` で使わない (診断用)
+        // 下界はその値にする。`ENOMOTO_MIP_NO_FINAL_SHARED_CHECK` で使わない (診断用)。試作 `ENOMOTO_MIP_POLISH_WARM` の最後の研磨が
+        // 目的値を上げたときは、その幅 (`warm_raise`) を引いて比べる (上の研磨の前の値で共有しているため。qiu の 4 スレッドで
+        // 研磨が 3e-6 上げ、最適を NotSolved と報告した: analysis/polishp_20261125)
         let (status, best_bound) = match (status, objective, self.shared.as_ref().map(|s| s.best())) {
-            (MipStatus::Optimal, Some(z), Some(sb)) if sb < z - 1e-9 * z.abs().max(1.0) && self.snap.is_none() && env_str!("ENOMOTO_MIP_NO_FINAL_SHARED_CHECK").is_none() => {
+            (MipStatus::Optimal, Some(z), Some(sb)) if sb < z - warm_raise - 1e-9 * z.abs().max(1.0) && self.snap.is_none() && env_str!("ENOMOTO_MIP_NO_FINAL_SHARED_CHECK").is_none() => {
                 eprintln!("MIP: WARNING: the shared best value {sb:.10e} is better than the returned solution {z:.10e} at the end; not reporting optimality");
                 (MipStatus::NotSolved, sb)
             }
