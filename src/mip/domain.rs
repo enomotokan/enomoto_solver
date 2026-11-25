@@ -109,7 +109,7 @@ pub struct Domain {
     low_water: usize,
     /// 根に戻ったときに適用する大域的な境界の締め付け (列, 上限か, 値)。
     pending_global: Vec<(usize, bool, f64)>,
-    /// 試作 `ENOMOTO_MIP_GLOBALFIX` の `b`: 根の伝播が矛盾した (打ち切り値より良い解がない)。以後 `reset_to_root` のたびに矛盾にする
+    /// `ENOMOTO_MIP_GLOBALFIX` (2026-11-25 から既定) の `b`: 根の伝播が矛盾した (打ち切り値より良い解がない)。以後 `reset_to_root` のたびに矛盾にする
     pub root_dead: bool,
     /// 診断用: デバッグ解 (含意の伝播がデバッグ解を切ったら表示する)。
     pub dbg_sol: Option<std::sync::Arc<Vec<f64>>>,
@@ -176,16 +176,15 @@ pub fn act_work() -> u64 {
     ACT_WORK.with(|w| w.get())
 }
 
-/// 試作 `ENOMOTO_MIP_GLOBALFIX` (analysis/globalfix_20261124、既定では使わない): 値の文字で部品を選ぶ。
+/// `ENOMOTO_MIP_GLOBALFIX` (analysis/globalfix_20261124): 値の文字で部品を選ぶ。
 /// `a` 根のノード (深さ 0) の整数列の締め付けを大域的な境界に入れる、`b` `reset_to_root` で保留中の大域的な締め付けを置いた後に伝播し切って
 /// 大域的な境界にする、`c` 長さ 1 のリテラルの衝突を大域的な固定にする、`k` `c` を整数列だけにしたもの。
+/// **2026-11-25 に既定にした: 値 `abc`。`0`・`off` で前の動き (どれも使わない)。** 根拠は analysis/objprop_20261124 の P
+/// (同じビルド・同じ機械の既定 d2 との比が 1・4 スレッドとも 0.993、解けた数 128→131・141→140、食い違い 0) と analysis/globalfix_20261124 4 節。
+/// 4 スレッドの noswot・10teams の出入りは道筋が変わったことによる揺れ (既定どうしでも 10teams 0.55・noswot 1.35) と見なした
+/// (利用者の方針「道筋が変わったことによる害は本質的な害とは見なさない」)。
 pub(crate) fn globalfix(c: char) -> bool {
-    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| match env_str!("ENOMOTO_MIP_GLOBALFIX") {
-        Some(v) if v != "0" && v != "off" => v.to_string(),
-        _ => String::new(),
-    })
-    .contains(c)
+    env_def!("ENOMOTO_MIP_GLOBALFIX", "abc").is_some_and(|v| v.contains(c))
 }
 
 /// [`globalfix`] の数え (全スレッドの合計、`ENOMOTO_MIP_LOG` の終わりに出す): [`b` の伝播の回数, `b` で締めた整数列の境界の数,
@@ -618,7 +617,7 @@ impl Domain {
                 applied += 1;
             }
         }
-        // 試作 `ENOMOTO_MIP_GLOBALFIX` の `b` (analysis/globalfix_20261124): 置いた締め付けから行 (と含意) を通して締まる境界を、待ち行列を
+        // `ENOMOTO_MIP_GLOBALFIX` (2026-11-25 から既定) の `b` (analysis/globalfix_20261124): 置いた締め付けから行 (と含意) を通して締まる境界を、待ち行列を
         // 捨てずに根で伝播し切り、大域的な境界にする (`commit_root`)。根の定義域 = 大域的な境界 + 大域的に成り立つ推論なので、どのノード・
         // どのスレッドでも成り立つ。矛盾したら (打ち切り値より良い解がない) 以後の根への戻りで毎回矛盾にする (`root_dead`)
         if self.root_dead {
@@ -639,7 +638,7 @@ impl Domain {
         self.queue.clear();
     }
 
-    /// 試作 `ENOMOTO_MIP_GLOBALFIX` の `b`: 根 (記録が空) で待ち行列を伝播し切り (手間の上限で打ち切られたら続けて、最大
+    /// `ENOMOTO_MIP_GLOBALFIX` (2026-11-25 から既定) の `b`: 根 (記録が空) で待ち行列を伝播し切り (手間の上限で打ち切られたら続けて、最大
     /// `ENOMOTO_T_MIP_FIXMORE_ROUNDS` (既定 50) 回。FIXMORE の `propagate_all` と同じ)、結果を大域的な境界にする。矛盾なら
     /// 記録を巻き戻して `root_dead` を立てる。
     fn globalfix_propagate(&mut self, p: &MipProblem) {

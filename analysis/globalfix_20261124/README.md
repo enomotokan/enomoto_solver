@@ -136,3 +136,24 @@ P の本計測 (`plan_k.py` → shards_k.json、res_k1〜k4.jsonl。既定は 4.
   (objprobehull の子が =abc・=abc+OG・=abc+OG+OBJ_PROP を測る)。=c・=k は長さ 1 の衝突がもともとプールで全ノードに効いているので、大域にする得が小さく、
   再スタートの判定などの分かれ目を揺らす分だけ損になりやすい。
 
+
+## 5. 既定化 (2026-11-25、利用者の承認・親の依頼、objprop の子が作業)
+
+`ENOMOTO_MIP_GLOBALFIX` を `env_def!(.., "abc")` にした (`src/mip/domain.rs` の `globalfix`)。環境変数なしで =abc の動き、`=0`・`=off` で前の動き (どれも使わない)。
+ほかの文字 (`=ab`・`=abk` など) は今までどおり選べる。
+
+根拠:
+- analysis/objprop_20261124 3.2 節 (同じビルド・同じ機械で回し直した既定 d2 と比べた P): gf (=abc) は 1 スレッド 0.993 [0.982, 1.003] (解けた数 128 → 131)、
+  4 スレッド 0.993 [0.978, 1.009] (141 → 140)、食い違い 0。O5 (`ROOT_OBJPROP_GLOBAL`) を足しても上乗せがなく (gf との比 1.001・1.010)、
+  根の目的の伝播による整数列の固定を大域に置く役は =abc が受け持つ。
+- この README の 4 節 (別の回の P): 1 スレッド 0.999 (124 → 124)、4 スレッド 1.008 (139 → 141)、食い違い 0。
+- 4 スレッドの noswot・10teams の遅れ (4.1・4.2 節) は、道筋が変わったことによる揺れと見なした: 種を 5 つにすると 1.1 倍台に縮み、既定どうし
+  (objprop の d2_t4 対 第 1 段の def_t4) でも 10teams 0.55・noswot 1.35 と同じ程度に動く。1 スレッドの noswot の遅れも、再スタートの判定という不安定な分かれ目で
+  悪い側に転んだ形 (4.3 節)。利用者の方針「道筋が変わったことによる害は本質的な害とは見なさない」による。
+
+確かめ (既定、環境変数なし):
+- check_default (analysis/protoscreen_20261124): mik-250-20-75-4 のノード数が 6261 → 6157 に変わった (目的値は同じ)。ほかの 5 問は一致。
+  既定で 2 回解いて 6 問ともノード数が同じ (1 スレッドの決定性) ことを見て、`--save` で `ref_default.json` を書き直した。
+  `python analysis/protoscreen_20261124/check_default.py ENOMOTO_MIP_GLOBALFIX=0` で前の基準 (6261) と全部一致する。
+- fuzz 7 本 (既定、環境変数なし。`bash analysis/globalfix_20261124/fuzz.sh default_20261125 ENOMOTO_NOOP_CHECK=1`、2 つ目の引数は何も変えない名前): 誤答 0
+  (fuzz_tiny 0/400・fuzz_highs 0/300・fuzz_objint 0/1000・fuzz_slack 0・fuzz_tiny2 0/400・fuzz_objint2 0/1000・fuzz_slack2 0)。cargo test 424 通過・失敗 0。
