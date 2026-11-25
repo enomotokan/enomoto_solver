@@ -963,6 +963,8 @@ pub(super) fn polish_in_problem_warm(p: &MipProblem, x: &mut Vec<f64>, z: f64, b
     let mut lp = crate::simplex::mip_lp::TwoStageLp::new(&lo, &up, &p.cost, &p.rows, &p.row_lo, &p.row_up);
     // 基底の写し: 固定した整数列は基底から外し (非基底の下限)、カットの行の分は捨てる (行の数の過不足は `set_basis` の修復でスラックを足す・構造列を外す)
     let mut info = (0usize, 0usize, 0usize);
+    // 診断 `ENOMOTO_MIP_POLISH_STATS` の `c`: 基底を写さずに解く (温める効き目の比べ)
+    let basis = basis.filter(|_| !env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('c')));
     if let Some(b) = basis {
         let mut b = b.clone();
         for j in 0..p.n.min(b.col.len()) {
