@@ -1185,7 +1185,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         self.lp.set_costs(&p.cost);
         self.lp.restore_state(&saved);
-        if !found && !self.time_up() && (env_str!("ENOMOTO_MIP_FP_STAGE3").is_some_and(|v| v != "0") || super::solver::heur_adapt()) {
+        // 試作 `ENOMOTO_MIP_HEUR_ADAPT` の `m` ([`super::solver::heur_adapt_flag`]): 外側の根から出したサブ MIP の中では第 3 段を回さない
+        // (サブ MIP には暫定解がなく f_g = 1 で、第 3 段の孫 MIP がサブ MIP の時間を食う。analysis/comboharm_20261124/neos-1582420.md)
+        let stage3_sub_off = self.params.submip && super::solver::heur_adapt_flag('m') && env_str!("ENOMOTO_MIP_FP_STAGE3").is_none();
+        if !found && !self.time_up() && !stage3_sub_off && (env_str!("ENOMOTO_MIP_FP_STAGE3").is_some_and(|v| v != "0") || super::solver::heur_adapt()) {
             if let Some(r) = best_r {
                 found = self.fp_stage3(&r);
             }
