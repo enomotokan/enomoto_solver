@@ -790,6 +790,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `t` ([`Solver::nra_t_ratio`]): [選び直しのラウンドの下界の伸びの和, その手間 (ticks) の和,
     /// 普通のノードの下界の伸びの和, その手間の和, 普通のノードの数]
     pub(super) nra_t: [f64; 5],
+    /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `w` ([`Solver::nra_w_share`]): 選び直しのラウンドで LP に戻した行の番号 (`cut_ids` の値)
+    pub(super) nra_ret_ids: std::collections::HashSet<u64>,
     /// 診断用: 効き目で続けるノードの分離の結果の内訳 (打ち切り、伸び/差が 0.02 未満、0.1 未満、0.3 未満、0.3 以上)
     pub(super) nca_hist: [u64; 5],
     /// ノードで加えたカットの非零の数の指数移動平均 (`ENOMOTO_T_MIP_NODE_CUT_ADAPT_DENSITY`、[`Solver::nca_dense`])。
@@ -2859,6 +2861,8 @@ pub(crate) struct TreeProf {
     balance: [u64; 2],
     /// 主: 求解の始めから、最初のノードを取り出したとき・従を始めたときまで。
     tree_start_s: f64,
+    /// 試作 `ENOMOTO_MIP_HEUR_ADAPT` の `k` 用: 木のループに入ったときの手間 ([`crate::ticks::total`])
+    tree_start_tk: f64,
     workers_s: f64,
 }
 
@@ -4112,6 +4116,7 @@ pub(crate) fn heur_adapt() -> bool {
 
 /// 試作 `ENOMOTO_MIP_HEUR_ADAPT` の値の文字 (`=1m` など、[`heur_adapt`] が真のときだけ意味を持つ):
 /// - `m`: FP の第 3 段 (`fp_stage3`) を、外側の根から出したサブ MIP の中では回さない (analysis/comboharm_20261124/neos-1582420.md)
+/// - `k`: f_t ([`Solver::adapt_tree_f`]) の経過・残りを壁時計でなく手間の秒で数える (analysis/comboharm_20261124/README.md 10 節)
 pub(crate) fn heur_adapt_flag(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     heur_adapt() && V.get_or_init(|| env_str!("ENOMOTO_MIP_HEUR_ADAPT").map_or(String::new(), |v| v.to_string())).contains(c)
@@ -5692,6 +5697,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         nra_removed: std::collections::HashMap::new(),
         nra_rho: [0; 2],
         nra_t: [0.0; 5],
+        nra_ret_ids: std::collections::HashSet::new(),
         nca_hist: [0; 5],
         tdd: if super::treedepth::on() && !params.submip { Some(Box::default()) } else { None },
         nca_cut_nnz: None,
@@ -9920,6 +9926,27 @@ impl<'a, L: MipLp> Solver<'a, L> {
         ((gs + gbar) / (ws + wbar)) / (gt / wt)
     }
 
+    /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `w` (`t` と一緒に使う。analysis/comboharm_20261124/mc11.md): 今の LP の行のうち、選び直しのラウンドで
+    /// 戻した行の割合 s = 戻した行の数 / LP の行の数。普通のノードの最初の LP までの手間 w のうち s × w を、木の手間 W_tree からラウンドの手間 W_sel へ移す
+    /// (戻した行が LP にいる間、その後のノードの LP を重くする分を、行の数の比で按分してラウンドの手間に数える。LP の手間は行の数にほぼ比例するので
+    /// 行の数の比を按分に使った。新しい閾値はない)。戻した行の番号は、LP の行の 2 倍 + 1000 を超えたら今の LP にあるものだけに絞る
+    fn nra_w_share(&mut self) -> f64 {
+        if self.nra_ret_ids.is_empty() {
+            return 0.0;
+        }
+        let m0 = self.p.m;
+        let mr = self.lp.num_rows();
+        if self.nra_ret_ids.len() > 2 * mr + 1000 {
+            let live: std::collections::HashSet<u64> = self.cut_ids.iter().copied().collect();
+            self.nra_ret_ids.retain(|id| live.contains(id));
+        }
+        if mr == 0 {
+            return 0.0;
+        }
+        let cnt = self.cut_ids.iter().take(mr.saturating_sub(m0)).filter(|id| self.nra_ret_ids.contains(id)).count();
+        cnt as f64 / mr as f64
+    }
+
     /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT`: このノードでプールの選び直しのラウンドを回すか (持ち分に 1 − f を足し、1 以上なら 1 引いて真)
     fn nra_pool_due(&mut self) -> bool {
         if !nra_on() || self.params.submip {
@@ -13852,6 +13879,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if first {
                 self.tprof.tree_start_s = self.start.elapsed().as_secs_f64();
+                self.tprof.tree_start_tk = crate::ticks::total();
                 // 試作 `ENOMOTO_MIP_HEUR_ADAPT` の診断: 木の始めの f_g と、その元の量
                 if !self.params.submip && (env_str!("ENOMOTO_MIP_HEUR_ADAPT_DEBUG").is_some() || (heur_adapt() && self.params.verbose)) {
                     let z = self.incumbent.as_ref().map(|(z, _)| *z);
@@ -14710,7 +14738,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 self.nra_t[1] += tk - tk0;
                             } else if resolves == 0 {
                                 self.nra_t[2] += if lim.is_finite() { (lim - node.lower_bound).max(0.0) } else { 0.0 };
-                                self.nra_t[3] += tk - nra_t_tk0;
+                                let w = tk - nra_t_tk0;
+                                let sh = if nra_has('w') { self.nra_w_share() } else { 0.0 };
+                                self.nra_t[1] += sh * w;
+                                self.nra_t[3] += (1.0 - sh) * w;
                                 self.nra_t[4] += 1.0;
                             }
                         }
@@ -14763,7 +14794,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.nra_t[1] += tk - tk0;
                     } else if resolves == 0 && node.lower_bound.is_finite() {
                         self.nra_t[2] += (node_obj - node.lower_bound).max(0.0);
-                        self.nra_t[3] += tk - nra_t_tk0;
+                        // `w`: 戻した行の割合の分の手間をラウンドの手間へ移す ([`Self::nra_w_share`])
+                        let w = tk - nra_t_tk0;
+                        let sh = if nra_has('w') { self.nra_w_share() } else { 0.0 };
+                        self.nra_t[1] += sh * w;
+                        self.nra_t[3] += (1.0 - sh) * w;
                         self.nra_t[4] += 1.0;
                     }
                 }
@@ -15452,6 +15487,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let added = if poolsel_on() || nra_pool { self.pool_select_round(&x) } else { self.pool_cut_round(&x, max_cuts) };
                     if added && nra_pool && nra_t_on && !poolsel_on() {
                         nra_t_pending = Some((obj_pre, tk_pre));
+                        if nra_has('w') {
+                            self.nra_ret_ids.extend(id_pre..self.next_cut_id);
+                        }
                     }
                     if added && poolsel_has('e') {
                         pse_pending = Some((obj_pre, id_pre));
@@ -26143,11 +26181,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.nodes < self.heur_adapt_ft.0 + 64 && self.heur_adapt_ft.0 > 0 {
             return self.heur_adapt_ft.1;
         }
-        let now = self.start.elapsed().as_secs_f64();
-        let tree_el = now - self.tprof.tree_start_s;
-        let left = match self.deadline {
-            Some(d) => d.saturating_duration_since(Instant::now()).as_secs_f64(),
-            None => tunable!("ENOMOTO_T_MIP_HEUR_TRIG_NOLIMIT_MULT", 10.0, f64) * tree_el,
+        // `k` ([`heur_adapt_flag`]、analysis/comboharm_20261124/README.md 10 節): 経過・木の経過・残りを、壁時計の秒でなく手間の秒
+        // (手間 × 1e-9。1 手間 ≒ 1 ns で、`ENOMOTO_MIP_TICKS` の規則と同じ換算) で数える。残りは この求解の時間の上限 − 手間の経過。
+        // 壁時計では、同じ設定でも温まりの判定 (下) が成り立つノードが回ごとに変わり、1 スレッドでも道筋が決まらなかった
+        let (now, tree_el, left) = if heur_adapt_flag('k') {
+            let el = (crate::ticks::total() - self.ticks0) * 1e-9;
+            let tree_el = (crate::ticks::total() - self.tprof.tree_start_tk) * 1e-9;
+            let left = if self.params.time_limit.is_finite() { (self.params.time_limit - el).max(0.0) } else { tunable!("ENOMOTO_T_MIP_HEUR_TRIG_NOLIMIT_MULT", 10.0, f64) * tree_el };
+            (el, tree_el, left)
+        } else {
+            let now = self.start.elapsed().as_secs_f64();
+            let tree_el = now - self.tprof.tree_start_s;
+            let left = match self.deadline {
+                Some(d) => d.saturating_duration_since(Instant::now()).as_secs_f64(),
+                None => tunable!("ENOMOTO_T_MIP_HEUR_TRIG_NOLIMIT_MULT", 10.0, f64) * tree_el,
+            };
+            (now, tree_el, left)
         };
         let w: f64 = self.queue.iter().chain(cur).map(|n| 0.5f64.powi(n.depth.min(2000) as i32)).sum();
         let done = (1.0 - w).max(0.0);
