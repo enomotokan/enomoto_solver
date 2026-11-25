@@ -5020,6 +5020,7 @@ pub fn solve(p: &MipProblem, params: MipParams) -> MipResult {
     let run = || solve_with::<crate::simplex::mip_lp::TwoStageLp>(p, params, None, None);
     // サブ MIP の経過は利用者向けのログに出さない
     let r = if params.submip { crate::log::suspend(run) } else { run() };
+    super::wc_mark("tree (or the rest of the solve)", params.submip);
     if let Some(k) = prev_race {
         crate::simplex::mip_lp::set_cold_race_threads(k);
     }
@@ -11655,7 +11656,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
                 let t_cut = Instant::now();
+                super::wc_mark("root LP and setup", self.params.submip);
                 let cut_ok = env_str!("ENOMOTO_MIP_NO_CUTS").is_some() || self.root_cut_loop(root_iters);
+                super::wc_mark("root cut loop", self.params.submip);
                 // 試作 `ENOMOTO_MIP_FACECUT` (既定では使わない、analysis/sepeff_20261120/): 最適面の中の別の頂点で分離したカットを足す
                 if cut_ok && self.snap.is_none() && !self.root_gap_closed() {
                     self.facecut_probe();
@@ -14209,6 +14212,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             if first {
+                super::wc_mark("root heuristics etc. (until the tree)", self.params.submip);
                 self.tprof.tree_start_s = self.start.elapsed().as_secs_f64();
                 self.tprof.tree_start_tk = crate::ticks::total();
                 // 試作 `ENOMOTO_MIP_HEUR_ADAPT` の診断: 木の始めの f_g と、その元の量
