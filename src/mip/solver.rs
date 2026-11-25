@@ -801,6 +801,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) nra_tight: std::collections::HashMap<u64, (u32, f64)>,
     /// 試作 `ENOMOTO_MIP_NRA_ORDER` の診断: nra が外した行の非零の数の和
     pub(super) nra_rm_nnz: u64,
+    /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `3`: カットの年齢を進めた回数 (`age_cuts` の呼び出しの数)
+    pub(super) nra_age_tick: u64,
+    /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `3` ([`Solver::nra_k3_young`]): nra が外した行の指紋 → (外したときの年齢, そのときの `nra_age_tick`)
+    pub(super) nra_rm_age: std::collections::HashMap<u64, (u32, u64)>,
     /// 診断用: 効き目で続けるノードの分離の結果の内訳 (打ち切り、伸び/差が 0.02 未満、0.1 未満、0.3 未満、0.3 以上)
     pub(super) nca_hist: [u64; 5],
     /// ノードで加えたカットの非零の数の指数移動平均 (`ENOMOTO_T_MIP_NODE_CUT_ADAPT_DENSITY`、[`Solver::nca_dense`])。
@@ -5716,6 +5720,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         nra_e_stats: [0; 3],
         nra_tight: std::collections::HashMap::new(),
         nra_rm_nnz: 0,
+        nra_age_tick: 0,
+        nra_rm_age: std::collections::HashMap::new(),
         nca_hist: [0; 5],
         tdd: if super::treedepth::on() && !params.submip { Some(Box::default()) } else { None },
         nca_cut_nnz: None,
@@ -9925,12 +9931,27 @@ impl<'a, L: MipLp> Solver<'a, L> {
             None => cand.len(),
         };
         kept += (cand.len() - take) as u64;
-        for &(_, k) in &cand[..take] {
+        let rec3 = frac.is_some() && nra_has('3');
+        for &(age, k) in &cand[..take] {
             remove[m0 + k] = true;
             cnt += 1;
             if frac.is_some() {
                 self.nra_rm_nnz += self.lp.row_ref(m0 + k).len() as u64;
             }
+            // `3`: 外した行の年齢を覚えておく (再スタートで持ち込むかを、既定の年齢の上限で決める)
+            if rec3 {
+                let (_, up) = self.lp.row_bounds(m0 + k);
+                if up.is_finite() {
+                    let mut c = self.lp.row(m0 + k);
+                    c.sort_by_key(|&(j, _)| j);
+                    self.nra_rm_age.insert(super::separation::cut_fingerprint(&c, up), (age, self.nra_age_tick));
+                }
+            }
+        }
+        if rec3 && self.nra_rm_age.len() > 2 * self.lp.num_rows() + 1000 {
+            // 見積もりの年齢が上限に届いたもの (二度と持ち込まない) だけ捨てる
+            let (lim, t) = (self.aged_cut_limit(), self.nra_age_tick);
+            self.nra_rm_age.retain(|_, &mut (a, t0)| (a as u64).saturating_add(t - t0) < lim as u64);
         }
         if frac.is_some() {
             self.nra_stats[0] += 1;
@@ -10098,6 +10119,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 !in_lp.contains(&super::separation::cut_fingerprint(&c, r))
             })
             .count()
+    }
+
+    /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `3` (`=r0k23` など、analysis/comboharm_20261124/README.md 10.9 節): 指紋 `fp` のカットが nra の外した行で、
+    /// 外したときの年齢 + 外してから年齢を進めた回数 が既定の年齢の上限 ([`Self::aged_cut_limit`]、`remove_aged_cuts` と同じ) に届いていないか。
+    /// 既定なら (nra が外さなければ) まだ LP に残っていたはずの行に当たる。外した後に締まった (年齢が 0 に戻った) かは見ないので、年齢は多めに見積もる
+    /// (持ち込みは少なめになる)。新しい閾値はない
+    fn nra_k3_young(&self, fp: u64) -> bool {
+        let lim = self.aged_cut_limit() as u64;
+        self.nra_rm_age.get(&fp).is_some_and(|&(a, t0)| (a as u64).saturating_add(self.nra_age_tick - t0) < lim)
     }
 
     /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT`: 閉じた葉を数える (`inf`: 実行不能で閉じた (伝播・LP の実行不能・強分枝の伝播・強分枝の引き継ぎ)、
@@ -25629,7 +25659,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 let mut c: Vec<(usize, f64)> = (s0..e0).map(|t| (self.pool_idx[t] as usize, self.pool_val[t])).collect();
                 c.sort_by_key(|&(j, _)| j);
-                if in_lp.contains(&super::separation::cut_fingerprint(&c, r)) {
+                let fp = super::separation::cut_fingerprint(&c, r);
+                if in_lp.contains(&fp) {
+                    continue;
+                }
+                // `3` ([`Self::nra_k3_young`]): nra が外した行のうち、外した後も既定の年齢の上限に届いていないものだけ持ち込む
+                if nra_has('3') && !self.nra_k3_young(fp) {
                     continue;
                 }
                 if cuts_as_rows {
