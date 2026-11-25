@@ -56,7 +56,34 @@
 
 ## 3. 回す前の確かめ
 
-(確かめの結果をここに書く)
+2026-11-25、先端 a5008f9d8 の `pip install -e .`。
+
+1. check_default (`python analysis/protoscreen_20261124/check_default.py`): 新しい基準 ref_default.json と 6 問とも一致。
+2. fuzz 7 本と cargo test。`bash analysis/comboharm_20261124/fuzz.sh` に c2a・c2b・c2c の変数をつけて回した。
+   - 出力は fuzz.out (c2a・c2b) と fuzz_c2c.out。`FUZZ_VENV=/usr/local` で、計測と同じ入れ方のビルドを使った。
+   - 3 つとも誤答 0。
+     - fuzz_tiny 0/400・0/400
+     - fuzz_highs 0/300
+     - fuzz_objint 0/1000・0/1000
+     - fuzz_slack は mismatches 0 (1000・1000 回)
+   - cargo test は 3 つとも 424 通過・0 失敗。
+3. smoke (`python analysis/combo2_20261125/smoke.py` → smoke.out)。p0201・misc07・noswot・nw04・app1-1 を、1 スレッド・種 1・60 秒で回した。
+   - 各変数のログの行が出る。
+     - NODEROWS_ADAPT は `node rows adapt`、ENUM_ADAPT は `ENUM_ADAPT:`、HEUR_ADAPT は `HEURADAPT root`。
+     - SB_ADAPT は misc07 で、強分枝の子の伝播 (`node bounds from both children`) を 4 ノードで使った (確率の形)。c2c (SB_PROBEBD=1) は noswot で 17。
+   - FP_STAGE3_LS も効いている。
+     - HEUR_ADAPT だけのとき、misc07 で FP の第 3 段はサブ MIP の形 (`FP stage 3: `) で 1 回回る。
+     - HEUR_ADAPT + FP_STAGE3_LS では、サブ MIP の形が 0 回になり、LS の形 (`FP stage 3 LS`) が 2 回回る。
+   - NODELP_BFRT_GROUP・SB_ADAPT・CUTSEL_PROBE_TIE_FEWER は、ノード数が既定と違い、道筋が変わる (効いている)。
+   - LMIP_SCORE_TICKS・CUTOFF_USER_TREE は、この 5 問では道筋が既定と同じ。
+     - LMIP_SCORE_TICKS は、暫定解のないサブ MIP の robust FJ でだけ当たる (lmipticks_20261125)。
+     - CUTOFF_USER_TREE は、外から打ち切り値を与えたときだけ働く。
+     - どちらも、読む所 (cfg.py の先頭) で値を確かめた。
+   - PROOFPROP=i は、木を分け合う 4 スレッドでだけ働く (前回の combo と同じ)。
+   - 注: app1-1 の c2a は 17.8 秒で、既定は 9.0 秒。
+     - tie (CUTSEL_PROBE_TIE_FEWER) だけで 1201 ノード・13.6 秒になり、前回の切り分け (heur + tie、tie の根の道筋) と同じ向き。
+     - c2b は 55 ノード・14.4 秒。
+
 
 ## 4. 回し方 (各分担)
 
