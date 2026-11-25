@@ -5256,6 +5256,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.sync_cut_age();
         // 試作 `ENOMOTO_MIP_NRA_ORDER` の `c`・`d`: 締まった回数を数える
         self.nra_tight_update();
+        // 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `3`: 年齢を進めた回数 (外した行の年齢をこの差で見積もる)
+        self.nra_age_tick += 1;
         if self.cut_age.is_empty() {
             return;
         }
@@ -5355,6 +5357,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// (行の少ない問題ではカットが LP を何倍にもする: markshare_4_0 は 4 行で、上限 300 だと遅くなった)。
     /// `ENOMOTO_T_MIP_CUT_ROWS_CAP` = r (> 0): カットの行が max(r × 元の行の数, 200) を超えたら、年齢の高い順に外して収める。
     pub(super) fn remove_aged_cuts(&mut self) -> usize {
+        let limit = self.aged_cut_limit();
+        let removed = self.remove_cuts_older_than(limit);
+        self.remove_aged_cuts_rest(removed)
+    }
+
+    /// [`Self::remove_aged_cuts`] の年齢の上限 (試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `3` も同じ上限を使う)
+    pub(super) fn aged_cut_limit(&self) -> u32 {
         let base = tunable!("ENOMOTO_T_MIP_CUT_AGE_LIMIT", 300u32, u32);
         // 既定は f = 0.5 (40 問: 一律 300 の 19 問 26.72 に対し 19 問 26.41。markshare_4_0 (4 行) 25 -> 14 秒、
         // neos5 (63 行) は 42 -> 48 秒。カットの行の総数で抑える形 (`ENOMOTO_T_MIP_CUT_ROWS_CAP=2`) は 26.61)
@@ -5362,15 +5371,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // HiGHS 流のカット管理では上限を `ENOMOTO_T_MIP_HCM_AGE_LIMIT` (HiGHS の mip_lp_age_limit は 10) にする。
         // 30 では neos-911970 の木の下界が根から動かず (潜りの間に根で効いていたカットが外れ、ノードの LP が根より弱くなる)、
         // 100 で下界 54.70 / 上界 54.76 (最適値)。mik-250 は 30 でも 100 でも 60 秒で解けない (既定は 35 秒)
-        let limit = if self.highs_cutmgmt() {
+        if self.highs_cutmgmt() {
             tunable!("ENOMOTO_T_MIP_HCM_AGE_LIMIT", 100u32, u32)
         } else if f > 0.0 {
             let lo = tunable!("ENOMOTO_T_MIP_CUT_AGE_MIN", 30u32, u32);
             ((f * self.p.m as f64) as u32).clamp(lo.min(base), base)
         } else {
             base
-        };
-        let mut removed = self.remove_cuts_older_than(limit);
+        }
+    }
+
+    /// [`Self::remove_aged_cuts`] の残り (年齢の上限で外した後の、木の分離のカット・密なカットなどの片づけ)
+    fn remove_aged_cuts_rest(&mut self, mut removed: usize) -> usize {
         // `ENOMOTO_T_MIP_TREE_SEP_CUT_AGE` = a (> 0): `ENOMOTO_MIP_TREE_SEP` のラウンドで加えたカットは年齢 a で外す
         // (根のカットは上の上限のまま)。ノードで加えたカットの行が残ってノードの LP が重くなるのを抑える
         let ts_age = if self.ts2_has('a') { tunable!("ENOMOTO_T_MIP_TREESEP2_AGE", 10u32, u32) } else { tunable!("ENOMOTO_T_MIP_TREE_SEP_CUT_AGE", 0u32, u32) };

@@ -801,6 +801,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) nra_tight: std::collections::HashMap<u64, (u32, f64)>,
     /// 試作 `ENOMOTO_MIP_NRA_ORDER` の診断: nra が外した行の非零の数の和
     pub(super) nra_rm_nnz: u64,
+    /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `3`: カットの年齢を進めた回数 (`age_cuts` の呼び出しの数)
+    pub(super) nra_age_tick: u64,
+    /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `3` ([`Solver::nra_k3_young`]): nra が外した行の指紋 → (外したときの年齢, そのときの `nra_age_tick`)
+    pub(super) nra_rm_age: std::collections::HashMap<u64, (u32, u64)>,
     /// 診断用: 効き目で続けるノードの分離の結果の内訳 (打ち切り、伸び/差が 0.02 未満、0.1 未満、0.3 未満、0.3 以上)
     pub(super) nca_hist: [u64; 5],
     /// ノードで加えたカットの非零の数の指数移動平均 (`ENOMOTO_T_MIP_NODE_CUT_ADAPT_DENSITY`、[`Solver::nca_dense`])。
@@ -1128,10 +1132,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     memb_next: f64,
     /// `ENOMOTO_MIP_GAP4` の `i` (試作): 暫定解の整数列を固定した LP ([`Self::resolve_continuous`]) が時間切れになった回数・飛ばした回数
     gap4_inclp: (u32, u32),
-    /// 試作 `ENOMOTO_MIP_POLISH_WARM`: 直前の [`Self::resolve_continuous`] が返した点の、漏れの見積り (その点を出した LP の双対値から) と、
+    /// `ENOMOTO_MIP_POLISH_WARM`: 直前の [`Self::resolve_continuous`] が返した点の、漏れの見積り (その点を出した LP の双対値から) と、
     /// 整数を固定した LP を解いたならその最適の基底 (研磨の LP を温める)
     warm_rc: Option<(f64, Option<super::lp::Basis>)>,
-    /// 試作 `ENOMOTO_MIP_POLISH_WARM`: 最後に受け入れた暫定解 (この問題の空間) と、研磨が済んだか (`None`) / 未研磨で漏れの見積り (`Some`)
+    /// `ENOMOTO_MIP_POLISH_WARM`: 最後に受け入れた暫定解 (この問題の空間) と、研磨が済んだか (`None`) / 未研磨で漏れの見積り (`Some`)
     warm_mark: Option<(Vec<f64>, Option<f64>)>,
     /// 診断用 `ENOMOTO_MIP_GAP4_RSS`: 生きている `Solver` の数に数えたか (サブ MIP か)。[`GAP4_LIVE`]
     gap4_live: Option<bool>,
@@ -5716,6 +5720,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         nra_e_stats: [0; 3],
         nra_tight: std::collections::HashMap::new(),
         nra_rm_nnz: 0,
+        nra_age_tick: 0,
+        nra_rm_age: std::collections::HashMap::new(),
         nca_hist: [0; 5],
         tdd: if super::treedepth::on() && !params.submip { Some(Box::default()) } else { None },
         nca_cut_nnz: None,
@@ -8093,10 +8099,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             lap("twoopt", &mut tt);
             if !orig_only && !late && !late_o {
                 self.resolve_continuous(&mut x, &mut z);
-                // 試作 `ENOMOTO_MIP_POLISH_STRICT=2` (analysis/nattai_20261125/): B&B の LP とは別に、整数を固定した問題を一から解き直して
+                // `ENOMOTO_MIP_POLISH_STRICT=2` (analysis/nattai_20261125/): B&B の LP とは別に、整数を固定した問題を一から解き直して
                 // 研磨する。打ち切り値・共有する最良値も研磨した値になる。研磨で目的値が上がって今の暫定解より良くなくなったら受け取らない
                 if super::polish_strict_mode() >= 2 {
-                    // 試作 `ENOMOTO_MIP_POLISH_WARM`: B&B の LP の基底から温めて、求解の期限つきで解く。間に合わなければ (または `e` なら)
+                    // `ENOMOTO_MIP_POLISH_WARM`: B&B の LP の基底から温めて、求解の期限つきで解く。間に合わなければ (または `e` なら)
                     // 漏れの見積り ([`Self::leak_estimate`]) で目的値を正す (解は取り替えない)
                     let warm = super::polish_warm_mode();
                     if warm > 0 {
@@ -8251,7 +8257,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // Feasibility Pump は LP の費用を距離に置き換えたまま解を試すので、元の費用に戻して解く
         let cost = self.lp.costs();
         if env_str!("ENOMOTO_MIP_INC_LP_NO_DUAL_CHECK").is_none() && self.continuous_optimal_by_duals(x, &cost) {
-            // 試作 `ENOMOTO_MIP_POLISH_WARM`: 今の LP の解がそのまま整数を固定した LP の最適なので、今の LP の双対値で見積もる
+            // `ENOMOTO_MIP_POLISH_WARM`: 今の LP の解がそのまま整数を固定した LP の最適なので、今の LP の双対値で見積もる
             if super::polish_warm_mode() > 0 && cost == self.p.cost {
                 self.warm_rc = Some((self.leak_estimate(x), None));
             }
@@ -8309,7 +8315,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 *x = y;
                 *z = zy;
             }
-            // 試作 `ENOMOTO_MIP_POLISH_WARM`: 漏れはこの LP が許容誤差の範囲で行を破るところで入るので、この LP の最適の双対値で見積もり、
+            // `ENOMOTO_MIP_POLISH_WARM`: 漏れはこの LP が許容誤差の範囲で行を破るところで入るので、この LP の最適の双対値で見積もり、
             // 基底も研磨の LP を温めるのに取っておく
             if super::polish_warm_mode() > 0 {
                 self.warm_rc = Some((self.leak_estimate(x), Some(self.lp.basis())));
@@ -8322,7 +8328,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.lp.set_total_iterations(it0);
     }
 
-    /// 試作 `ENOMOTO_MIP_POLISH_WARM` の漏れの見積り: 点 `x` (この問題の空間) の行・列の境界の違反に、今の LP の双対値・被約費用の
+    /// `ENOMOTO_MIP_POLISH_WARM` の漏れの見積り: 点 `x` (この問題の空間) の行・列の境界の違反に、今の LP の双対値・被約費用の
     /// 絶対値を掛けた和。B&B の LP が許容誤差の範囲で行を破って下げた目的値の分を、整数を固定した LP を解かずに見積もる
     /// (LP の初めの `p.m` 行が問題の行。カットの行は見ない)
     pub(super) fn leak_estimate(&self, x: &[f64]) -> f64 {
@@ -9925,12 +9931,27 @@ impl<'a, L: MipLp> Solver<'a, L> {
             None => cand.len(),
         };
         kept += (cand.len() - take) as u64;
-        for &(_, k) in &cand[..take] {
+        let rec3 = frac.is_some() && nra_has('3');
+        for &(age, k) in &cand[..take] {
             remove[m0 + k] = true;
             cnt += 1;
             if frac.is_some() {
                 self.nra_rm_nnz += self.lp.row_ref(m0 + k).len() as u64;
             }
+            // `3`: 外した行の年齢を覚えておく (再スタートで持ち込むかを、既定の年齢の上限で決める)
+            if rec3 {
+                let (_, up) = self.lp.row_bounds(m0 + k);
+                if up.is_finite() {
+                    let mut c = self.lp.row(m0 + k);
+                    c.sort_by_key(|&(j, _)| j);
+                    self.nra_rm_age.insert(super::separation::cut_fingerprint(&c, up), (age, self.nra_age_tick));
+                }
+            }
+        }
+        if rec3 && self.nra_rm_age.len() > 2 * self.lp.num_rows() + 1000 {
+            // 見積もりの年齢が上限に届いたもの (二度と持ち込まない) だけ捨てる
+            let (lim, t) = (self.aged_cut_limit(), self.nra_age_tick);
+            self.nra_rm_age.retain(|_, &mut (a, t0)| (a as u64).saturating_add(t - t0) < lim as u64);
         }
         if frac.is_some() {
             self.nra_stats[0] += 1;
@@ -10098,6 +10119,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 !in_lp.contains(&super::separation::cut_fingerprint(&c, r))
             })
             .count()
+    }
+
+    /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `3` (`=r0k23` など、analysis/comboharm_20261124/README.md 10.9 節): 指紋 `fp` のカットが nra の外した行で、
+    /// 外したときの年齢 + 外してから年齢を進めた回数 が既定の年齢の上限 ([`Self::aged_cut_limit`]、`remove_aged_cuts` と同じ) に届いていないか。
+    /// 既定なら (nra が外さなければ) まだ LP に残っていたはずの行に当たる。外した後に締まった (年齢が 0 に戻った) かは見ないので、年齢は多めに見積もる
+    /// (持ち込みは少なめになる)。新しい閾値はない
+    fn nra_k3_young(&self, fp: u64) -> bool {
+        let lim = self.aged_cut_limit() as u64;
+        self.nra_rm_age.get(&fp).is_some_and(|&(a, t0)| (a as u64).saturating_add(self.nra_age_tick - t0) < lim)
     }
 
     /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT`: 閉じた葉を数える (`inf`: 実行不能で閉じた (伝播・LP の実行不能・強分枝の伝播・強分枝の引き継ぎ)、
@@ -25629,7 +25659,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 let mut c: Vec<(usize, f64)> = (s0..e0).map(|t| (self.pool_idx[t] as usize, self.pool_val[t])).collect();
                 c.sort_by_key(|&(j, _)| j);
-                if in_lp.contains(&super::separation::cut_fingerprint(&c, r)) {
+                let fp = super::separation::cut_fingerprint(&c, r);
+                if in_lp.contains(&fp) {
+                    continue;
+                }
+                // `3` ([`Self::nra_k3_young`]): nra が外した行のうち、外した後も既定の年齢の上限に届いていないものだけ持ち込む
+                if nra_has('3') && !self.nra_k3_young(fp) {
                     continue;
                 }
                 if cuts_as_rows {
@@ -29145,8 +29180,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 木の写しから解いた求解が見つけた解を受け取る (止める合図で終わるときも)
         let best_bound = if self.take_inbox() { best_bound.min(self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z)) } else { best_bound };
-        // 試作 `ENOMOTO_MIP_POLISH_WARM` (`ENOMOTO_MIP_POLISH_STRICT` と組): 返す暫定解を、この問題の空間で B&B の LP の基底から温めて研磨する。
+        // `ENOMOTO_MIP_POLISH_WARM` (`ENOMOTO_MIP_POLISH_STRICT` と組): 返す暫定解を、この問題の空間で B&B の LP の基底から温めて研磨する。
         // 解き直せなければ漏れの見積りを [`super::WARM_LEAK`] に置き、返す前の研磨 (元の問題の空間) が取り替えなければ目的値に足す
+        // 研磨で上げた目的値の幅 (共有の最良値は研磨の前の値のままなので、最後の守りではこの幅を引いて比べる)
+        let mut warm_raise = 0.0;
         if super::polish_strict() && super::polish_warm_mode() > 0 && !self.params.submip && self.snap.is_none() {
             let warm = super::polish_warm_mode();
             let mut leak = 0.0;
@@ -29166,7 +29203,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), if warm == 2 { self.deadline } else { None })
                 };
                 match r {
-                    super::WarmPolish::Replaced(zn) => z = zn,
+                    super::WarmPolish::Replaced(zn) => {
+                        warm_raise = (zn - z).max(0.0);
+                        z = zn;
+                    }
                     super::WarmPolish::Kept => {}
                     super::WarmPolish::NotSolved => {
                         leak = match mark {
@@ -29680,9 +29720,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 最後の守り (全ての終わり方): 共有の最良値が返す解より良ければ、その良い解が主に届いていない。木や根はその値で刈って
         // いるので、返す解を最適とは言えない (木の探索の終わりの確かめを通らない根で終わる道筋で、h80x6320d が 6387.76 (正しくは
         // 6382.10) を最適と報告した。analysis/heur_ls_20261023.md 追記 5)。共有の最良値より良い解はないことは示せているので、
-        // 下界はその値にする。`ENOMOTO_MIP_NO_FINAL_SHARED_CHECK` で使わない (診断用)
+        // 下界はその値にする。`ENOMOTO_MIP_NO_FINAL_SHARED_CHECK` で使わない (診断用)。`ENOMOTO_MIP_POLISH_WARM` の最後の研磨が
+        // 目的値を上げたときは、その幅 (`warm_raise`) を引いて比べる (上の研磨の前の値で共有しているため。qiu の 4 スレッドで
+        // 研磨が 3e-6 上げ、最適を NotSolved と報告した: analysis/polishp_20261125)
         let (status, best_bound) = match (status, objective, self.shared.as_ref().map(|s| s.best())) {
-            (MipStatus::Optimal, Some(z), Some(sb)) if sb < z - 1e-9 * z.abs().max(1.0) && self.snap.is_none() && env_str!("ENOMOTO_MIP_NO_FINAL_SHARED_CHECK").is_none() => {
+            (MipStatus::Optimal, Some(z), Some(sb)) if sb < z - warm_raise - 1e-9 * z.abs().max(1.0) && self.snap.is_none() && env_str!("ENOMOTO_MIP_NO_FINAL_SHARED_CHECK").is_none() => {
                 eprintln!("MIP: WARNING: the shared best value {sb:.10e} is better than the returned solution {z:.10e} at the end; not reporting optimality");
                 (MipStatus::NotSolved, sb)
             }

@@ -5,7 +5,7 @@
 cd "$(dirname "$0")/../.."
 D=analysis/comboharm_20261124; mkdir -p $D/logs_nrasplit
 one() { p=$1; th=$2; s=$3; tag=$4; tl=120; [ $p = fhnw-binpack4-4 ] && tl=200; [ $p = neos-631710 ] && tl=600
-  case $tag in def) kv="X=1";; ti) kv="ENOMOTO_MIP_NODEROWS_ADAPT=ti";; tia) kv="ENOMOTO_MIP_NODEROWS_ADAPT=ti ENOMOTO_T_MIP_NODEROWS_ADAPT_TA=50";; r0) kv="ENOMOTO_MIP_NODEROWS_ADAPT=r0";; r0k) kv="ENOMOTO_MIP_NODEROWS_ADAPT=r0k";; r0k2) kv="ENOMOTO_MIP_NODEROWS_ADAPT=r0k2";; esac
+  case $tag in def) kv="X=1";; ti) kv="ENOMOTO_MIP_NODEROWS_ADAPT=ti";; tia) kv="ENOMOTO_MIP_NODEROWS_ADAPT=ti ENOMOTO_T_MIP_NODEROWS_ADAPT_TA=50";; r0) kv="ENOMOTO_MIP_NODEROWS_ADAPT=r0";; r0k) kv="ENOMOTO_MIP_NODEROWS_ADAPT=r0k";; r0k2) kv="ENOMOTO_MIP_NODEROWS_ADAPT=r0k2";; r0k23) kv="ENOMOTO_MIP_NODEROWS_ADAPT=r0k23";; esac
   grep -q "\"problem\": \"$p\", \"cfg\": \"$tag\", \"threads\": $th, \"seed\": $s," $D/res_nrasplit.jsonl 2>/dev/null && return
   f=$D/logs_nrasplit/${p}_${tag}_t${th}_s$s.log
   env ENOMOTO_MIP_NRA_TRACE=200 ENOMOTO_MIP_LOG=1 ENOMOTO_MIP_THREADS=$th ENOMOTO_T_MIP_SEED=$s $kv .venv/bin/python scripts/run_miplib_benchmark.py --worker-ours .miplib_cache/$p.mps --time-limit $tl --threads $th > $f 2>&1
@@ -19,3 +19,11 @@ for p in neos-911970 neos5; do for s in 1 2 3; do for tag in def ti tia r0 r0k; 
 for s in 1 2 3; do for tag in def r0 r0k; do echo "neos-631710 1 $s $tag"; done; done | xargs -P 3 -L 1 bash -c 'one $0 $1 $2 $3'
 # 10.8 節: 判定 K と持ち越しをカットプールで数える k2 (r0k2)
 for s in 1 2 3; do for p in neos-631710 fhnw-binpack4-4 mik-250-20-75-4 roll3000 mc11; do echo "$p 1 $s r0k2"; done; done | xargs -P 3 -L 1 bash -c 'one $0 $1 $2 $3'
+# 10.9 節: 持ち越しを既定の年齢の上限に届いていない外した行に絞る k3 (r0k23)
+for s in 1 2 3; do for p in neos-631710 mc11 fhnw-binpack4-4 mik-250-20-75-4 roll3000; do echo "$p 1 $s r0k23"; done; done | xargs -P 3 -L 1 bash -c 'one $0 $1 $2 $3'
+for s in 1 2 3; do echo "beasleyC3 1 $s r0k23"; done | xargs -P 3 -L 1 bash -c 'one $0 $1 $2 $3'
+for p in neos-911970 neos5; do for s in 1 2 3; do one $p 4 $s r0k23; done; done
+# 10.10 節: neos-911970 の 4 スレッドの r0k23 の悪化は揺れか害か (種 1〜6)
+for s in 1 2 3 4 5 6; do for tag in def r0 r0k23; do one neos-911970 4 $s $tag; done; done
+for s in 1 2 3 4 5 6; do one neos-911970 4 $s r0k2; done
+for s in 1 2 3; do for tag in def r0 r0k2 r0k23; do echo "neos-911970 1 $s $tag"; done; done | xargs -P 3 -L 1 bash -c 'one $0 $1 $2 $3'
