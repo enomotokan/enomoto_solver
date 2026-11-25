@@ -89,6 +89,8 @@
 
 1. ブランチを取り込み (`git fetch origin ccr-1beed81b-ex0uhq && git merge --no-edit FETCH_HEAD`)、先端で `pip install -e .`。
 2. `python analysis/protoscreen_20261124/check_default.py` が「全部一致」になることを確かめる。基準は ref_default.json。
+   - コンテナが再起動すると highspy が消えることがあり、そのとき check_default は IndexError で落ちる (分担 3 の報告)。
+   - 始める前と回し直しの前に `python -c "import highspy"` で highspy があるかを確かめる。なければ `pip install highspy==1.15.1` で入れ直し、check_default を確かめ直す。
 3. `python analysis/combo2_20261125/run.py K` (K は分担の番号) → `res_sK.jsonl`。
    - 止めても、同じコマンドで続きから回る。同じ (問題, 設定, 種) の行は飛ばす。
    - ソルバーは同時に 1 つで、ほかの計測と並べない。
