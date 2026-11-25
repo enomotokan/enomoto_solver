@@ -12,6 +12,10 @@ import collections, glob, json, math, sys
 from pathlib import Path
 D = Path(__file__).resolve().parent
 sys.path.insert(0, str(D))
+# res_wd_* を渡したら WARM=d の組 (s1wd・s2wd) で集計する (環境変数 POLISHP_SET=wd を付け忘れると「結果なし」になったため)
+import os as _os  # noqa: E402
+if any("res_wd_" in a for a in sys.argv[1:]):
+    _os.environ.setdefault("POLISHP_SET", "wd")
 from cfg import CFGS, P1  # noqa: E402
 TL, SH = 60.0, 10.0
 PERPROB = "--perprob" in sys.argv

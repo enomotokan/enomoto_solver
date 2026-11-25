@@ -801,6 +801,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) nra_tight: std::collections::HashMap<u64, (u32, f64)>,
     /// 試作 `ENOMOTO_MIP_NRA_ORDER` の診断: nra が外した行の非零の数の和
     pub(super) nra_rm_nnz: u64,
+    /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `3`: カットの年齢を進めた回数 (`age_cuts` の呼び出しの数)
+    pub(super) nra_age_tick: u64,
+    /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `3` ([`Solver::nra_k3_young`]): nra が外した行の指紋 → (外したときの年齢, そのときの `nra_age_tick`)
+    pub(super) nra_rm_age: std::collections::HashMap<u64, (u32, u64)>,
     /// 診断用: 効き目で続けるノードの分離の結果の内訳 (打ち切り、伸び/差が 0.02 未満、0.1 未満、0.3 未満、0.3 以上)
     pub(super) nca_hist: [u64; 5],
     /// ノードで加えたカットの非零の数の指数移動平均 (`ENOMOTO_T_MIP_NODE_CUT_ADAPT_DENSITY`、[`Solver::nca_dense`])。
@@ -5716,6 +5720,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         nra_e_stats: [0; 3],
         nra_tight: std::collections::HashMap::new(),
         nra_rm_nnz: 0,
+        nra_age_tick: 0,
+        nra_rm_age: std::collections::HashMap::new(),
         nca_hist: [0; 5],
         tdd: if super::treedepth::on() && !params.submip { Some(Box::default()) } else { None },
         nca_cut_nnz: None,
@@ -9925,12 +9931,27 @@ impl<'a, L: MipLp> Solver<'a, L> {
             None => cand.len(),
         };
         kept += (cand.len() - take) as u64;
-        for &(_, k) in &cand[..take] {
+        let rec3 = frac.is_some() && nra_has('3');
+        for &(age, k) in &cand[..take] {
             remove[m0 + k] = true;
             cnt += 1;
             if frac.is_some() {
                 self.nra_rm_nnz += self.lp.row_ref(m0 + k).len() as u64;
             }
+            // `3`: 外した行の年齢を覚えておく (再スタートで持ち込むかを、既定の年齢の上限で決める)
+            if rec3 {
+                let (_, up) = self.lp.row_bounds(m0 + k);
+                if up.is_finite() {
+                    let mut c = self.lp.row(m0 + k);
+                    c.sort_by_key(|&(j, _)| j);
+                    self.nra_rm_age.insert(super::separation::cut_fingerprint(&c, up), (age, self.nra_age_tick));
+                }
+            }
+        }
+        if rec3 && self.nra_rm_age.len() > 2 * self.lp.num_rows() + 1000 {
+            // 見積もりの年齢が上限に届いたもの (二度と持ち込まない) だけ捨てる
+            let (lim, t) = (self.aged_cut_limit(), self.nra_age_tick);
+            self.nra_rm_age.retain(|_, &mut (a, t0)| (a as u64).saturating_add(t - t0) < lim as u64);
         }
         if frac.is_some() {
             self.nra_stats[0] += 1;
@@ -10098,6 +10119,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 !in_lp.contains(&super::separation::cut_fingerprint(&c, r))
             })
             .count()
+    }
+
+    /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `3` (`=r0k23` など、analysis/comboharm_20261124/README.md 10.9 節): 指紋 `fp` のカットが nra の外した行で、
+    /// 外したときの年齢 + 外してから年齢を進めた回数 が既定の年齢の上限 ([`Self::aged_cut_limit`]、`remove_aged_cuts` と同じ) に届いていないか。
+    /// 既定なら (nra が外さなければ) まだ LP に残っていたはずの行に当たる。外した後に締まった (年齢が 0 に戻った) かは見ないので、年齢は多めに見積もる
+    /// (持ち込みは少なめになる)。新しい閾値はない
+    fn nra_k3_young(&self, fp: u64) -> bool {
+        let lim = self.aged_cut_limit() as u64;
+        self.nra_rm_age.get(&fp).is_some_and(|&(a, t0)| (a as u64).saturating_add(self.nra_age_tick - t0) < lim)
     }
 
     /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT`: 閉じた葉を数える (`inf`: 実行不能で閉じた (伝播・LP の実行不能・強分枝の伝播・強分枝の引き継ぎ)、
@@ -25606,6 +25636,50 @@ impl<'a, L: MipLp> Solver<'a, L> {
             row_lo.push(l);
             row_up.push(u);
         }
+        // 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `2` (analysis/comboharm_20261124/README.md 10.8 節): 判定 `K` と同じく、カットプールにあって今の LP にない
+        // カットのうち今の LP 解で締まっているものも持ち込む ([`Self::nra_k2_tight`] と同じ数え方)。nra が LP から外した行は上の LP の行の走査に入らず、
+        // 持ち込まれていなかった
+        if nra_on() && nra_has('2') && !self.params.submip && !keep_all {
+            let m0 = p.m;
+            let in_lp: std::collections::HashSet<u64> = (m0..self.lp.num_rows())
+                .map(|i| {
+                    let mut c = self.lp.row(i);
+                    c.sort_by_key(|&(j, _)| j);
+                    super::separation::cut_fingerprint(&c, self.lp.row_bounds(i).1)
+                })
+                .collect();
+            let x = self.lp.col_values();
+            let mut added = 0usize;
+            for k in 0..self.cut_pool.len() {
+                let (s0, e0) = (self.pool_start[k] as usize, self.pool_start[k + 1] as usize);
+                let r = self.cut_pool[k].1;
+                let act: f64 = (s0..e0).map(|t| self.pool_val[t] * x[self.pool_idx[t] as usize]).sum();
+                if act < r - 1e-6 * (1.0 + r.abs()) {
+                    continue;
+                }
+                let mut c: Vec<(usize, f64)> = (s0..e0).map(|t| (self.pool_idx[t] as usize, self.pool_val[t])).collect();
+                c.sort_by_key(|&(j, _)| j);
+                let fp = super::separation::cut_fingerprint(&c, r);
+                if in_lp.contains(&fp) {
+                    continue;
+                }
+                // `3` ([`Self::nra_k3_young`]): nra が外した行のうち、外した後も既定の年齢の上限に届いていないものだけ持ち込む
+                if nra_has('3') && !self.nra_k3_young(fp) {
+                    continue;
+                }
+                if cuts_as_rows {
+                    rows.push(c);
+                    row_lo.push(f64::NEG_INFINITY);
+                    row_up.push(r);
+                } else {
+                    carry.push((c, r));
+                }
+                added += 1;
+            }
+            if self.params.verbose {
+                eprintln!("MIP: NODEROWS_ADAPT k2: {added} tight cuts from the cut pool (not in the LP) carried into the restart");
+            }
+        }
         // `ENOMOTO_MIP_RESTART_ROOT_CUTS` の `r` (試作): 木の中の再スタートでは、根の終わりの LP で効いていたカットも持ち込む
         // (今の LP は最後に解いたノードの LP なので、そこで効いていない根のカット・年齢で外れた根のカットが落ちる)
         if restart_root_cuts('r') && self.nodes > 1 && !self.root_end_cuts.is_empty() {
@@ -29108,6 +29182,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let best_bound = if self.take_inbox() { best_bound.min(self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z)) } else { best_bound };
         // 試作 `ENOMOTO_MIP_POLISH_WARM` (`ENOMOTO_MIP_POLISH_STRICT` と組): 返す暫定解を、この問題の空間で B&B の LP の基底から温めて研磨する。
         // 解き直せなければ漏れの見積りを [`super::WARM_LEAK`] に置き、返す前の研磨 (元の問題の空間) が取り替えなければ目的値に足す
+        // 研磨で上げた目的値の幅 (共有の最良値は研磨の前の値のままなので、最後の守りではこの幅を引いて比べる)
+        let mut warm_raise = 0.0;
         if super::polish_strict() && super::polish_warm_mode() > 0 && !self.params.submip && self.snap.is_none() {
             let warm = super::polish_warm_mode();
             let mut leak = 0.0;
@@ -29127,7 +29203,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), if warm == 2 { self.deadline } else { None })
                 };
                 match r {
-                    super::WarmPolish::Replaced(zn) => z = zn,
+                    super::WarmPolish::Replaced(zn) => {
+                        warm_raise = (zn - z).max(0.0);
+                        z = zn;
+                    }
                     super::WarmPolish::Kept => {}
                     super::WarmPolish::NotSolved => {
                         leak = match mark {
@@ -29641,9 +29720,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 最後の守り (全ての終わり方): 共有の最良値が返す解より良ければ、その良い解が主に届いていない。木や根はその値で刈って
         // いるので、返す解を最適とは言えない (木の探索の終わりの確かめを通らない根で終わる道筋で、h80x6320d が 6387.76 (正しくは
         // 6382.10) を最適と報告した。analysis/heur_ls_20261023.md 追記 5)。共有の最良値より良い解はないことは示せているので、
-        // 下界はその値にする。`ENOMOTO_MIP_NO_FINAL_SHARED_CHECK` で使わない (診断用)
+        // 下界はその値にする。`ENOMOTO_MIP_NO_FINAL_SHARED_CHECK` で使わない (診断用)。試作 `ENOMOTO_MIP_POLISH_WARM` の最後の研磨が
+        // 目的値を上げたときは、その幅 (`warm_raise`) を引いて比べる (上の研磨の前の値で共有しているため。qiu の 4 スレッドで
+        // 研磨が 3e-6 上げ、最適を NotSolved と報告した: analysis/polishp_20261125)
         let (status, best_bound) = match (status, objective, self.shared.as_ref().map(|s| s.best())) {
-            (MipStatus::Optimal, Some(z), Some(sb)) if sb < z - 1e-9 * z.abs().max(1.0) && self.snap.is_none() && env_str!("ENOMOTO_MIP_NO_FINAL_SHARED_CHECK").is_none() => {
+            (MipStatus::Optimal, Some(z), Some(sb)) if sb < z - warm_raise - 1e-9 * z.abs().max(1.0) && self.snap.is_none() && env_str!("ENOMOTO_MIP_NO_FINAL_SHARED_CHECK").is_none() => {
                 eprintln!("MIP: WARNING: the shared best value {sb:.10e} is better than the returned solution {z:.10e} at the end; not reporting optimality");
                 (MipStatus::NotSolved, sb)
             }
