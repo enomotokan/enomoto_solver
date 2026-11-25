@@ -10058,7 +10058,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT`: このノードでプールの選び直しのラウンドを回すか (持ち分に 1 − f を足し、1 以上なら 1 引いて真)
     fn nra_pool_due(&mut self) -> bool {
-        if !nra_on() || self.params.submip {
+        // 試作 `0` (`=r0` など、analysis/comboharm_20261124/README.md 10.6・10.7 節): 選び直しのラウンドの側を持たず、行を外す側 (割合 f) だけにする。
+        // nra の得は主に外す側から来て (fhnw-binpack4-4・neos5・mik-250)、害はラウンドの側から来た (mc11・beasleyC3)
+        if !nra_on() || self.params.submip || nra_has('0') {
             return false;
         }
         let f = self.nra_f();
