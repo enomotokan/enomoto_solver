@@ -59,3 +59,20 @@ python analysis/polishp_20261125/summ.py         # 集計
 - **mzzv42z (s2_t4 で解けた数が 1 減った):**
   - 種 3 が、既定 49.35 秒 (解けた) に対し、s2 は 60 秒で時間切れ (ノード 414 → 767)。
   - 種 1 は既定でも時間切れ、種 2 は既定 56.77 秒・s2 56.70 秒。上限のすぐ手前の問題で、揺れの範囲と見る。
+
+## P 全体での WARM=d の比べ (2026-11-25、既定にする前の最後の確かめ)
+
+- 設定: 既定・`s1wd` (STRICT=1 + WARM=d)・`s2wd` (STRICT=2 + WARM=d) を、1・4 スレッドで。
+- 規模: 58 問 × 種 1〜3 × 60 秒 = 1044 回。4 分担で、見積りは各 2.4 時間。
+- 分担: 0 が親の子のうち nattai を調べたセッション、1〜3 は他のセッション。
+- 分担表は `shards_wd.json` (`POLISHP_SET=wd python plan.py 4 shards_wd.json`)。
+
+分担 K を回すとき:
+
+```
+git fetch origin ccr-1beed81b-ex0uhq && git merge --no-edit FETCH_HEAD
+pip install -e .
+python analysis/polishp_20261125/run.py K analysis/polishp_20261125/shards_wd.json analysis/polishp_20261125/res_wd_sK.jsonl
+```
+
+集計: `POLISHP_SET=wd python analysis/polishp_20261125/summ.py 'analysis/polishp_20261125/res_wd_s*.jsonl'`

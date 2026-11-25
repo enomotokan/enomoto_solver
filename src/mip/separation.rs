@@ -5254,6 +5254,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 1 増やし、効いているカットは 0 に戻す。
     pub(super) fn age_cuts(&mut self) {
         self.sync_cut_age();
+        // 試作 `ENOMOTO_MIP_NRA_ORDER` の `c`・`d`: 締まった回数を数える
+        self.nra_tight_update();
         if self.cut_age.is_empty() {
             return;
         }

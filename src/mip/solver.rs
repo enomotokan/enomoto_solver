@@ -796,6 +796,11 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) nra_i_base: [f64; 2],
     /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `e`: [伸びずに外したラウンド, 外した行, 伸びて残したラウンド]
     pub(super) nra_e_stats: [u64; 3],
+    /// 試作 `ENOMOTO_MIP_NRA_ORDER` の `c`・`d` ([`nra_order`]): カットの番号 → [締まった (論理変数が非基底の) 回数, そのときの |双対値| の和]。
+    /// ノードの LP のたびに ([`Solver::nra_tight_update`]) 数える。LP の行の 2 倍 + 1000 を超えたら今の LP にあるものだけに絞る
+    pub(super) nra_tight: std::collections::HashMap<u64, (u32, f64)>,
+    /// 試作 `ENOMOTO_MIP_NRA_ORDER` の診断: nra が外した行の非零の数の和
+    pub(super) nra_rm_nnz: u64,
     /// 診断用: 効き目で続けるノードの分離の結果の内訳 (打ち切り、伸び/差が 0.02 未満、0.1 未満、0.3 未満、0.3 以上)
     pub(super) nca_hist: [u64; 5],
     /// ノードで加えたカットの非零の数の指数移動平均 (`ENOMOTO_T_MIP_NODE_CUT_ADAPT_DENSITY`、[`Solver::nca_dense`])。
@@ -5709,6 +5714,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         nra_ret_ids: std::collections::HashSet::new(),
         nra_i_base: [0.0; 2],
         nra_e_stats: [0; 3],
+        nra_tight: std::collections::HashMap::new(),
+        nra_rm_nnz: 0,
         nca_hist: [0; 5],
         tdd: if super::treedepth::on() && !params.submip { Some(Box::default()) } else { None },
         nca_cut_nnz: None,
@@ -6339,6 +6346,13 @@ pub(super) fn ncl_has(c: char) -> bool {
 /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` (既定では使わない、analysis/nodespeed_20261123/README.md 8 節): [`Solver::nra_f`]
 pub(super) fn nra_on() -> bool {
     env_str!("ENOMOTO_MIP_NODEROWS_ADAPT").is_some()
+}
+
+/// 試作 `ENOMOTO_MIP_NRA_ORDER` = `a`・`b`・`c`・`d` (既定 `a`、analysis/comboharm_20261124/README.md 11 節): NODEROWS_ADAPT の外す行の並べ方
+/// ([`Solver::nra_sort_cand`])。`a` は年齢の高い順 (今までの形)
+pub(super) fn nra_order() -> char {
+    static V: std::sync::OnceLock<char> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_MIP_NRA_ORDER").and_then(|v| v.chars().next()).filter(|c| matches!(c, 'a' | 'b' | 'c' | 'd')).unwrap_or('a'))
 }
 
 /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の文字 (`r`: 選び直しの頻度を効き目 ρ 倍にする)
@@ -9902,7 +9916,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let take = match frac {
             Some(f) => {
-                cand.sort_by(|x, y| y.0.cmp(&x.0).then(x.1.cmp(&y.1)));
+                match nra_order() {
+                    'a' => cand.sort_by(|x, y| y.0.cmp(&x.0).then(x.1.cmp(&y.1))),
+                    o => self.nra_sort_cand(&mut cand, o),
+                }
                 (f * cand.len() as f64).round() as usize
             }
             None => cand.len(),
@@ -9911,6 +9928,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         for &(_, k) in &cand[..take] {
             remove[m0 + k] = true;
             cnt += 1;
+            if frac.is_some() {
+                self.nra_rm_nnz += self.lp.row_ref(m0 + k).len() as u64;
+            }
         }
         if frac.is_some() {
             self.nra_stats[0] += 1;
@@ -9940,6 +9960,89 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             self.delete_lp_rows(&remove);
             self.ncl_removed_now = true;
+        }
+    }
+
+    /// 試作 `ENOMOTO_MIP_NRA_ORDER` ([`nra_order`]): nra の外す候補 `cand` ((年齢, LP の中のカットの位置 k)) を外す順に並べる。
+    /// - `b`: 非零の数の多い順 (LP の手間を直接減らす)。
+    /// - `c`: 手間あたりの役立ち度 (締まった回数 / 非零の数) の低い順。
+    /// - `d`: 年齢・非零の数・役立ち度の低さのそれぞれを候補の中の順位で [0, 1] にそろえ (同じ値は同じ順位)、等しい重みで足した点数の高い順。
+    /// どれも同点は年齢の高い順、次に位置の順
+    fn nra_sort_cand(&mut self, cand: &mut [(u32, usize)], o: char) {
+        let m0 = self.p.m;
+        let n = cand.len();
+        if n < 2 {
+            return;
+        }
+        let nnz: Vec<f64> = cand.iter().map(|&(_, k)| self.lp.row_ref(m0 + k).len().max(1) as f64).collect();
+        let useful: Vec<f64> = cand
+            .iter()
+            .zip(&nnz)
+            .map(|(&(_, k), &z)| self.cut_ids.get(k).and_then(|id| self.nra_tight.get(id)).map_or(0.0, |t| t.0 as f64) / z)
+            .collect();
+        // 点数 (大きいほど先に外す)
+        let score: Vec<f64> = match o {
+            'b' => nnz.clone(),
+            'c' => useful.iter().map(|u| -u).collect(),
+            _ => {
+                // 順位を [0, 1] に: 値の小さい順に並べ、同じ値は同じ順位 (その値の最初の位置) にして / (n − 1)
+                fn rank01(v: &[f64]) -> Vec<f64> {
+                    let n = v.len();
+                    let mut idx: Vec<usize> = (0..n).collect();
+                    idx.sort_by(|&a, &b| v[a].partial_cmp(&v[b]).unwrap_or(std::cmp::Ordering::Equal).then(a.cmp(&b)));
+                    let mut r = vec![0.0; n];
+                    let mut pos = 0usize;
+                    for (t, &i) in idx.iter().enumerate() {
+                        if t > 0 && v[i] != v[idx[t - 1]] {
+                            pos = t;
+                        }
+                        r[i] = pos as f64 / (n - 1) as f64;
+                    }
+                    r
+                }
+                let age: Vec<f64> = cand.iter().map(|c| c.0 as f64).collect();
+                let neg_useful: Vec<f64> = useful.iter().map(|u| -u).collect();
+                let (ra, rb, rc) = (rank01(&age), rank01(&nnz), rank01(&neg_useful));
+                (0..n).map(|i| ra[i] + rb[i] + rc[i]).collect()
+            }
+        };
+        let mut idx: Vec<usize> = (0..n).collect();
+        idx.sort_by(|&a, &b| {
+            score[b]
+                .partial_cmp(&score[a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(cand[b].0.cmp(&cand[a].0))
+                .then(cand[a].1.cmp(&cand[b].1))
+        });
+        let sorted: Vec<(u32, usize)> = idx.iter().map(|&i| cand[i]).collect();
+        cand.copy_from_slice(&sorted);
+    }
+
+    /// 試作 `ENOMOTO_MIP_NRA_ORDER` の `c`・`d`: 今の LP の木のカットの行のうち、締まっている (論理変数が非基底の) ものの回数と |双対値| を足す
+    /// (ノードの LP が最適で終わるたびに、カットの年齢と同じ所で呼ぶ。手間は LP の行の数に比例し、年齢の更新と同じ程度)
+    pub(super) fn nra_tight_update(&mut self) {
+        if !nra_on() || self.params.submip || !matches!(nra_order(), 'c' | 'd') {
+            return;
+        }
+        let m0 = self.p.m;
+        let mr = self.lp.num_rows();
+        if mr <= m0 {
+            return;
+        }
+        if self.nra_tight.len() > 2 * mr + 1000 {
+            let live: std::collections::HashSet<u64> = self.cut_ids.iter().copied().collect();
+            self.nra_tight.retain(|id, _| live.contains(id));
+        }
+        let y = self.lp.row_duals();
+        let b = self.lp.basis_ref();
+        let tight: Vec<(u64, f64)> = (0..self.cut_ids.len().min(mr - m0))
+            .filter(|&k| b.row[m0 + k] != VarStatus::Basic)
+            .map(|k| (self.cut_ids[k], y.get(m0 + k).map_or(0.0, |v| v.abs())))
+            .collect();
+        for (id, d) in tight {
+            let e = self.nra_tight.entry(id).or_insert((0, 0.0));
+            e.0 += 1;
+            e.1 += d;
         }
     }
 
@@ -10058,7 +10161,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT`: このノードでプールの選び直しのラウンドを回すか (持ち分に 1 − f を足し、1 以上なら 1 引いて真)
     fn nra_pool_due(&mut self) -> bool {
-        if !nra_on() || self.params.submip {
+        // 試作 `0` (`=r0` など、analysis/comboharm_20261124/README.md 10.6・10.7 節): 選び直しのラウンドの側を持たず、行を外す側 (割合 f) だけにする。
+        // nra の得は主に外す側から来て (fhnw-binpack4-4・neos5・mik-250)、害はラウンドの側から来た (mc11・beasleyC3)
+        if !nra_on() || self.params.submip || nra_has('0') {
             return false;
         }
         let f = self.nra_f();
@@ -14052,7 +14157,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if self.nodes % k == 0 {
                         let rho = (self.nra_rho[0] as f64 + 1.0) / ((self.nra_rho[0] + self.nra_rho[1]) as f64 + 2.0);
                         eprintln!(
-                            "NRA_TRACE tid {} nodes {} t {:.2} inf {} bound {} phi {:.4} f {:.4} rho {:.4} rounds {} tratio {:.4} gsel {:.3e} wsel {:.3e} gtree {:.3e} wtree {:.3e} ntree {} ibase {} ibar {:.1} e_drop {:?}",
+                            "NRA_TRACE tid {} nodes {} t {:.2} inf {} bound {} phi {:.4} f {:.4} rho {:.4} rounds {} tratio {:.4} gsel {:.3e} wsel {:.3e} gtree {:.3e} wtree {:.3e} ntree {} ibase {} ibar {:.1} e_drop {:?} rm_rows {} rm_nnz {} lp_rows {} lp_nnz {}",
                             self.pool_tid,
                             self.nodes,
                             self.start.elapsed().as_secs_f64(),
@@ -14070,7 +14175,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             self.nra_t[4],
                             self.nra_i_base[0],
                             if self.nra_i_base[0] > 0.0 { self.nra_i_base[1] / self.nra_i_base[0] } else { f64::NAN },
-                            self.nra_e_stats
+                            self.nra_e_stats,
+                            self.nra_stats[1],
+                            self.nra_rm_nnz,
+                            self.lp.num_rows(),
+                            (0..self.lp.num_rows()).map(|i| self.lp.row_ref(i).len()).sum::<usize>()
                         );
                     }
                 }

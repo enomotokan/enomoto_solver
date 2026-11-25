@@ -1,4 +1,4 @@
-"""分担表: python plan.py [分担の数 (既定 8)] → shards.json (P = MIPLIB の 58 問 × 種 1〜3 × cfg.py の全設定、60 秒)。
+"""分担表: python plan.py [分担の数 (既定 8)] [出力 (既定 shards.json)] → shards.json (P = MIPLIB の 58 問 × 種 1〜3 × cfg.py の全設定、60 秒)。
 同じ (問題, 種) の設定 (既定 2 つと試作 4) は同じ分担で続けて解き、順は組ごとに回して入れ替える。
 見積り (1 回、秒): analysis/final_20261118 の P の def (4 スレッド)・def_t1 の同じ (問題, 種) の時間 (解けなければ 60)、試作も同じとみる、+ 待ち 8 秒。"""
 import json, glob, sys
@@ -24,5 +24,6 @@ gl = sorted(groups.items(), key=lambda kv: -sum(est(*t) for t in kv[1]))
 load = [0.0] * NS; shards = [[] for _ in range(NS)]
 for _, ts in gl:
     i = min(range(NS), key=lambda j: load[j]); shards[i] += [list(t) + [TL] for t in ts]; load[i] += sum(est(*t) for t in ts)
-(D / "shards.json").write_text(json.dumps({"shards": shards, "est_hours": [round(x / 3600, 2) for x in load]}, indent=0))
-print(f"shards.json: {len(PROBS)} 問 × 種 3 × {len(CF)} 設定 = {sum(len(s) for s in shards)} 回、{NS} 分担、見積り (時間) 各 {min(load)/3600:.2f}〜{max(load)/3600:.2f}、計 {sum(load)/3600:.1f}")
+OUTF = sys.argv[2] if len(sys.argv) > 2 else "shards.json"
+(D / OUTF).write_text(json.dumps({"shards": shards, "est_hours": [round(x / 3600, 2) for x in load]}, indent=0))
+print(f"{OUTF}: {len(PROBS)} 問 × 種 3 × {len(CF)} 設定 = {sum(len(s) for s in shards)} 回、{NS} 分担、見積り (時間) 各 {min(load)/3600:.2f}〜{max(load)/3600:.2f}、計 {sum(load)/3600:.1f}")
