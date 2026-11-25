@@ -518,6 +518,12 @@ struct Cand1 {
 }
 
 impl<'a> LocalMip<'a> {
+    /// 試作 `ENOMOTO_MIP_LMIP_SCORE_TICKS` (analysis/workcount_20261125): ここまでの仕事の量。1 手の見当 `step_work` × 手数に、列の走査で実際に見た非零
+    /// ([`St::for_col`]) と lift の掃引で見た非零を足したもの (`run` の `work_cap` の判定と同じ数え)
+    pub fn real_work(&self, step_work: u64) -> u64 {
+        self.step.saturating_mul(step_work).saturating_add(self.s.col_work.get()).saturating_add(self.s.lift_work)
+    }
+
     /// 列の境界 `lo`/`up` で、各列の下限から始める。整数列の境界が空なら `None`
     pub(super) fn new(p: &'a MipProblem, lo: &[f64], up: &[f64], seed: u64, chain: bool) -> Option<Self> {
         let (n, m) = (p.n, p.m);
@@ -729,7 +735,10 @@ impl<'a> LocalMip<'a> {
                     crate::ticks::add(crate::ticks::HEUR, s.lift_work - lift_counted);
                     lift_counted = s.lift_work;
                 }
-                if crate::ticks::over() || past_end() || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) || step >= step_cap || step.saturating_mul(step_work).saturating_add(s.lift_work) >= work_cap {
+                // `LMIP_SCORE_TICKS`: 仕事の上限 `work_cap` も、手間の数えと同じく列の走査で実際に見た非零を足して判定する
+                // (見当 `step_work` だけでは、密な列のある問題で上限より何倍も回る。analysis/workcount_20261125)
+                let work_now = step.saturating_mul(step_work).saturating_add(s.lift_work).saturating_add(if score_ticks { s.col_work.get() } else { 0 });
+                if crate::ticks::over() || past_end() || stop.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) || step >= step_cap || work_now >= work_cap {
                     break;
                 }
             }
