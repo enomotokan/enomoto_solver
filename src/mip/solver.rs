@@ -792,6 +792,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) nra_t: [f64; 5],
     /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `w` ([`Solver::nra_w_share`]): 選び直しのラウンドで LP に戻した行の番号 (`cut_ids` の値)
     pub(super) nra_ret_ids: std::collections::HashSet<u64>,
+    /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `i` ([`Solver::nra_i_move`]): 戻した行が LP にない普通のノードの [数, 最初の LP までの反復の和]
+    pub(super) nra_i_base: [f64; 2],
     /// 診断用: 効き目で続けるノードの分離の結果の内訳 (打ち切り、伸び/差が 0.02 未満、0.1 未満、0.3 未満、0.3 以上)
     pub(super) nca_hist: [u64; 5],
     /// ノードで加えたカットの非零の数の指数移動平均 (`ENOMOTO_T_MIP_NODE_CUT_ADAPT_DENSITY`、[`Solver::nca_dense`])。
@@ -5698,6 +5700,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         nra_rho: [0; 2],
         nra_t: [0.0; 5],
         nra_ret_ids: std::collections::HashSet::new(),
+        nra_i_base: [0.0; 2],
         nca_hist: [0; 5],
         tdd: if super::treedepth::on() && !params.submip { Some(Box::default()) } else { None },
         nca_cut_nnz: None,
@@ -9989,6 +9992,33 @@ impl<'a, L: MipLp> Solver<'a, L> {
         cnt as f64 / mr as f64
     }
 
+    /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `w`・`i`: 普通のノードの最初の LP までの手間 `_w` のうち、木の手間からラウンドの手間へ移す割合
+    /// (`w` も `i` もなければ 0)。`its` はこのノードの最初の LP までの反復。
+    /// - `w` ([`Self::nra_w_share`]): 今の LP の行に占める戻した行の割合。
+    /// - `i` (analysis/comboharm_20261124/README.md 10.3 節): 戻した行が LP にあるノードで、反復のうち「戻した行が LP にないノードの反復の平均」ī を
+    ///   超えた分の割合 max(0, its − ī) / its。戻した行がないノードでは ī の観測に足して 0。ī の観測がまだなければ 0 (新しい閾値はない)。
+    ///   戻した行はノードの LP の反復を増やして重くする (mc11 で 1.5 倍) が、行の数の割合 (`w`) ではその重さの 1/3 ほどしか数えなかった
+    fn nra_i_move(&mut self, _w: f64, its: u64) -> f64 {
+        if nra_has('i') {
+            let sh = self.nra_w_share();
+            let its = its as f64;
+            if sh <= 0.0 {
+                self.nra_i_base[0] += 1.0;
+                self.nra_i_base[1] += its;
+                return 0.0;
+            }
+            if self.nra_i_base[0] < 1.0 || its <= 0.0 {
+                return 0.0;
+            }
+            let ibar = self.nra_i_base[1] / self.nra_i_base[0];
+            return ((its - ibar).max(0.0) / its).min(1.0);
+        }
+        if nra_has('w') {
+            return self.nra_w_share();
+        }
+        0.0
+    }
+
     /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT`: このノードでプールの選び直しのラウンドを回すか (持ち分に 1 − f を足し、1 以上なら 1 引いて真)
     fn nra_pool_due(&mut self) -> bool {
         if !nra_on() || self.params.submip {
@@ -13985,7 +14015,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if self.nodes % k == 0 {
                         let rho = (self.nra_rho[0] as f64 + 1.0) / ((self.nra_rho[0] + self.nra_rho[1]) as f64 + 2.0);
                         eprintln!(
-                            "NRA_TRACE tid {} nodes {} t {:.2} inf {} bound {} phi {:.4} f {:.4} rho {:.4} rounds {} tratio {:.4} gsel {:.3e} wsel {:.3e} gtree {:.3e} wtree {:.3e} ntree {}",
+                            "NRA_TRACE tid {} nodes {} t {:.2} inf {} bound {} phi {:.4} f {:.4} rho {:.4} rounds {} tratio {:.4} gsel {:.3e} wsel {:.3e} gtree {:.3e} wtree {:.3e} ntree {} ibase {} ibar {:.1}",
                             self.pool_tid,
                             self.nodes,
                             self.start.elapsed().as_secs_f64(),
@@ -14000,7 +14030,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             self.nra_t[1],
                             self.nra_t[2],
                             self.nra_t[3],
-                            self.nra_t[4]
+                            self.nra_t[4],
+                            self.nra_i_base[0],
+                            if self.nra_i_base[0] > 0.0 { self.nra_i_base[1] / self.nra_i_base[0] } else { f64::NAN }
                         );
                     }
                 }
@@ -14343,6 +14375,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // `NODEROWS_ADAPT` の `t`: 選び直しのラウンドの前の目的値と手間 (ticks)、ノードの処理の始めの手間 ([`Self::nra_t_ratio`])
             let mut nra_t_pending: Option<(f64, f64)> = None;
             let nra_t_tk0 = crate::ticks::total();
+            let nra_t_it0 = self.lp.total_iterations();
             let nra_t_on = nra_on() && nra_has('t') && !self.params.submip;
             // ノードの分離でカットを加えた後の解き直しか (その LP の時間を `node_cut_secs` に足す)
             let mut node_cut_resolve: Option<Instant> = None;
@@ -14781,7 +14814,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             } else if resolves == 0 {
                                 self.nra_t[2] += if lim.is_finite() { (lim - node.lower_bound).max(0.0) } else { 0.0 };
                                 let w = tk - nra_t_tk0;
-                                let sh = if nra_has('w') { self.nra_w_share() } else { 0.0 };
+                                let sh = self.nra_i_move(w, self.lp.total_iterations().saturating_sub(nra_t_it0));
                                 self.nra_t[1] += sh * w;
                                 self.nra_t[3] += (1.0 - sh) * w;
                                 self.nra_t[4] += 1.0;
@@ -14838,7 +14871,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.nra_t[2] += (node_obj - node.lower_bound).max(0.0);
                         // `w`: 戻した行の割合の分の手間をラウンドの手間へ移す ([`Self::nra_w_share`])
                         let w = tk - nra_t_tk0;
-                        let sh = if nra_has('w') { self.nra_w_share() } else { 0.0 };
+                        let sh = self.nra_i_move(w, self.lp.total_iterations().saturating_sub(nra_t_it0));
                         self.nra_t[1] += sh * w;
                         self.nra_t[3] += (1.0 - sh) * w;
                         self.nra_t[4] += 1.0;
@@ -15529,7 +15562,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let added = if poolsel_on() || nra_pool { self.pool_select_round(&x) } else { self.pool_cut_round(&x, max_cuts) };
                     if added && nra_pool && nra_t_on && !poolsel_on() {
                         nra_t_pending = Some((obj_pre, tk_pre));
-                        if nra_has('w') {
+                        if nra_has('w') || nra_has('i') {
                             self.nra_ret_ids.extend(id_pre..self.next_cut_id);
                         }
                     }
