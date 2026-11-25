@@ -8,7 +8,7 @@ TL = float(sys.argv[1]) if len(sys.argv) > 1 else 60.0
 PROBS = ["dano3_3", "dano3_5", "neos-5114902-kasavu", "s100", "savsched1", "rail02", "neos-5104907-jarama", "buildingenergy",
          "neos-5049753-cuanza", "square47"]
 CFGS = {"def": {}, "s1": {"ENOMOTO_MIP_POLISH_STRICT": "1"}, "s2": {"ENOMOTO_MIP_POLISH_STRICT": "2", "ENOMOTO_MIP_POLISH_STATS": "1"}}
-WARM = {f"s{k}w{w}": {"ENOMOTO_MIP_POLISH_STRICT": str(k), "ENOMOTO_MIP_POLISH_WARM": w, "ENOMOTO_MIP_POLISH_STATS": "1"} for k in (1, 2) for w in ("1", "d", "e")}
+WARM = {f"s{k}w{w}": {"ENOMOTO_MIP_POLISH_STRICT": str(k), "ENOMOTO_MIP_POLISH_WARM": w, "ENOMOTO_MIP_POLISH_STATS": "1v"} for k in (1, 2) for w in ("1", "d", "e")}
 OUT = sys.argv[2] if len(sys.argv) > 2 else "overrun.jsonl"
 if len(sys.argv) > 3:
     PROBS = sys.argv[3].split(",")
@@ -42,6 +42,7 @@ for p in PROBS:
         row = {"problem": p, "cfg": c, "tl": TL, "wall": round(wall, 2), "result": res, "polish": st[-1] if st else None}
         if wm:
             row["warm"] = wm[-1]
+            row["warm_lines"] = wm[:-1][-20:]
         print(json.dumps(row), flush=True)
         with open(D / OUT, "a") as f:
             f.write(json.dumps(row) + "\n")
