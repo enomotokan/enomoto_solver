@@ -27,6 +27,8 @@ MIPLIB 240 問の組み合わせの計測 (analysis/combo_20261124) で、combo 
 | chromaticindex512-7 | 再現しない | 既定は時間切れ・499 秒、combo は 342・394・498 秒。この機械では combo のほうが速い | — |
 | neos-1456979 | はっきりしない | 既定もこの機械では 600 秒で時間切れ (combo の計測では 393 秒)。combo は根の後のサブ MIP・含意の数から分かれる (heur の見込み) | — |
 | gmu-35-40 | はっきりしない | 1 スレッドでは既定・combo とも時間切れ (害が出たのは 4 スレッド)。combo は得た値・下界とも少し悪い | — |
+| neos-1582420 | **heur** (中の FP_STAGE3) | HEUR_ADAPT が FP の第 3 段を、暫定解のないサブ MIP の中でも削らずに回し、LP face のサブ MIP がノード 0 で時間切れ → 92 と 393 列固定の再スタートを逃す (`neos-1582420.md`) | `HEUR_ADAPT=1m` (第 3 段をサブ MIP の中では回さない)。combo 314 ノード・46 秒 (既定 443・44 秒)。heuradapt の 13 問で得を残す |
+| mc11 | **nra** (nodespeed 9.5・9.6 節と同じ) | 戻したカットが LP に残りノードが 1.5 倍重く、木の中の再スタートが遅れ、後の根の固定の連鎖を逃す。enum・bfrt は種 1 だけの揺れ (`mc11.md`) | 未作 (戻した行の後の手間を W_sel に入れる案、nodespeed 9.6.3) |
 
 - 確かめ (直し 2 つをつけて、`fuzz.sh fix ENOMOTO_MIP_NODEROWS_ADAPT=tk ENOMOTO_MIP_ENUM_ADAPT=1s`、`fuzz_fix.out`): fuzz 7 本は誤答 0、
   cargo test は 424 通過・0 失敗。直しを入れたビルドでも、既定の道筋は 6 問とも基準と一致した (`check_default.out`)。
