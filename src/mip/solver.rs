@@ -809,6 +809,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) pc_gain: [f64; 2],
     /// 試作 `ENOMOTO_MIP_POOL_CLOSE` の数: [戻した回, 刈れた回, 戻した行, 手間 (ticks)]
     pub(super) pc_stats: [f64; 4],
+    /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `p` ([`Solver::nra_leaf`]): 今のノードの (親から受けた) 下界
+    pub(super) nra_cur_lb: f64,
+    /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `p` の数: [実行不能で閉じた葉, そのうち下界で閉じた側に数えた葉]
+    pub(super) nra_p_stats: [u64; 2],
     /// 診断用: 効き目で続けるノードの分離の結果の内訳 (打ち切り、伸び/差が 0.02 未満、0.1 未満、0.3 未満、0.3 以上)
     pub(super) nca_hist: [u64; 5],
     /// ノードで加えたカットの非零の数の指数移動平均 (`ENOMOTO_T_MIP_NODE_CUT_ADAPT_DENSITY`、[`Solver::nca_dense`])。
@@ -5016,6 +5020,7 @@ pub fn solve(p: &MipProblem, params: MipParams) -> MipResult {
     let run = || solve_with::<crate::simplex::mip_lp::TwoStageLp>(p, params, None, None);
     // サブ MIP の経過は利用者向けのログに出さない
     let r = if params.submip { crate::log::suspend(run) } else { run() };
+    super::wc_mark("tree (or the rest of the solve)", params.submip);
     if let Some(k) = prev_race {
         crate::simplex::mip_lp::set_cold_race_threads(k);
     }
@@ -5728,6 +5733,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         nra_rm_age: std::collections::HashMap::new(),
         pc_gain: [0.0; 2],
         pc_stats: [0.0; 4],
+        nra_cur_lb: f64::NEG_INFINITY,
+        nra_p_stats: [0; 2],
         nca_hist: [0; 5],
         tdd: if super::treedepth::on() && !params.submip { Some(Box::default()) } else { None },
         nca_cut_nnz: None,
@@ -6366,6 +6373,11 @@ pub(super) fn nra_on() -> bool {
 pub(super) fn pool_close_on() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_str!("ENOMOTO_MIP_POOL_CLOSE").is_some_and(|v| v != "0"))
+}
+
+/// プールから戻すラウンドの伸びを測るか (`POOL_CLOSE` か、`NODEROWS_ADAPT` の `p`)
+pub(super) fn pool_gain_on() -> bool {
+    pool_close_on() || (nra_on() && (nra_has('p') || nra_has('g')))
 }
 
 /// 試作 `ENOMOTO_MIP_NRA_ORDER` = `a`・`b`・`c`・`d` (既定 `a`、analysis/comboharm_20261124/README.md 11 節): NODEROWS_ADAPT の外す行の並べ方
@@ -9915,7 +9927,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut remove = vec![false; mr];
         let (mut cnt, mut kept) = (0u64, 0u64);
         // `ENOMOTO_MIP_NODEROWS_ADAPT` ([`Self::nra_f`]) では、外せる行のうち年齢の高い順に割合 f だけ外す
-        let frac = if nra_on() && !ncl_on() { Some(self.nra_f()) } else { None };
+        let frac = if nra_on() && !ncl_on() { Some(self.nra_f() * self.nra_g_factor()) } else { None };
         let mut cand: Vec<(u32, usize)> = Vec::new();
         {
             let b = self.lp.basis_ref();
@@ -10144,10 +10156,39 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.nra_rm_age.get(&fp).is_some_and(|&(a, t0)| (a as u64).saturating_add(self.nra_age_tick - t0) < lim)
     }
 
+    /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `g` (利用者の案、analysis/comboharm_20261124/README.md 10.12 節): 外す割合に掛ける σ(ln((U − z) / ĝ)) = r / (1 + r)、
+    /// r = (U − z) / ĝ。z はノードの (親から受けた) 下界、U は打ち切り値、ĝ はプールから戻すラウンドで見込める伸びの平均 ([`pool_gain_on`])。
+    /// 打ち切り値から遠いノード (行を戻しても刈れない) では外し、近いノード (行があれば刈れる見込み) では外さない。真ん中は比 1、傾きは対数のオッズで 1
+    /// (`t` の比と同じ形)。U か ĝ がなければ 1 (今の f のまま)
+    fn nra_g_factor(&self) -> f64 {
+        if !nra_has('g') || self.pc_gain[1] <= 0.0 {
+            return 1.0;
+        }
+        let lim = self.prune_limit();
+        let ghat = self.pc_gain[0] / self.pc_gain[1];
+        if !lim.is_finite() || !self.nra_cur_lb.is_finite() || ghat <= 0.0 {
+            return 1.0;
+        }
+        let r = (lim - self.nra_cur_lb).max(0.0) / ghat;
+        r / (1.0 + r)
+    }
+
     /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT`: 閉じた葉を数える (`inf`: 実行不能で閉じた (伝播・LP の実行不能・強分枝の伝播・強分枝の引き継ぎ)、
     /// 偽: 下界で閉じた (取り出したときの下界・LP の目的値・被約費用・整数解・TUBR))。強分枝で閉じたもの (`sb`) は数えない
     pub(super) fn nra_leaf(&mut self, inf: bool) {
         if !self.params.submip {
+            // 試作 `p` (analysis/comboharm_20261124/README.md 10.11 節): 実行不能で閉じた葉のうち、親から受けた下界 + プールから戻すラウンドで見込める伸び
+            // (`pc_gain` の平均、[`pool_gain_on`]) が打ち切り値に届くものは、下界で閉じた側に数える。nra が行を外すと LP が弱くなり、行がそろっていれば
+            // 親で下界で閉じた部分木が深くまで進んで実行不能で閉じ、φ が上がってさらに外す循環になる (neos-911970)。その分を φ から除く
+            let mut inf = inf;
+            if inf && nra_on() && nra_has('p') {
+                self.nra_p_stats[0] += 1;
+                let lim = self.prune_limit();
+                if self.pc_gain[1] > 0.0 && lim.is_finite() && self.nra_cur_lb + self.pc_gain[0] / self.pc_gain[1] >= lim {
+                    self.nra_p_stats[1] += 1;
+                    inf = false;
+                }
+            }
             self.nra_leaves[usize::from(!inf)] += 1;
         }
     }
@@ -11615,7 +11656,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                 }
                 let t_cut = Instant::now();
+                super::wc_mark("root LP and setup", self.params.submip);
                 let cut_ok = env_str!("ENOMOTO_MIP_NO_CUTS").is_some() || self.root_cut_loop(root_iters);
+                super::wc_mark("root cut loop", self.params.submip);
                 // 試作 `ENOMOTO_MIP_FACECUT` (既定では使わない、analysis/sepeff_20261120/): 最適面の中の別の頂点で分離したカットを足す
                 if cut_ok && self.snap.is_none() && !self.root_gap_closed() {
                     self.facecut_probe();
@@ -14107,6 +14150,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             if let Some(b) = &n.basis {
                                 self.restore_node_basis(b, n.basis_epoch, n.dse.as_ref().map(|d| d.pairs(b)).as_deref(), &full_changes(&n), n.prot.as_deref().map(|v| v.as_slice()));
                                 if ncl_has('q') || (nra_on() && !ncl_on()) {
+                                    self.nra_cur_lb = n.lower_bound;
                                     self.node_cleanup_rows();
                                 }
                             }
@@ -14168,6 +14212,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             if first {
+                super::wc_mark("root heuristics etc. (until the tree)", self.params.submip);
                 self.tprof.tree_start_s = self.start.elapsed().as_secs_f64();
                 self.tprof.tree_start_tk = crate::ticks::total();
                 // 試作 `ENOMOTO_MIP_HEUR_ADAPT` の診断: 木の始めの f_g と、その元の量
@@ -14233,7 +14278,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if self.nodes % k == 0 {
                         let rho = (self.nra_rho[0] as f64 + 1.0) / ((self.nra_rho[0] + self.nra_rho[1]) as f64 + 2.0);
                         eprintln!(
-                            "NRA_TRACE tid {} nodes {} t {:.2} inf {} bound {} phi {:.4} f {:.4} rho {:.4} rounds {} tratio {:.4} gsel {:.3e} wsel {:.3e} gtree {:.3e} wtree {:.3e} ntree {} ibase {} ibar {:.1} e_drop {:?} rm_rows {} rm_nnz {} lp_rows {} lp_nnz {}",
+                            "NRA_TRACE tid {} nodes {} t {:.2} inf {} bound {} phi {:.4} f {:.4} rho {:.4} rounds {} tratio {:.4} gsel {:.3e} wsel {:.3e} gtree {:.3e} wtree {:.3e} ntree {} ibase {} ibar {:.1} e_drop {:?} rm_rows {} rm_nnz {} lp_rows {} lp_nnz {} p_inf {:?} ghat {:.3e}",
                             self.pool_tid,
                             self.nodes,
                             self.start.elapsed().as_secs_f64(),
@@ -14255,7 +14300,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             self.nra_stats[1],
                             self.nra_rm_nnz,
                             self.lp.num_rows(),
-                            (0..self.lp.num_rows()).map(|i| self.lp.row_ref(i).len()).sum::<usize>()
+                            (0..self.lp.num_rows()).map(|i| self.lp.row_ref(i).len()).sum::<usize>(),
+                            self.nra_p_stats,
+                            if self.pc_gain[1] > 0.0 { self.pc_gain[0] / self.pc_gain[1] } else { f64::NAN }
                         );
                     }
                 }
@@ -14592,6 +14639,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let mut pse_pending: Option<(f64, u64)> = None;
             let mut pse_nopool = false;
             // 試作 `ENOMOTO_MIP_NODEROWS_ADAPT`: このノードでプールの選び直しのラウンドを回すか (持ち分 1 − f)
+            self.nra_cur_lb = node.lower_bound;
             let mut nra_pool = self.nra_pool_due();
             // `NODEROWS_ADAPT` の `e`: 選び直しのラウンドの前の目的値と、戻した行の最初の番号 (伸びなければその場で外す)
             let mut nra_e_pending: Option<(f64, u64)> = None;
@@ -15038,7 +15086,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.feat[if st == LpStatus::Infeasible { 1 } else { 0 }] += 1;
                         self.nra_leaf(st == LpStatus::Infeasible);
                         // `POOL_CLOSE`: 戻したラウンド・既定のプールのラウンドの後に LP で切れた: 伸びは打ち切り値まで
-                        if pool_close_on() && !self.params.submip {
+                        if pool_gain_on() && !self.params.submip {
                             let lim = self.prune_limit();
                             for o0 in [pcg_pending.take(), pc_pending.take().map(|(o, _)| o)].into_iter().flatten() {
                                 if lim.is_finite() {
@@ -15898,7 +15946,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let (obj_pre, id_pre) = (node_obj, self.next_cut_id);
                     let tk_pre = crate::ticks::total();
                     let added = if poolsel_on() || nra_pool { self.pool_select_round(&x) } else { self.pool_cut_round(&x, max_cuts) };
-                    if added && pool_close_on() && !nra_pool && !poolsel_on() && !self.params.submip {
+                    if added && pool_gain_on() && !nra_pool && !poolsel_on() && !self.params.submip {
                         pcg_pending = Some(obj_pre);
                     }
                     if added && nra_pool && nra_has('e') && !poolsel_on() {
@@ -16305,7 +16353,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let prot = if keep_basis { self.basis_protected_cuts() } else { None };
             // 診断 `ENOMOTO_MIP_DIAG_GLOBALAUDIT` (analysis/globalaudit_20261124、解き方は変えない): 根のノードを分枝するときに、根の定義域が
             // 大域的な境界より締まっている (子に引き継がれず、根へ戻ると捨てる) 列を理由ごとに数える
-            // 試作 `ENOMOTO_MIP_GLOBALFIX` の `a` (analysis/globalfix_20261124): 根のノードの整数列の締め付けを大域的な境界に入れる
+            // `ENOMOTO_MIP_GLOBALFIX` (2026-11-25 から既定) の `a` (analysis/globalfix_20261124): 根のノードの整数列の締め付けを大域的な境界に入れる
             // (子・根へ戻った後・再スタートの判定・ほかのスレッドにも効く)。診断はその後に数える (大域にない残りを出す)
             if node.depth == 0 && node.changes.is_empty() && super::domain::globalfix('a') && !self.params.submip && self.snap.is_none() && !self.dom.infeasible {
                 self.globalfix_root();
@@ -22485,7 +22533,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 試作 `ENOMOTO_MIP_ROOT_OBJPROP_GLOBAL=1`: 根の定義域で行と目的 (`目的値 <= 打ち切り値`) の伝播をかけ、締まった整数列の境界を
-    /// 大域的に置く。目的の伝播は既定では木でも根でも使っておらず (`ENOMOTO_MIP_OBJ_PROP`)、根の打ち切り値つきプロービングの各側の試しの
+    /// 大域的に置く。目的の伝播は (2026-11-25 に `ENOMOTO_MIP_OBJ_PROP` を既定にするまで) 木でも根でも使っておらず、根の打ち切り値つきプロービングの各側の試しの
     /// 中だけで使われていたので、x_j を置かずに出る固定 (fiber で 113 本中 106 本) が大域的な境界に入っていなかった。打ち切り値より良い解に
     /// 対して成り立つので、片側の固定と同じく大域的に置いてよい。連続列は置かない (目的の切りを境界に言い直しただけになり、LP に入ると
     /// 害がある: mas76、[`Self::obj_probe_core`] の `ENOMOTO_MIP_ROOT_OBJ_PROBE_HULL` の注釈)。伝播が矛盾すれば打ち切り値より良い解はないので、
@@ -23389,15 +23437,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if !self.rcs_propagate() {
             return false;
         }
-        // 既定では無効 (`ENOMOTO_MIP_OBJ_PROP` で有効): neos-911970 の下界・暫定解は良くなるが、40 問では 2 回の比較とも
-        // わずかに悪化した (sgeomean +0.2〜0.3)
-        if env_str!("ENOMOTO_MIP_OBJ_PROP").is_none() {
+        // `ENOMOTO_MIP_OBJ_PROP`: **2026-11-25 に既定にした (`ENOMOTO_MIP_OBJ_PROP_INT` と組。`0`・`off` で前の動き = ノードでは伝播しない)。**
+        // 以前は既定で無効だった (40 問で +0.2〜0.6%)。悪化は連続列の境界を打ち切り値に締める形 (mas76) から来ていて、連続列を締めない形
+        // (`OBJ_PROP_INT`) では P (analysis/objprop_20261124 3.2・5 節) で同じビルドの既定との比が 1 スレッド 0.989 [0.979, 0.999]・4 スレッド 1.004、
+        // 食い違い 0、解けた数の減りは上限ぎわと道筋の違い
+        if env_def!("ENOMOTO_MIP_OBJ_PROP", "1").is_none() {
             return !self.dom.infeasible;
         }
         self.propagate_objective_with(true)
     }
 
-    /// 強分枝の子の伝播で使う目的の伝播 ([`sb_objprop`] なら `ENOMOTO_MIP_OBJ_PROP` を見ずに伝播する)
+    /// 強分枝の子の伝播で使う目的の伝播 ([`sb_objprop`] なら `ENOMOTO_MIP_OBJ_PROP` を見ずに伝播する。`OBJ_PROP` は 2026-11-25 から既定)
     fn propagate_objective_sb(&mut self) -> bool {
         if sb_objprop() {
             return self.rcs_propagate() && self.propagate_objective_with(true);
@@ -24286,7 +24336,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if l.is_empty() {
             return false;
         }
-        // 試作 `ENOMOTO_MIP_GLOBALFIX` の `c` (analysis/globalfix_20261124): 長さ 1 の衝突 (大域的に成り立つリテラルを除いた後) は、そのリテラルの
+        // `ENOMOTO_MIP_GLOBALFIX` (2026-11-25 から既定) の `c` (analysis/globalfix_20261124): 長さ 1 の衝突 (大域的に成り立つリテラルを除いた後) は、そのリテラルの
         // 否定が全ての (打ち切り値より良い) 解で成り立つ = 大域的な固定。否定はプールの伝播 (conflict_pool.rs の「否定」) と同じ形
         // (`x <= v` の否定は整数列 `x >= floor(v) + 1`・連続列 `x >= v`)。プールにもそのまま入れる (ほかの振る舞いは変えない)
         // `k` は `c` を整数列だけにしたもの (連続列は大域にせずプールだけに入れる。`a` が連続列を除くのと同じ理由。pk1 で `c` の大域的な締め付けの
@@ -24940,7 +24990,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         big
     }
 
-    /// 試作 `ENOMOTO_MIP_GLOBALFIX` の `a` (analysis/globalfix_20261124): 根のノード (深さ 0、分枝の変更なし) を分枝する時点で、定義域が
+    /// `ENOMOTO_MIP_GLOBALFIX` (2026-11-25 から既定) の `a` (analysis/globalfix_20261124): 根のノード (深さ 0、分枝の変更なし) を分枝する時点で、定義域が
     /// 大域的な境界より締まっている整数列の境界を `tighten_global` で大域的な境界に入れる。根のノードの定義域は「大域的な境界 + 大域的に
     /// 成り立つ推論 (行・双対証明・衝突・カットの伝播) + 打ち切り値より良い解だけを残す推論 (被約費用・強分枝の片側・目的の伝播)」なので、
     /// 打ち切り値より良い全ての解で成り立つ (根の被約費用の固定と同じ根拠)。根のノードの LP の値を子の下界に使うのも同じ前提。
@@ -30082,10 +30132,11 @@ fn sb_objprop() -> bool {
     env_str!("ENOMOTO_MIP_SB_OBJPROP").is_some()
 }
 
-/// 試作 `ENOMOTO_MIP_OBJ_PROP_INT=1`: 目的の行の伝播 ([`Solver::propagate_objective_with`]) で連続列の境界を締めない
+/// `ENOMOTO_MIP_OBJ_PROP_INT`: 目的の行の伝播 ([`Solver::propagate_objective_with`]、ノード・根の打ち切り値つきプロービングなど) で
+/// 連続列の境界を締めない (最小活動量と刈りの判定にだけ使う)。打ち切り値を連続の目的の列の上限に言い直すと LP に害 (mas76、analysis/objprop_20261124 3.1 節)。
+/// **2026-11-25 に既定にした (`ENOMOTO_MIP_OBJ_PROP` と組)。`0`・`off` で前の動き (連続列も締める)。**
 fn obj_prop_int() -> bool {
-    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| env_str!("ENOMOTO_MIP_OBJ_PROP_INT").is_some_and(|v| v != "0"))
+    env_def!("ENOMOTO_MIP_OBJ_PROP_INT", "1").is_some()
 }
 
 pub(crate) fn objprobe_flags() -> Option<&'static str> {
