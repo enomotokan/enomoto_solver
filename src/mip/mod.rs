@@ -682,10 +682,10 @@ pub fn solve_mip(
         if let Some(x) = r.x.as_mut() {
             // `ENOMOTO_MIP_LATE_NO_RESOLVE`: 時間を使い切っていれば研磨の LP は解かない (整数の丸めと目的値の計算し直しだけ)。
             // 研磨は元の問題の前処理 + LP で 0.2-0.35 秒かかり、時間の上限の超過の残りの大半だった (uccase12・physiciansched6-2)
-            // 試作 `ENOMOTO_MIP_POLISH_STRICT` (既定では使わない。analysis/nattai_20261125/): 時間を使い切っていても研磨し、研磨の LP に期限を渡さない。
+            // `ENOMOTO_MIP_POLISH_STRICT` (2026-11-25 から既定。analysis/nattai_20261125/): 時間を使い切っていても研磨し、研磨の LP に期限を渡さない。
             // 時間切れの回の暫定解は研磨されず、B&B の LP の許容誤差の範囲の違反 (行ごとには 1e-6 以下) が積もって、目的値が本当の値より
             // 低いまま返っていた (neos-5188808-nattai: 0.12230 と返した解の整数を固定した LP は 0.12240、既知の最適値 0.110284 より良い 0.110186 も返した)
-            // 試作 `ENOMOTO_MIP_POLISH_WARM`: 返す解は木の求解の終わりに問題の空間で研磨してあるので、ここは既定と同じ扱い (時間を使い切って
+            // `ENOMOTO_MIP_POLISH_WARM`: 返す解は木の求解の終わりに問題の空間で研磨してあるので、ここは既定と同じ扱い (時間を使い切って
             // いれば解かない・期限を渡す) にし、取り替えなければ木の求解の終わりに置いた漏れの見積り ([`WARM_LEAK`]) を足す
             let warm = polish_strict() && polish_warm_mode() > 0;
             let strict = polish_strict() && !warm;
@@ -830,15 +830,20 @@ fn exact_objective(p: &MipProblem, x: &[f64]) -> f64 {
 /// 解き直した解は、元の問題の違反 (境界・行) が増えず目的値が悪くならないとき、または違反が真に減って目的値の悪化が
 /// 相対 1e-6 以下のときに採る。最小化形の目的値を返す
 /// (誤差補償つきの和)。`ENOMOTO_MIP_NO_POLISH` なら丸めと目的値の計算し直しだけ。
-/// 試作 `ENOMOTO_MIP_POLISH_STRICT` (既定では使わない。analysis/nattai_20261125/) の段階: 0 = 使わない、
+/// `ENOMOTO_MIP_POLISH_STRICT` (analysis/nattai_20261125/) の段階: 0 = 使わない、
 /// 1 = [`polish_solution`] を時間切れの回でも回し、違反が減る解き直しは目的値が悪くなっても採る、
 /// 2 = 1 に加えて、暫定解を受け入れるたびに [`polish_in_problem`] で研磨し、打ち切り値・共有する最良値も研磨した値にする
+/// (`ENOMOTO_MIP_POLISH_WARM` の既定では [`polish_in_problem_warm`] で温めて研磨する)。
+/// **2026-11-25 に既定にした: 値 `2` (`ENOMOTO_MIP_POLISH_WARM=d` と組)。`0`・`off` で前の動き (使わない)。**
+/// 根拠: analysis/polishp_20261125/ の P 58 問 × 種 1〜3 × 1・4 スレッド (1044 回、README の「P 全体での WARM=d の比べ」):
+/// 1 スレッド 0.998 [0.989, 1.006]・解けた 118→123、4 スレッド 0.995 [0.979, 1.012]・139→139、食い違い 0、60.5 秒の超過 0。
+/// 返す目的値が許容誤差の漏れで本当の値より低くなる問題 (neos-5188808-nattai で 1e-4) を正す
 pub(super) fn polish_strict_mode() -> u8 {
     static V: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
-    *V.get_or_init(|| match env_str!("ENOMOTO_MIP_POLISH_STRICT") {
+    *V.get_or_init(|| match env_def!("ENOMOTO_MIP_POLISH_STRICT", "2") {
         Some(v) if v == "2" => 2,
-        Some(v) if v != "0" => 1,
-        _ => 0,
+        Some(_) => 1,
+        None => 0,
     })
 }
 
@@ -907,7 +912,9 @@ pub(super) fn polish_in_problem(p: &MipProblem, x: &mut Vec<f64>, z: f64) -> Opt
     out
 }
 
-/// 試作 `ENOMOTO_MIP_POLISH_WARM` (既定では使わない。`ENOMOTO_MIP_POLISH_STRICT` と組で使う。analysis/nattai_20261125/):
+/// `ENOMOTO_MIP_POLISH_WARM` (`ENOMOTO_MIP_POLISH_STRICT` と組で使う。analysis/nattai_20261125/。
+/// **2026-11-25 に既定にした: 値 `d`。`0`・`off` で使わない (研磨の LP を前処理つきで一から解き、期限を渡さない前の形)。**
+/// 根拠は [`polish_strict_mode`] と同じ。dano3_3・dano3_5 の時間切れの回で上限を越えない (60.02 秒。期限なしでは 73〜78 秒)):
 /// 0 = 使わない、1 = 研磨の LP を B&B の LP の基底から温めて解く (返す前の研磨には期限を渡さない)、
 /// 2 (`d`) = 1 に加えて返す前の研磨にも期限を渡し、間に合わなければ漏れの見積り ([`solver::Solver::leak_estimate`]) で目的値を正す、
 /// 3 (`e`) = 研磨の LP を解かず、いつも漏れの見積りで目的値を正す。
@@ -917,11 +924,11 @@ pub(super) fn polish_in_problem(p: &MipProblem, x: &mut Vec<f64>, z: f64) -> Opt
 /// または双対値で最適と示せた今の LP) のもの
 pub(super) fn polish_warm_mode() -> u8 {
     static V: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
-    *V.get_or_init(|| match env_str!("ENOMOTO_MIP_POLISH_WARM") {
+    *V.get_or_init(|| match env_def!("ENOMOTO_MIP_POLISH_WARM", "d") {
         Some(v) if v == "e" => 3,
         Some(v) if v == "d" => 2,
-        Some(v) if v != "0" => 1,
-        _ => 0,
+        Some(_) => 1,
+        None => 0,
     })
 }
 
