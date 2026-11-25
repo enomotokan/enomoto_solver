@@ -9359,6 +9359,10 @@ fn enumerate_rows(prob: &MipProblem, dom: &mut domain::Domain, bin0: &[bool], mu
     let all = enum_presolve_mode().is_some_and(|v| v.starts_with("all"));
     let max_rows = if all { usize::MAX } else { tunable!("ENOMOTO_T_MIP_ENUM_ROWS", 400usize, usize) };
     let max_fails = if all { usize::MAX } else { tunable!("ENOMOTO_T_MIP_ENUM_FAILS", 6usize, usize) };
+    // 試作 `ENOMOTO_MIP_ENUM_ADAPT` の `s` ([`enum_adapt_midstop`]): 列挙の途中の得 (固定・締め付け・同値な組。衝突の組は数えない) と時間。
+    // 時計は候補の行を並べ、重なりの多い行を外す所 (行の数の 2 乗の手間。neos-950242 は 28968 行で約 4 秒) から数える
+    let mid = enum_adapt_mid_on();
+    let (te0, el0, mut gain_mid) = (std::time::Instant::now(), enum_elapsed(), 0usize);
     let row_vars = |dom: &domain::Domain, i: usize| -> Option<Vec<usize>> {
         let mut v = Vec::new();
         for &(j, _) in &prob.rows[i] {
@@ -9395,6 +9399,13 @@ fn enumerate_rows(prob: &MipProblem, dom: &mut domain::Domain, bin0: &[bool], mu
         }
         keep.push((rows[a].1, rows[a].2.clone()));
         if keep.len() >= max_rows {
+            break;
+        }
+        // `ENOMOTO_MIP_ENUM_ADAPT` の `s`: 重なりを外す間も (得はまだ 0 として) 同じ判定を当てる
+        if mid && keep.len() % 16 == 0 && enum_adapt_midstop(0, prob.n, te0.elapsed().as_secs_f64(), el0) {
+            if env_str!("ENOMOTO_MIP_LOG").is_some() {
+                eprintln!("MIP: ENUM_ADAPT s: stopped choosing the rows after {} of {} candidate rows ({:.2}s, {el0:.2}s elapsed at the start)", keep.len(), rows.len(), te0.elapsed().as_secs_f64());
+            }
             break;
         }
         let va = &rows[a].2;
@@ -9470,9 +9481,6 @@ fn enumerate_rows(prob: &MipProblem, dom: &mut domain::Domain, bin0: &[bool], mu
     }
     let mut out: Vec<(usize, bool, f64)> = Vec::new();
     let (mut fails, mut done, mut nsol) = (0usize, 0usize, 0usize);
-    // 試作 `ENOMOTO_MIP_ENUM_ADAPT` の `s` ([`enum_adapt_midstop`]): 列挙の途中の得 (固定・締め付け・同値な組。衝突の組は数えない) と時間
-    let mid = enum_adapt_mid_on();
-    let (te0, el0, mut gain_mid) = (std::time::Instant::now(), enum_elapsed(), 0usize);
     for (i, _) in &keep {
         if done % 16 == 0 && presolve_stop() {
             break;
