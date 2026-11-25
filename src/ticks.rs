@@ -91,11 +91,30 @@ pub fn add(k: usize, n: u64) {
     RAW.with(|r| r[k].set(r[k].get().wrapping_add(n)));
 }
 
+/// 試作 `ENOMOTO_MIP_SUBMIP_TICKS` の文字 `c` (analysis/workcount_20261125、既定では使わない)。`1` は全部の文字
+pub fn submip_ticks(c: char) -> bool {
+    static V: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    V.get_or_init(|| std::env::var("ENOMOTO_MIP_SUBMIP_TICKS").ok().filter(|v| !v.is_empty() && v != "0")).as_deref().is_some_and(|v| v.contains(c) || v.contains('1'))
+}
+
+/// 試作 `ENOMOTO_MIP_SUBMIP_TICKS` の `d`: 診断用の手間 ([`diag_add`]、zero-half・clique・implied bound の分離器) も合計に入れる重み (入れないなら 0)
+fn diag_weight() -> f64 {
+    static W: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *W.get_or_init(|| if submip_ticks('d') { tunable!("ENOMOTO_T_TICKS_W_DIAG", 2.0, f64) } else { 0.0 })
+}
+
 /// このスレッドの重み付きの手間の合計。
+/// 試作 `ENOMOTO_MIP_SUBMIP_TICKS` の `d` なら、診断用の手間 ([`diag_add`]) も重み `ENOMOTO_T_TICKS_W_DIAG` で足す
 #[inline]
 pub fn total() -> f64 {
     let w = weights();
-    RAW.with(|r| (0..NK).map(|k| w[k] * r[k].get() as f64).sum())
+    let wd = diag_weight();
+    let base: f64 = RAW.with(|r| (0..NK).map(|k| w[k] * r[k].get() as f64).sum());
+    if wd > 0.0 {
+        base + wd * DIAG.with(|c| c.get()) as f64
+    } else {
+        base
+    }
 }
 
 thread_local! {
@@ -113,6 +132,9 @@ pub fn diag_add(n: u64) {
 /// このスレッドの [`total`] + 診断用の手間 ([`diag_add`]) (診断用)。診断用の手間の 1 単位は `ENOMOTO_T_TICKS_W_DIAG` (既定 2、
 /// 単位はビット列の 1 語の xor・隣接の 1 要素ほどの軽い操作で、seymour・nw04 の根で zero-half・implied bound・clique の時間とおよそ合う)
 pub fn total_with_diag() -> f64 {
+    if diag_weight() > 0.0 {
+        return total();
+    }
     total() + tunable!("ENOMOTO_T_TICKS_W_DIAG", 2.0, f64) * DIAG.with(|c| c.get()) as f64
 }
 

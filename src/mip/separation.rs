@@ -4640,6 +4640,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 値は内部の向き (最小化、前処理の定数項を足したもの)。`sense` を掛けると元の問題の向き
     #[allow(clippy::too_many_arguments)]
     fn cutstop_log(&self, reason: &str, rounds: usize, max_rounds: usize, phase2: bool, stall: usize, intobj_stall: usize, first_obj: f64, t_loop: std::time::Instant, bg: bool, lp_ok: Option<bool>) {
+        // 診断 `ENOMOTO_MIP_WORKCOUNT_DIAG` (analysis/workcount_20261125): サブ MIP を含め、根のカットのループの止まった理由を出す
+        if env_str!("ENOMOTO_MIP_WORKCOUNT_DIAG").is_some() {
+            eprintln!("WCDIAG cutstop{}: {reason} at round {rounds} (wall {:.3}s, deadline left {:?})", if self.params.submip { " (sub)" } else { "" }, t_loop.elapsed().as_secs_f64(), self.deadline.map(|d| d.saturating_duration_since(std::time::Instant::now()).as_secs_f64()));
+        }
         if self.params.submip || env_str!("ENOMOTO_MIP_CUTSTOP_LOG").is_none_or(|v| v == "0") {
             return;
         }
@@ -8953,14 +8957,21 @@ fn finish_cut_impl(
             mag.push((j, v.abs()));
         }
     };
+    // 試作 `ENOMOTO_MIP_SUBMIP_TICKS` の `c` (analysis/workcount_20261125): 仕上げで触った非零 (生のカットの項・代入した LP の行) を分離の手間に数える
+    // (仕上げは手間を数えておらず、表の行のカットの多い根のカットのループで、手間が CPU の約半分にしか数えられていなかった)
+    let mut fin_work = raw.coefs.len() as u64;
     for &(k, c) in &raw.coefs {
         if k < n {
             add(k, c, scratch, &mut touched, &mut mag);
         } else {
+            fin_work += lp_rows[k - n].len() as u64;
             for &(j, a) in &lp_rows[k - n] {
                 add(j, c * a, scratch, &mut touched, &mut mag);
             }
         }
+    }
+    if crate::ticks::submip_ticks('c') {
+        crate::ticks::add(crate::ticks::SEP, fin_work + touched.len() as u64);
     }
     touched.sort_unstable();
     let mut dense: Vec<(usize, f64)> = Vec::with_capacity(touched.len());
