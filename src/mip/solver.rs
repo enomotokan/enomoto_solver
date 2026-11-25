@@ -805,6 +805,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) nra_age_tick: u64,
     /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `3` ([`Solver::nra_k3_young`]): nra が外した行の指紋 → (外したときの年齢, そのときの `nra_age_tick`)
     pub(super) nra_rm_age: std::collections::HashMap<u64, (u32, u64)>,
+    /// 試作 `ENOMOTO_MIP_POOL_CLOSE` ([`pool_close_on`]): プールから戻すラウンドの下界の伸びの [和, 回数] (見込める伸びの平均に使う)
+    pub(super) pc_gain: [f64; 2],
+    /// 試作 `ENOMOTO_MIP_POOL_CLOSE` の数: [戻した回, 刈れた回, 戻した行, 手間 (ticks)]
+    pub(super) pc_stats: [f64; 4],
     /// 診断用: 効き目で続けるノードの分離の結果の内訳 (打ち切り、伸び/差が 0.02 未満、0.1 未満、0.3 未満、0.3 以上)
     pub(super) nca_hist: [u64; 5],
     /// ノードで加えたカットの非零の数の指数移動平均 (`ENOMOTO_T_MIP_NODE_CUT_ADAPT_DENSITY`、[`Solver::nca_dense`])。
@@ -5722,6 +5726,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         nra_rm_nnz: 0,
         nra_age_tick: 0,
         nra_rm_age: std::collections::HashMap::new(),
+        pc_gain: [0.0; 2],
+        pc_stats: [0.0; 4],
         nca_hist: [0; 5],
         tdd: if super::treedepth::on() && !params.submip { Some(Box::default()) } else { None },
         nca_cut_nnz: None,
@@ -6352,6 +6358,14 @@ pub(super) fn ncl_has(c: char) -> bool {
 /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` (既定では使わない、analysis/nodespeed_20261123/README.md 8 節): [`Solver::nra_f`]
 pub(super) fn nra_on() -> bool {
     env_str!("ENOMOTO_MIP_NODEROWS_ADAPT").is_some()
+}
+
+/// 試作 `ENOMOTO_MIP_POOL_CLOSE=1` (既定では使わない、analysis/poolclose_20261125/README.md): 閉じる直前のノード (打ち切り値 U と
+/// ノードの LP の値 z の差が、プールから戻すラウンドで見込める伸び以下) で、プールの破られたカットを全部 LP に戻して解き直す。
+/// 刈れれば終わり、刈れなければ戻した行をすぐ外し (子に持ち越さない)、伸びた値をこのノードの子の下界にする
+pub(super) fn pool_close_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_MIP_POOL_CLOSE").is_some_and(|v| v != "0"))
 }
 
 /// 試作 `ENOMOTO_MIP_NRA_ORDER` = `a`・`b`・`c`・`d` (既定 `a`、analysis/comboharm_20261124/README.md 11 節): NODEROWS_ADAPT の外す行の並べ方
@@ -14581,6 +14595,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let mut nra_pool = self.nra_pool_due();
             // `NODEROWS_ADAPT` の `e`: 選び直しのラウンドの前の目的値と、戻した行の最初の番号 (伸びなければその場で外す)
             let mut nra_e_pending: Option<(f64, u64)> = None;
+            // `POOL_CLOSE`: [戻す前の目的値, 戻した行の最初の番号] (解き直しの結果で刈れたか見る)・このノードでもう試したか・伸びた下界・
+            // 手間の起点・既定のプールのラウンドの前の目的値 (伸びを測る)
+            let mut pc_pending: Option<(f64, u64)> = None;
+            let mut pc_done = false;
+            let mut pc_lb = f64::NEG_INFINITY;
+            let mut pc_tk0: Option<f64> = None;
+            let mut pcg_pending: Option<f64> = None;
             // `NODEROWS_ADAPT` の `r`: 選び直しのラウンドの前の目的値 (解き直しで伸びたかを数える)
             let mut nra_pending: Option<f64> = None;
             // `NODEROWS_ADAPT` の `t`: 選び直しのラウンドの前の目的値と手間 (ticks)、ノードの処理の始めの手間 ([`Self::nra_t_ratio`])
@@ -15016,6 +15037,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                         self.feat[if st == LpStatus::Infeasible { 1 } else { 0 }] += 1;
                         self.nra_leaf(st == LpStatus::Infeasible);
+                        // `POOL_CLOSE`: 戻したラウンド・既定のプールのラウンドの後に LP で切れた: 伸びは打ち切り値まで
+                        if pool_close_on() && !self.params.submip {
+                            let lim = self.prune_limit();
+                            for o0 in [pcg_pending.take(), pc_pending.take().map(|(o, _)| o)].into_iter().flatten() {
+                                if lim.is_finite() {
+                                    self.pc_gain[0] += (lim - o0).max(0.0);
+                                    self.pc_gain[1] += 1.0;
+                                }
+                            }
+                            if let Some(tk0) = pc_tk0.take() {
+                                self.pc_stats[1] += 1.0;
+                                self.pc_stats[3] += crate::ticks::total() - tk0;
+                            }
+                        }
                         if nra_t_on {
                             let lim = self.prune_limit();
                             let tk = crate::ticks::total();
@@ -15072,6 +15107,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 node_obj = self.lp.objective() + self.p.offset;
                 if let Some(obj0) = nra_pending.take() {
                     self.nra_rho[usize::from(node_obj <= obj0 + 1e-6 * (1.0 + obj0.abs()))] += 1;
+                }
+                if let Some(o0) = pcg_pending.take() {
+                    self.pc_gain[0] += (node_obj - o0).max(0.0);
+                    self.pc_gain[1] += 1.0;
                 }
                 if nra_t_on {
                     let tk = crate::ticks::total();
@@ -15200,7 +15239,68 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if self.dbg_on {
                         self.dbg_lost(&format!("node LP objective {node_obj}"), dn && self.dbg_contains());
                     }
+                    // `POOL_CLOSE`: 戻して解き直したら打ち切り値に届いた (刈れた)
+                    if let Some((o0, _)) = pc_pending.take() {
+                        let lim = self.prune_limit();
+                        if lim.is_finite() {
+                            self.pc_gain[0] += (lim - o0).max(0.0);
+                            self.pc_gain[1] += 1.0;
+                        }
+                        self.pc_stats[1] += 1.0;
+                        if let Some(tk0) = pc_tk0.take() {
+                            self.pc_stats[3] += crate::ticks::total() - tk0;
+                        }
+                    }
                     break None;
+                }
+                // `POOL_CLOSE` ([`pool_close_on`]): 戻した行を外して解き直した後なら、その手間を数える
+                if let (Some(tk0), None) = (pc_tk0, pc_pending) {
+                    if pc_done {
+                        self.pc_stats[3] += crate::ticks::total() - tk0;
+                        pc_tk0 = None;
+                    }
+                }
+                if let Some((obj0, id0)) = pc_pending.take() {
+                    // 戻して解き直しても刈れなかった: 伸びた値を子の下界にし、戻した行をすぐ外して解き直す (子に持ち越さない)
+                    self.pc_gain[0] += (node_obj - obj0).max(0.0);
+                    self.pc_gain[1] += 1.0;
+                    pc_lb = pc_lb.max(node_obj);
+                    let m0 = self.p.m;
+                    let mr = self.lp.num_rows();
+                    let mut remove = vec![false; mr];
+                    let mut cnt = 0usize;
+                    for k in 0..self.cut_ids.len().min(mr.saturating_sub(m0)) {
+                        if self.cut_ids[k] >= id0 {
+                            remove[m0 + k] = true;
+                            cnt += 1;
+                        }
+                    }
+                    if cnt > 0 {
+                        self.sync_cut_age();
+                        self.delete_lp_rows(&remove);
+                        resolves += 1;
+                        continue;
+                    }
+                } else if pool_close_on() && !pc_done && !self.params.submip && self.pc_gain[1] > 0.0 && !self.cut_pool.is_empty() {
+                    // 見込める伸び = これまでのプールから戻すラウンド (既定のラウンドとこのラウンド) の伸びの平均。U − z がそれ以下なら戻す
+                    let lim = self.prune_limit();
+                    let ghat = self.pc_gain[0] / self.pc_gain[1];
+                    if lim.is_finite() && lim - node_obj <= ghat {
+                        pc_done = true;
+                        let x0 = self.lp.col_values();
+                        let viol = self.pool_violated(&x0);
+                        if !viol.is_empty() {
+                            let rows: Vec<(Vec<(usize, f64)>, f64, f64)> = viol.iter().map(|&(_, k)| (self.cut_pool[k].0.clone(), f64::NEG_INFINITY, self.cut_pool[k].1)).collect();
+                            let id0 = self.next_cut_id;
+                            self.pc_stats[0] += 1.0;
+                            self.pc_stats[2] += rows.len() as f64;
+                            pc_tk0 = Some(crate::ticks::total());
+                            self.add_cut_rows(&rows);
+                            pc_pending = Some((node_obj, id0));
+                            resolves += 1;
+                            continue;
+                        }
+                    }
                 }
                 let x = self.lp.col_values();
                 let frac = self.fractional(&x);
@@ -15798,6 +15898,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let (obj_pre, id_pre) = (node_obj, self.next_cut_id);
                     let tk_pre = crate::ticks::total();
                     let added = if poolsel_on() || nra_pool { self.pool_select_round(&x) } else { self.pool_cut_round(&x, max_cuts) };
+                    if added && pool_close_on() && !nra_pool && !poolsel_on() && !self.params.submip {
+                        pcg_pending = Some(obj_pre);
+                    }
                     if added && nra_pool && nra_has('e') && !poolsel_on() {
                         nra_e_pending = Some((obj_pre, id_pre));
                     }
@@ -16104,7 +16207,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 子ノードを作る
             // LP が解けずに分けたノード (node_obj = -inf) でも、親の下界は子でも成り立つ
             let lp_obj = node_obj;
-            let node_obj = node_obj.max(node.lower_bound);
+            // `POOL_CLOSE`: 戻して解き直したときの値 (刈れなかったが伸びた分) も子の下界にする
+            let node_obj = node_obj.max(node.lower_bound).max(pc_lb);
             // `ENOMOTO_MIP_POOL2_DIAG` + `ENOMOTO_T_MIP_POOL2_DIAG_REF` = r (一時の診断): 下界が r のノードを分けたとき、LP の値も r のままか
             if pool2_diag() {
                 let r = tunable!("ENOMOTO_T_MIP_POOL2_DIAG_REF", f64::NAN, f64);
@@ -29525,6 +29629,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if sb_agree_on() {
                 eprintln!("MIP: branching: strong branching vs pseudocost: {} of {} agreed, {} nodes without strong branching", self.sb_agree_stats[1], self.sb_agree_stats[0], self.sb_agree_stats[2]);
+            }
+            if pool_close_on() {
+                let c = self.pc_stats;
+                eprintln!(
+                    "MIP: POOL_CLOSE (tid {}): rounds {} pruned {} rows {} ticks {:.3e}; pool round gains n {} mean {:.4e}",
+                    self.pool_tid, c[0], c[1], c[2], c[3], self.pc_gain[1], if self.pc_gain[1] > 0.0 { self.pc_gain[0] / self.pc_gain[1] } else { f64::NAN }
+                );
             }
             eprintln!(
                 "MIP: marginal LP infeasibility (all threads, cumulative): checked with a fresh LP {} no conclusion {} strong branching children unknown {} root and LP probing {} fresh LP feasible {}",
