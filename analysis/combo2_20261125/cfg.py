@@ -28,7 +28,9 @@ C2 = {
 }
 C2A = dict(C2)
 C2B = dict(C2, ENOMOTO_MIP_SB_ADAPT="1")
-P1 = {1: ("c2a", C2A, True, True, "combo2_20261125"), 2: ("c2b", C2B, True, True, "combo2_20261125")}
+# c2c (親の追加、利用者の問いを受けて): c2 + SB_PROBEBD=1 (強分枝の子の伝播を常に使う。src/mip/solver.rs で値があれば有効、`2` 以外は同じ形)
+C2C = dict(C2, ENOMOTO_MIP_SB_PROBEBD="1")
+P1 = {1: ("c2a", C2A, True, True, "combo2_20261125"), 2: ("c2b", C2B, True, True, "combo2_20261125"), 3: ("c2c", C2C, True, True, "combo2_20261125")}
 CFGS = {"def_t1": {}, "def_t4": {}}
 for k, (name, env, t1, t4, _) in P1.items():
     if t1: CFGS[f"{name}_t1"] = env

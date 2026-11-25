@@ -104,3 +104,31 @@ if PERPROB:
         if d is None: continue
         pp = d["perprob"]
         print(f"{k} {name}_{th}: " + " ".join(f"{p} {pp[p]:.2f}" for p in sorted(pp, key=lambda q: pp[q])))
+
+# c2c と c2a の問題ごとの比べ (親の依頼): 種ごとの比 (ずらし 10 秒) が、種をまたいで同じ向きか。
+# 全種で c2c が遅い (比 > 1) か全種で速い (比 < 1) なら「同じ向き」(仕組みの見込み)、種で向きが変われば「変わる」(運の見込み)。
+# 両方とも解けない (上限同士) の種は比が 1 なので向きに数えない。問題単位の比 (種の幾何平均) の大きい順に、1.25 倍超か 0.8 倍未満の問題を出す。
+def pairdir(a_cfg, b_cfg, th):
+    a, b = f"{a_cfg}_{th}", f"{b_cfg}_{th}"
+    out = []
+    for p in sorted({p for (p, c, s) in R if c == a}):
+        ss = [s for s in (1, 2, 3) if (p, a, s) in R and (p, b, s) in R]
+        if not ss: continue
+        rs = [(t(R[(p, a, s)]) + SH) / (t(R[(p, b, s)]) + SH) for s in ss]
+        g = math.exp(sum(math.log(x) for x in rs) / len(rs))
+        sig = [x for x in rs if x != 1.0]
+        d = "同じ向き" if sig and (all(x > 1 for x in sig) or all(x < 1 for x in sig)) else ("—" if not sig else "変わる")
+        out.append((p, g, rs, d))
+    return out
+if any(c.startswith("c2c_") for (_, c, _) in R):
+    for th in ("t1", "t4"):
+        pd = pairdir("c2c", "c2a", th)
+        if not pd: continue
+        big = sorted([x for x in pd if x[1] > 1.25 or x[1] < 0.8], key=lambda x: -x[1])
+        n_same = sum(1 for x in big if x[3] == "同じ向き")
+        print(f"== c2c / c2a ({th}): 問題ごとの比が 1.25 倍超か 0.8 倍未満の {len(big)} 問のうち、種をまたいで同じ向き {n_same} 問\n")
+        print("| 問題 | 比 (種の幾何) | 種ごとの比 | 向き | 前回の原因 |")
+        print("|---|---:|---|---|---|")
+        for p, g, rs, d in big:
+            print(f"| {p} | {g:.2f} | {' / '.join(format(x, '.2f') for x in rs)} | {d} | {cause(p, th).split(' (')[0]} |")
+        print()
