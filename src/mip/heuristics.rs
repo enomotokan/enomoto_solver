@@ -1211,6 +1211,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         // 試作 `ENOMOTO_MIP_HEUR_ADAPT` ([`super::solver::heur_adapt`]): ノードと時間の上限に f_g を掛ける (`FP_STAGE3` だけなら 1)
         let fa = if super::solver::heur_adapt() && env_str!("ENOMOTO_MIP_FP_STAGE3").is_none() { self.adapt_gap_f() } else { 1.0 };
+        // 試作 `ENOMOTO_MIP_SUBMIP_TICKS` の `f` (analysis/workcount_20261125): 残り時間を手間で数える (手間の期限があればその残り、なければ
+        // 元の時間の上限 − 手間の経過。`ENOMOTO_MIP_TICKS` の `s`・`u` と同じ)。サブ MIP は手間の期限で止め、時間の上限は 10 倍の安全網。
+        // 壁時計の残りで上限を決めると、サブ MIP の中で第 3 段を回したとき、止まる所が回ごとに変わっていた (neos-1582420)
+        let tk_f = crate::ticks::submip_ticks('f');
+        let remaining = if tk_f {
+            if crate::ticks::has_budget() {
+                crate::ticks::left() * 1e-9
+            } else {
+                (self.params.frac_tl() - (crate::ticks::total() - self.ticks0) * 1e-9).max(0.0)
+            }
+        } else {
+            remaining
+        };
+        let wall_left = match self.deadline {
+            Some(d) => d.saturating_duration_since(std::time::Instant::now()).as_secs_f64(),
+            None => f64::INFINITY,
+        };
         let mut cap = fa * (0.1 * remaining).min(10.0);
         // 試作 `ENOMOTO_MIP_FP_STAGE3_LS` (既定では使わない。analysis/fpstage3ls_20261125): 第 3 段を、`r` を出発点にした FJ2・Local-MIP
         // (前処理の早めの探索 [`super::feas_fj_lmip_early`] の 1 本の形、手間の期限も同じ物差し) で解く。予算は第 3 段のサブ MIP と同じ秒の上限。
@@ -1219,13 +1236,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let ls = env_str!("ENOMOTO_MIP_FP_STAGE3_LS").filter(|v| *v != "0");
         if let Some(mode) = ls {
             let t = std::time::Instant::now();
+            let tk_ls0 = crate::ticks::total();
             if self.fp_stage3_ls(r, &lo, &up, cap, mode == "b") {
                 return true;
             }
             if mode != "b" {
                 return false;
             }
-            cap -= t.elapsed().as_secs_f64();
+            cap -= if tk_f { (crate::ticks::total() - tk_ls0) * 1e-9 } else { t.elapsed().as_secs_f64() };
             if cap <= 0.0 || self.time_up() {
                 return false;
             }
@@ -1263,8 +1281,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         let sub = super::problem::MipProblem::from_rows(lo, up, cost, offset, 1.0, p.is_int.clone(), rows, row_lo, row_up);
+        // `SUBMIP_TICKS` の `f`: 時間の上限は手間の上限の 10 倍 (壁時計の残りで頭打ち) の安全網
+        let time_limit = if tk_f { (10.0 * cap).min(wall_left) } else { cap };
         let params = super::solver::MipParams {
-            time_limit: cap,
+            time_limit,
             node_limit: ((500.0 * fa).round() as u64).max(1),
             rel_gap: 0.0,
             abs_gap: 1e-9,
@@ -1280,7 +1300,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 乱数の種は親のものを渡す
             seed: self.params.seed,
         };
+        let tk_prev = tk_f.then(|| crate::ticks::push_budget(cap.max(0.0) * 1e9));
         let res = super::solve_problem(&sub, params, true);
+        if let Some(prev) = tk_prev {
+            crate::ticks::pop_budget(prev);
+        }
         self.heur_iters += res.lp_iterations;
         let ok = match res.x {
             Some(x) => {
@@ -2154,6 +2178,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if env_str!("ENOMOTO_MIP_DET_DIAG").is_some() && !self.params.submip {
             eprintln!("DET_DIAG submip: tk_u {tk_u} budget {:?} time_limit {time_limit:.3} u_set {u_set} parallel {} has_budget {} nodes {}", tk_u_budget.map(|b| b * 1e-9), self.parallel_submips, crate::ticks::has_budget(), self.nodes);
         }
+        // 診断 `ENOMOTO_MIP_WORKCOUNT_DIAG` (analysis/workcount_20261125): サブ MIP の中のサブ MIP も含め、手間の期限と時間の上限を出す
+        if env_str!("ENOMOTO_MIP_WORKCOUNT_DIAG").is_some() {
+            eprintln!("WCDIAG submip start{} ({}): budget {:?} time_limit {time_limit:.3} ticks left {:.3} wall left {:?}", if self.params.submip { " (in a sub-MIP)" } else { "" }, self.heur_label, tk_u_budget.map(|b| b * 1e-9), crate::ticks::left() * 1e-9, self.deadline.map(|d| d.saturating_duration_since(Instant::now()).as_secs_f64()));
+        }
         let time_limit = if u_set {
             super::solver::SUBMIP_ITER_CAP.with(|c| c.set(u_cap));
             let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
@@ -2270,6 +2298,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut paused = None;
         let (nfree_all, nint_all) = ((0..p.n).filter(|&j| sub.col_lo[j] < sub.col_up[j]).count(), sub.is_int.iter().filter(|&&b| b).count());
         let nfree_int = (0..sub.n).filter(|&j| sub.is_int[j] && sub.col_lo[j] < sub.col_up[j]).count();
+        super::wc_mark("before the sub-MIP", false);
         let r = if resumable {
             // 前の一時停止は捨てる (同時に取っておくのは 1 本だけ)
             self.drop_rens_paused("a new RENS");
@@ -2288,6 +2317,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if let Some(prev) = tk_prev {
             crate::ticks::pop_budget(prev);
         }
+        super::wc_mark("after the sub-MIP (postsolve etc.)", false);
         if u_set {
             // 前処理だけで終わって求解が上限を受け取らなかったときに残さない
             super::solver::SUBMIP_ITER_CAP.with(|c| c.set(0));
@@ -2627,9 +2657,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 lm.set_start(inc);
             }
         }
+        // 試作 `ENOMOTO_MIP_LMIP_SCORE_TICKS` (analysis/workcount_20261125): 手数の上限 (予算 / 1 手の見当) の代わりに、仕事の量
+        // ([`super::localmip::LocalMip::real_work`]、列の走査で実際に見た非零を含む) が予算に届いたら止める (`run` の中でも `work_cap` で止める)
+        let score_ticks = env_str!("ENOMOTO_MIP_LMIP_SCORE_TICKS").is_some_and(|v| v != "0");
+        let max_steps = if score_ticks {
+            lm.work_cap = budget as u64;
+            u64::MAX
+        } else {
+            max_steps
+        };
         let mut found = false;
         let mut slices = 0u64;
-        while !lm.done && lm.res.steps < max_steps && !self.time_up() {
+        while !lm.done && lm.res.steps < max_steps && !(score_ticks && lm.real_work(step_work as u64) >= budget as u64) && !self.time_up() {
             let mut until = Instant::now() + std::time::Duration::from_secs_f64(slice);
             if let Some(d) = self.deadline {
                 until = until.min(d);
@@ -2644,10 +2683,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if self.params.verbose || env_str!("ENOMOTO_MIP_DEBUG_SUBHEUR").is_some() {
             eprintln!(
-                "MIP:   SUBHEUR Local-MIP (sub-MIP depth {}): steps {} of {max_steps} (work {:.3e}, step work {step_work:.0}), {slices} slices, found {found}, incumbent {:?} ({:.2}s)",
+                "MIP:   SUBHEUR Local-MIP (sub-MIP depth {}): steps {} of {max_steps} (work {:.3e}, step work {step_work:.0}, real work {:.3e}), {slices} slices, found {found}, incumbent {:?} ({:.2}s)",
                 SUBMIP_DEPTH.with(|d| d.get()),
                 lm.res.steps,
                 budget,
+                lm.real_work(step_work as u64) as f64,
                 self.incumbent.as_ref().map(|(z, _)| *z),
                 t0.elapsed().as_secs_f64()
             );
