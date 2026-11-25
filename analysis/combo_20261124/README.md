@@ -275,3 +275,40 @@ python analysis/combo_20261124/run.py K                         # K = 0〜10 →
 - M は、3 問のうち M に入るのが chromaticindex1024-7 だけで、しかも 4 スレッドの害なので、ほとんど動かない。
 - 4 スレッドの M の区間上端は 1.067 のままで、目安の 1.05 を超える。
 - 直し k・s だけでは足りず、残りの遅れ (sbpb の mushroom-best、切り分けていない app1-1 など) の扱いが要る。
+
+### 10.4 害の切り分けのまとめ (2026-11-25、analysis/comboharm_20261124、cause.json)
+
+10.2 節の 1.25 倍超の遅れと、既定だけ解けた問題を、計測を終えた子が分けて切り分けた。
+- 手順: 1 スレッド・種 1・600 秒で、既定・combo・combo から部品を 1 つずつ抜いた形を回す。疑わしい部品は、既定に足した形でも回す。
+- 記録: 問題ごとの記録は `analysis/comboharm_20261124/<問題>.md` と同じ所の README。部品の名前は comboharm の `run.py` の NAMES。
+- 下の表と cause.json は、各子の結論を写したもの。summ.txt の遅れの一覧の `[原因: …]` も、この cause.json から出し直した。
+
+| 原因の部品 | 問題 (スレッド) | 直し (どれも既定オフの試作) |
+|---|---|---|
+| **nra** (NODEROWS_ADAPT=t) | neos-631710 (1・4)、mc11 (1)、beasleyC3 (1)、rococoC10-001000 (1、sbpb・bfrt も重なる) | **`NODEROWS_ADAPT=r0k23`**。nra の正とする形 (親の判断)。下に詳しく書く。 |
+| **enum** (ENUM_ADAPT=1) | chromaticindex1024-7 (4)、neos-2987310-joes (1・4)、neos-950242 (1・4) | **`ENUM_ADAPT=1s`** (時計を始めから数える手直し後)。3 問とも既定並み、または木に入る。 |
+| enum + heur | piperout-27 (4、根の手間) | 直し s で 32 → 24 秒 (既定 16)。heur の分は 1m・LMIP_SCORE_TICKS でも消えず、仕組みは未調査。 |
+| **heur** (HEUR_ADAPT=1) | swath3 (1、種 2 は残る)、neos-1582420 (1) | **`HEUR_ADAPT=1m`** (サブ MIP の中で FP の第 3 段を回さない)。 |
+| heur (+ tie) | app1-1 (1 は heur + tie、4 は heur) | **`LMIP_SCORE_TICKS=1`** (Local-MIP の手間の数え違い)。69 → 37.5 秒、4 スレッドは 36 → 25 秒。既定の道にはほぼ当たらない (lmipticks_20261125: P で 1.000)。 |
+| **sbpb** (SB_PROBEBD=1) | mushroom-best (1・4)、supportcase33 (4)、30n20b8 (4) | 直しなし。30n20b8 では sbpb を `SB_ADAPT=1` に置き換えると既定並み。mushroom-best では SB_ADAPT=1 でも時間切れ。 |
+| 重なり / 道筋 | neos-2978193-inde (1、sbpb・nra・bfrt)、ns1208400 (1、nra とほか)、neos-933966 (1) | 直しなし |
+| 運 (種 1 だけ) | h80x6320d (1、enum。種 1〜3 の幾何で 1.03) | — |
+| 揺れ (再現しない) | chromaticindex512-7、fastxgemm-n2r6s0t2 (4)、peg-solitaire-a3 (4)、gen-ip002 (4) | — |
+| はっきりしない | neos-1456979 (1)、gmu-35-40 (4)、graphdraw-domain (4、種 1〜3 とも combo が遅い向き) | — |
+| 未切り分け | rail507 (1)、pg5_34 (1・4)、fast0507 (4)、tbfp-network・gen-ip054・roi2alpha3n4 (4)、dano3_3・dano3_5・neos-3627168-kasai・neos-1445765・neos-960392・neos859080・supportcase26 など | — |
+
+nra の直し `r0k23` (comboharm 10.6〜10.10 節):
+- 中身: 選び直しのラウンドをやめて外す側だけにし (r0)、木の中の再スタートの判定と持ち越しを直したもの (k2・k3)。
+- 1 スレッドの 6 問 (mc11・neos-631710・fhnw-binpack4-4・mik-250-20-75-4・roll3000・beasleyC3) は、種 1〜3 の幾何で全部既定より速い。mc11・beasleyC3 のラウンドの害は消える。
+- **neos-911970 には 1.3〜1.7 倍の害が残る** (4 スレッド 6 種、1 スレッド 3 種で同じ向き)。φ が木の進みで上がって外す側に切り替わるためで、扱いは未試作。
+  - neos-911970 は combo の計測では得の側 (4 スレッド 0.74) だった。
+
+部品ごとの見立て:
+- 直しのある部品: nra (r0k23)・enum (1s)・heur (1m、LMIP_SCORE_TICKS)。
+- **直しのない部品は sbpb**。害は 3 問で、いちばん大きい (supportcase33 2.6 倍、30n20b8 2.7 倍)。
+- bfrt・tie・cutu・ppi が単独で害の主な原因になった問題はない。重なりの一部としては出ている (rococoC10・neos-2978193-inde・app1-1)。
+- 4 スレッドだけの害は、半分 (4 / 8) が揺れ・はっきりしないだった。4 スレッドは 1 本ずつの比べでは決めにくい。
+
+次の組み直しの計測について:
+- 既定は 6762d9c3c で POLISH_STRICT=2 + POLISH_WARM=d に変わった (先端 8b888e205)。check_default の基準は ref_default.json に更新された。
+- この節の結論は 8e6cc38eb (combo の計測) と、それ以後の切り分けのビルドで出したもの。組み直しの計測は、新しい既定の版で既定と組み合わせを同じ版で回す (親の方針)。
