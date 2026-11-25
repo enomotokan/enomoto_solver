@@ -1132,10 +1132,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     memb_next: f64,
     /// `ENOMOTO_MIP_GAP4` の `i` (試作): 暫定解の整数列を固定した LP ([`Self::resolve_continuous`]) が時間切れになった回数・飛ばした回数
     gap4_inclp: (u32, u32),
-    /// 試作 `ENOMOTO_MIP_POLISH_WARM`: 直前の [`Self::resolve_continuous`] が返した点の、漏れの見積り (その点を出した LP の双対値から) と、
+    /// `ENOMOTO_MIP_POLISH_WARM`: 直前の [`Self::resolve_continuous`] が返した点の、漏れの見積り (その点を出した LP の双対値から) と、
     /// 整数を固定した LP を解いたならその最適の基底 (研磨の LP を温める)
     warm_rc: Option<(f64, Option<super::lp::Basis>)>,
-    /// 試作 `ENOMOTO_MIP_POLISH_WARM`: 最後に受け入れた暫定解 (この問題の空間) と、研磨が済んだか (`None`) / 未研磨で漏れの見積り (`Some`)
+    /// `ENOMOTO_MIP_POLISH_WARM`: 最後に受け入れた暫定解 (この問題の空間) と、研磨が済んだか (`None`) / 未研磨で漏れの見積り (`Some`)
     warm_mark: Option<(Vec<f64>, Option<f64>)>,
     /// 診断用 `ENOMOTO_MIP_GAP4_RSS`: 生きている `Solver` の数に数えたか (サブ MIP か)。[`GAP4_LIVE`]
     gap4_live: Option<bool>,
@@ -8099,10 +8099,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             lap("twoopt", &mut tt);
             if !orig_only && !late && !late_o {
                 self.resolve_continuous(&mut x, &mut z);
-                // 試作 `ENOMOTO_MIP_POLISH_STRICT=2` (analysis/nattai_20261125/): B&B の LP とは別に、整数を固定した問題を一から解き直して
+                // `ENOMOTO_MIP_POLISH_STRICT=2` (analysis/nattai_20261125/): B&B の LP とは別に、整数を固定した問題を一から解き直して
                 // 研磨する。打ち切り値・共有する最良値も研磨した値になる。研磨で目的値が上がって今の暫定解より良くなくなったら受け取らない
                 if super::polish_strict_mode() >= 2 {
-                    // 試作 `ENOMOTO_MIP_POLISH_WARM`: B&B の LP の基底から温めて、求解の期限つきで解く。間に合わなければ (または `e` なら)
+                    // `ENOMOTO_MIP_POLISH_WARM`: B&B の LP の基底から温めて、求解の期限つきで解く。間に合わなければ (または `e` なら)
                     // 漏れの見積り ([`Self::leak_estimate`]) で目的値を正す (解は取り替えない)
                     let warm = super::polish_warm_mode();
                     if warm > 0 {
@@ -8257,7 +8257,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // Feasibility Pump は LP の費用を距離に置き換えたまま解を試すので、元の費用に戻して解く
         let cost = self.lp.costs();
         if env_str!("ENOMOTO_MIP_INC_LP_NO_DUAL_CHECK").is_none() && self.continuous_optimal_by_duals(x, &cost) {
-            // 試作 `ENOMOTO_MIP_POLISH_WARM`: 今の LP の解がそのまま整数を固定した LP の最適なので、今の LP の双対値で見積もる
+            // `ENOMOTO_MIP_POLISH_WARM`: 今の LP の解がそのまま整数を固定した LP の最適なので、今の LP の双対値で見積もる
             if super::polish_warm_mode() > 0 && cost == self.p.cost {
                 self.warm_rc = Some((self.leak_estimate(x), None));
             }
@@ -8315,7 +8315,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 *x = y;
                 *z = zy;
             }
-            // 試作 `ENOMOTO_MIP_POLISH_WARM`: 漏れはこの LP が許容誤差の範囲で行を破るところで入るので、この LP の最適の双対値で見積もり、
+            // `ENOMOTO_MIP_POLISH_WARM`: 漏れはこの LP が許容誤差の範囲で行を破るところで入るので、この LP の最適の双対値で見積もり、
             // 基底も研磨の LP を温めるのに取っておく
             if super::polish_warm_mode() > 0 {
                 self.warm_rc = Some((self.leak_estimate(x), Some(self.lp.basis())));
@@ -8328,7 +8328,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.lp.set_total_iterations(it0);
     }
 
-    /// 試作 `ENOMOTO_MIP_POLISH_WARM` の漏れの見積り: 点 `x` (この問題の空間) の行・列の境界の違反に、今の LP の双対値・被約費用の
+    /// `ENOMOTO_MIP_POLISH_WARM` の漏れの見積り: 点 `x` (この問題の空間) の行・列の境界の違反に、今の LP の双対値・被約費用の
     /// 絶対値を掛けた和。B&B の LP が許容誤差の範囲で行を破って下げた目的値の分を、整数を固定した LP を解かずに見積もる
     /// (LP の初めの `p.m` 行が問題の行。カットの行は見ない)
     pub(super) fn leak_estimate(&self, x: &[f64]) -> f64 {
@@ -29180,7 +29180,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 木の写しから解いた求解が見つけた解を受け取る (止める合図で終わるときも)
         let best_bound = if self.take_inbox() { best_bound.min(self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z)) } else { best_bound };
-        // 試作 `ENOMOTO_MIP_POLISH_WARM` (`ENOMOTO_MIP_POLISH_STRICT` と組): 返す暫定解を、この問題の空間で B&B の LP の基底から温めて研磨する。
+        // `ENOMOTO_MIP_POLISH_WARM` (`ENOMOTO_MIP_POLISH_STRICT` と組): 返す暫定解を、この問題の空間で B&B の LP の基底から温めて研磨する。
         // 解き直せなければ漏れの見積りを [`super::WARM_LEAK`] に置き、返す前の研磨 (元の問題の空間) が取り替えなければ目的値に足す
         // 研磨で上げた目的値の幅 (共有の最良値は研磨の前の値のままなので、最後の守りではこの幅を引いて比べる)
         let mut warm_raise = 0.0;
@@ -29720,7 +29720,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 最後の守り (全ての終わり方): 共有の最良値が返す解より良ければ、その良い解が主に届いていない。木や根はその値で刈って
         // いるので、返す解を最適とは言えない (木の探索の終わりの確かめを通らない根で終わる道筋で、h80x6320d が 6387.76 (正しくは
         // 6382.10) を最適と報告した。analysis/heur_ls_20261023.md 追記 5)。共有の最良値より良い解はないことは示せているので、
-        // 下界はその値にする。`ENOMOTO_MIP_NO_FINAL_SHARED_CHECK` で使わない (診断用)。試作 `ENOMOTO_MIP_POLISH_WARM` の最後の研磨が
+        // 下界はその値にする。`ENOMOTO_MIP_NO_FINAL_SHARED_CHECK` で使わない (診断用)。`ENOMOTO_MIP_POLISH_WARM` の最後の研磨が
         // 目的値を上げたときは、その幅 (`warm_raise`) を引いて比べる (上の研磨の前の値で共有しているため。qiu の 4 スレッドで
         // 研磨が 3e-6 上げ、最適を NotSolved と報告した: analysis/polishp_20261125)
         let (status, best_bound) = match (status, objective, self.shared.as_ref().map(|s| s.best())) {

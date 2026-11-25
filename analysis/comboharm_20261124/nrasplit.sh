@@ -23,3 +23,7 @@ for s in 1 2 3; do for p in neos-631710 fhnw-binpack4-4 mik-250-20-75-4 roll3000
 for s in 1 2 3; do for p in neos-631710 mc11 fhnw-binpack4-4 mik-250-20-75-4 roll3000; do echo "$p 1 $s r0k23"; done; done | xargs -P 3 -L 1 bash -c 'one $0 $1 $2 $3'
 for s in 1 2 3; do echo "beasleyC3 1 $s r0k23"; done | xargs -P 3 -L 1 bash -c 'one $0 $1 $2 $3'
 for p in neos-911970 neos5; do for s in 1 2 3; do one $p 4 $s r0k23; done; done
+# 10.10 節: neos-911970 の 4 スレッドの r0k23 の悪化は揺れか害か (種 1〜6)
+for s in 1 2 3 4 5 6; do for tag in def r0 r0k23; do one neos-911970 4 $s $tag; done; done
+for s in 1 2 3 4 5 6; do one neos-911970 4 $s r0k2; done
+for s in 1 2 3; do for tag in def r0 r0k2 r0k23; do echo "neos-911970 1 $s $tag"; done; done | xargs -P 3 -L 1 bash -c 'one $0 $1 $2 $3'
