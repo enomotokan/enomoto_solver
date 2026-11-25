@@ -6377,7 +6377,7 @@ pub(super) fn pool_close_on() -> bool {
 
 /// プールから戻すラウンドの伸びを測るか (`POOL_CLOSE` か、`NODEROWS_ADAPT` の `p`)
 pub(super) fn pool_gain_on() -> bool {
-    pool_close_on() || (nra_on() && nra_has('p'))
+    pool_close_on() || (nra_on() && (nra_has('p') || nra_has('g')))
 }
 
 /// 試作 `ENOMOTO_MIP_NRA_ORDER` = `a`・`b`・`c`・`d` (既定 `a`、analysis/comboharm_20261124/README.md 11 節): NODEROWS_ADAPT の外す行の並べ方
@@ -9927,7 +9927,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut remove = vec![false; mr];
         let (mut cnt, mut kept) = (0u64, 0u64);
         // `ENOMOTO_MIP_NODEROWS_ADAPT` ([`Self::nra_f`]) では、外せる行のうち年齢の高い順に割合 f だけ外す
-        let frac = if nra_on() && !ncl_on() { Some(self.nra_f()) } else { None };
+        let frac = if nra_on() && !ncl_on() { Some(self.nra_f() * self.nra_g_factor()) } else { None };
         let mut cand: Vec<(u32, usize)> = Vec::new();
         {
             let b = self.lp.basis_ref();
@@ -10154,6 +10154,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn nra_k3_young(&self, fp: u64) -> bool {
         let lim = self.aged_cut_limit() as u64;
         self.nra_rm_age.get(&fp).is_some_and(|&(a, t0)| (a as u64).saturating_add(self.nra_age_tick - t0) < lim)
+    }
+
+    /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `g` (利用者の案、analysis/comboharm_20261124/README.md 10.12 節): 外す割合に掛ける σ(ln((U − z) / ĝ)) = r / (1 + r)、
+    /// r = (U − z) / ĝ。z はノードの (親から受けた) 下界、U は打ち切り値、ĝ はプールから戻すラウンドで見込める伸びの平均 ([`pool_gain_on`])。
+    /// 打ち切り値から遠いノード (行を戻しても刈れない) では外し、近いノード (行があれば刈れる見込み) では外さない。真ん中は比 1、傾きは対数のオッズで 1
+    /// (`t` の比と同じ形)。U か ĝ がなければ 1 (今の f のまま)
+    fn nra_g_factor(&self) -> f64 {
+        if !nra_has('g') || self.pc_gain[1] <= 0.0 {
+            return 1.0;
+        }
+        let lim = self.prune_limit();
+        let ghat = self.pc_gain[0] / self.pc_gain[1];
+        if !lim.is_finite() || !self.nra_cur_lb.is_finite() || ghat <= 0.0 {
+            return 1.0;
+        }
+        let r = (lim - self.nra_cur_lb).max(0.0) / ghat;
+        r / (1.0 + r)
     }
 
     /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT`: 閉じた葉を数える (`inf`: 実行不能で閉じた (伝播・LP の実行不能・強分枝の伝播・強分枝の引き継ぎ)、
@@ -14133,6 +14150,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             if let Some(b) = &n.basis {
                                 self.restore_node_basis(b, n.basis_epoch, n.dse.as_ref().map(|d| d.pairs(b)).as_deref(), &full_changes(&n), n.prot.as_deref().map(|v| v.as_slice()));
                                 if ncl_has('q') || (nra_on() && !ncl_on()) {
+                                    self.nra_cur_lb = n.lower_bound;
                                     self.node_cleanup_rows();
                                 }
                             }
