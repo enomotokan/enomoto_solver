@@ -8053,6 +8053,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
             lap("twoopt", &mut tt);
             if !orig_only && !late && !late_o {
                 self.resolve_continuous(&mut x, &mut z);
+                // 試作 `ENOMOTO_MIP_POLISH_STRICT=2` (analysis/nattai_20261125/): B&B の LP とは別に、整数を固定した問題を一から解き直して
+                // 研磨する。打ち切り値・共有する最良値も研磨した値になる。研磨で目的値が上がって今の暫定解より良くなくなったら受け取らない
+                if super::polish_strict_mode() >= 2 {
+                    if let Some(zn) = super::polish_in_problem(&self.p, &mut x, z) {
+                        z = zn;
+                    }
+                    if self.incumbent.as_ref().is_some_and(|(inc, _)| z >= *inc - 1e-9 * inc.abs().max(1.0)) {
+                        return false;
+                    }
+                }
                 self.pool_add(z, &x);
             }
             lap("resolve_continuous", &mut tt);
