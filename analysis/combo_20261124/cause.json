@@ -27,7 +27,7 @@
   "peg-solitaire-a3 t4": "揺れ (4 スレッドの既定も 3 回中 2 回時間切れ。comboharm peg-solitaire-a3.md)",
   "gen-ip002 t4": "揺れ (既定は 3 回中 2 回が上限すれすれ、combo の時間切れの界も同じ幅。comboharm gen-ip002.md)",
   "beasleyC3 t1": "nra (種 1〜4 で同じ向き。葉が下界で閉じて f ≈ 0、プールを選び直すラウンドが約 270 回回り、戻した行で 1 ノード 15 → 25 ms。直し案 w・e は効かない。comboharm beasleyC3.md。直し案 NODEROWS_ADAPT=r0k23 (選び直しのラウンドを止め、判定と持ち越しを直す、既定オフ) で 1 スレッドの 6 問 (mc11・neos-631710・fhnw・mik-250・roll3000・beasleyC3) はすべて既定より速い (comboharm README 10.6〜10.9・11 節))",
-  "rococoC10-001000 t1": "主に nra (beasleyC3 と同じ、f ≈ 0 でラウンドが 2715 回。combo でラウンドを止めると 506 秒、既定 485・combo 1481 秒)。ほかに sbpb・bfrt (木の中の再スタートが遅れ持ち越すカットが増える、種 1・2 で再現)。直し k・s は効かない。揺れではない。comboharm rococoC10-001000.md / r0k23 は rococoC10 では未測。直し案 NODEROWS_ADAPT=r0k23 (選び直しのラウンドを止め、判定と持ち越しを直す、既定オフ) で 1 スレッドの 6 問 (mc11・neos-631710・fhnw・mik-250・roll3000・beasleyC3) はすべて既定より速い (comboharm README 10.6〜10.9・11 節)",
+  "rococoC10-001000 t1": "nra・sbpb・bfrt の重なり (nra の害は r0・r0k23 で消える: +nra は既定 519 に対し r0 394・r0k23 423 秒。combo は r0 で 1040、r0k23 で 1229 秒と、なお既定の約 2 倍で、残りは sbpb・bfrt の分 (木の中の再スタートが遅れ持ち越すカットが増える)。ラウンドを止めた 506 秒の回は道筋の運。揺れではない。comboharm rococoC10-001000.md 6 節)",
   "neos-950242": "enum (列挙の前の行の並べ替え・重なり外しが 2 乗の手間。直し s の手直し後 (時計を始めから数える) で 1 スレッド 5.0 秒・既定並み。comboharm README 10 節 (追加の問題))",
   "pg5_34 t1": "未切り分け (1 スレッドでも少し遅い、ノード +6%。直し k・s では消えない。comboharm README 10 節)",
   "fast0507 t4": "未切り分け (1 スレッドでは combo のほうが速い 517 → 345 秒、害は 4 スレッドだけ。comboharm README 10 節)",
