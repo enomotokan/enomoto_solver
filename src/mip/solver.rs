@@ -22485,7 +22485,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 試作 `ENOMOTO_MIP_ROOT_OBJPROP_GLOBAL=1`: 根の定義域で行と目的 (`目的値 <= 打ち切り値`) の伝播をかけ、締まった整数列の境界を
-    /// 大域的に置く。目的の伝播は既定では木でも根でも使っておらず (`ENOMOTO_MIP_OBJ_PROP`)、根の打ち切り値つきプロービングの各側の試しの
+    /// 大域的に置く。目的の伝播は (2026-11-25 に `ENOMOTO_MIP_OBJ_PROP` を既定にするまで) 木でも根でも使っておらず、根の打ち切り値つきプロービングの各側の試しの
     /// 中だけで使われていたので、x_j を置かずに出る固定 (fiber で 113 本中 106 本) が大域的な境界に入っていなかった。打ち切り値より良い解に
     /// 対して成り立つので、片側の固定と同じく大域的に置いてよい。連続列は置かない (目的の切りを境界に言い直しただけになり、LP に入ると
     /// 害がある: mas76、[`Self::obj_probe_core`] の `ENOMOTO_MIP_ROOT_OBJ_PROBE_HULL` の注釈)。伝播が矛盾すれば打ち切り値より良い解はないので、
@@ -23389,15 +23389,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if !self.rcs_propagate() {
             return false;
         }
-        // 既定では無効 (`ENOMOTO_MIP_OBJ_PROP` で有効): neos-911970 の下界・暫定解は良くなるが、40 問では 2 回の比較とも
-        // わずかに悪化した (sgeomean +0.2〜0.3)
-        if env_str!("ENOMOTO_MIP_OBJ_PROP").is_none() {
+        // `ENOMOTO_MIP_OBJ_PROP`: **2026-11-25 に既定にした (`ENOMOTO_MIP_OBJ_PROP_INT` と組。`0`・`off` で前の動き = ノードでは伝播しない)。**
+        // 以前は既定で無効だった (40 問で +0.2〜0.6%)。悪化は連続列の境界を打ち切り値に締める形 (mas76) から来ていて、連続列を締めない形
+        // (`OBJ_PROP_INT`) では P (analysis/objprop_20261124 3.2・5 節) で同じビルドの既定との比が 1 スレッド 0.989 [0.979, 0.999]・4 スレッド 1.004、
+        // 食い違い 0、解けた数の減りは上限ぎわと道筋の違い
+        if env_def!("ENOMOTO_MIP_OBJ_PROP", "1").is_none() {
             return !self.dom.infeasible;
         }
         self.propagate_objective_with(true)
     }
 
-    /// 強分枝の子の伝播で使う目的の伝播 ([`sb_objprop`] なら `ENOMOTO_MIP_OBJ_PROP` を見ずに伝播する)
+    /// 強分枝の子の伝播で使う目的の伝播 ([`sb_objprop`] なら `ENOMOTO_MIP_OBJ_PROP` を見ずに伝播する。`OBJ_PROP` は 2026-11-25 から既定)
     fn propagate_objective_sb(&mut self) -> bool {
         if sb_objprop() {
             return self.rcs_propagate() && self.propagate_objective_with(true);
@@ -30082,10 +30084,11 @@ fn sb_objprop() -> bool {
     env_str!("ENOMOTO_MIP_SB_OBJPROP").is_some()
 }
 
-/// 試作 `ENOMOTO_MIP_OBJ_PROP_INT=1`: 目的の行の伝播 ([`Solver::propagate_objective_with`]) で連続列の境界を締めない
+/// `ENOMOTO_MIP_OBJ_PROP_INT`: 目的の行の伝播 ([`Solver::propagate_objective_with`]、ノード・根の打ち切り値つきプロービングなど) で
+/// 連続列の境界を締めない (最小活動量と刈りの判定にだけ使う)。打ち切り値を連続の目的の列の上限に言い直すと LP に害 (mas76、analysis/objprop_20261124 3.1 節)。
+/// **2026-11-25 に既定にした (`ENOMOTO_MIP_OBJ_PROP` と組)。`0`・`off` で前の動き (連続列も締める)。**
 fn obj_prop_int() -> bool {
-    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| env_str!("ENOMOTO_MIP_OBJ_PROP_INT").is_some_and(|v| v != "0"))
+    env_def!("ENOMOTO_MIP_OBJ_PROP_INT", "1").is_some()
 }
 
 pub(crate) fn objprobe_flags() -> Option<&'static str> {

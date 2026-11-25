@@ -163,3 +163,21 @@ ogopi_t1 (O5+O1、連続列を締めない) と og2_t1 (O5) で解けたかど�
 - よって 2 つの減りは、上限ぎわの出入りと道筋の違い (O5 の側の当たり) で、OBJ_PROP_INT の害ではない。
   `ENOMOTO_MIP_OBJ_PROP=1` + `ENOMOTO_MIP_OBJ_PROP_INT=1` は既定の候補 (1 スレッド og2 との比 0.995・d2 との比 0.989 [0.979, 0.999]、4 スレッド d2 との比 1.004、
   食い違い 0)。既定にするかは利用者の判断を待つ。
+
+## 6. 既定化 (2026-11-25、利用者の承認・親の依頼)
+
+`ENOMOTO_MIP_OBJ_PROP` と `ENOMOTO_MIP_OBJ_PROP_INT` を `env_def!(.., "1")` にした (`src/mip/solver.rs` の `propagate_objective`・`obj_prop_int`)。
+環境変数なしでノードの伝播に目的の行が入り (連続列の境界は締めない)、`ENOMOTO_MIP_OBJ_PROP=0` (か `off`) でノードの目的の伝播を切る (前の動き)、
+`ENOMOTO_MIP_OBJ_PROP_INT=0` で連続列も締める形に戻す。以前は `OBJ_PROP` を付ければ値によらず有効だった (`=0` でも有効) が、今は `0`・`off` で切れる。
+`OBJ_PROP_INT` は目的の行の伝播のすべて (根の打ち切り値つきプロービング・`ROOT_OBJPROP_GLOBAL`・`SB_OBJPROP` を含む) に効く。第 2・3 段の計測 (ogopi・gfogop) も同じ形。
+
+根拠: 3.2・5 節。ogopi (O5+O1 INT) は同じビルドの既定 d2 との比で 1 スレッド 0.989 [0.979, 0.999]・4 スレッド 1.004 [0.994, 1.014]、食い違い 0。
+GLOBALFIX=abc の上でも gfogop 対 gfog は 0.997・0.998。1 スレッドで og2 より解けた数が 2 減ったのは上限ぎわと道筋の違い (5 節)、ノードあたりの時間は増えない。
+(この既定化は O5 (`ROOT_OBJPROP_GLOBAL`) を入れていない。O5 は GLOBALFIX=abc と重なり上乗せがない、4 節。)
+
+確かめ (既定、環境変数なし。GLOBALFIX=abc の既定化の後のソース):
+- check_default: mik-250-20-75-4 のノード数 6157 → 5856、markshare_4_0 236024 → 272319 (目的値はどちらも同じ)。ほかの 4 問は一致。既定で 2 回解いて
+  6 問ともノード数が同じ (1 スレッドの決定性) ことを見て、`--save` で `ref_default.json` を書き直した。
+  `check_default.py ENOMOTO_MIP_OBJ_PROP=0` で前の基準 (GLOBALFIX 既定化の後) と全部一致する (`OBJ_PROP_INT` だけではこの 6 問の道筋は変わらない)。
+- fuzz 7 本 (既定、環境変数なし。`bash analysis/globalfix_20261124/fuzz.sh objprop_default_20261125 ENOMOTO_NOOP_CHECK=1`): 誤答 0
+  (fuzz_tiny 0/400・fuzz_highs 0/300・fuzz_objint 0/1000・fuzz_slack 0・fuzz_tiny2 0/400・fuzz_objint2 0/1000・fuzz_slack2 0)。cargo test 424 通過・失敗 0。
