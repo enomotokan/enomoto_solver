@@ -285,7 +285,7 @@ python analysis/combo_20261124/run.py K                         # K = 0〜10 →
 
 | 原因の部品 | 問題 (スレッド) | 直し (どれも既定オフの試作) |
 |---|---|---|
-| **nra** (NODEROWS_ADAPT=t) | neos-631710 (1・4)、mc11 (1)、beasleyC3 (1)、rococoC10-001000 (1、sbpb・bfrt も重なる) | **`NODEROWS_ADAPT=r0k23`**。nra の正とする形 (親の判断)。下に詳しく書く。 |
+| **nra** (NODEROWS_ADAPT=t) | neos-631710 (1・4)、mc11 (1)、beasleyC3 (1)、rococoC10-001000 (1、sbpb・bfrt も重なる。r0k23 で nra の分は消えるが、combo はなお既定の約 2 倍) | **`NODEROWS_ADAPT=r0k23`**。nra の正とする形 (親の判断)。下に詳しく書く。 |
 | **enum** (ENUM_ADAPT=1) | chromaticindex1024-7 (4)、neos-2987310-joes (1・4)、neos-950242 (1・4) | **`ENUM_ADAPT=1s`** (時計を始めから数える手直し後)。3 問とも既定並み、または木に入る。 |
 | enum + heur | piperout-27 (4、根の手間) | 直し s で 32 → 24 秒 (既定 16)。heur の分は 1m・LMIP_SCORE_TICKS でも消えず、仕組みは未調査。 |
 | **heur** (HEUR_ADAPT=1) | swath3 (1、種 2 は残る)、neos-1582420 (1) | **`HEUR_ADAPT=1m`** (サブ MIP の中で FP の第 3 段を回さない)。 |
