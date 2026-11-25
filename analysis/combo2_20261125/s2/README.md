@@ -21,7 +21,11 @@
 - 第 1 段の版 (a5008f9d8) との違いは、src/mip/solver.rs の試作 `ENOMOTO_MIP_POOL_CLOSE` (既定オフ) だけ。既定と c2c の道筋は変わらないはず。
 - 確かめ (c8e468e25 で `pip install -e .`):
   - check_default: 全部一致。
-  - c2c の fuzz 7 本と cargo test: (結果をここに書く)
+  - c2c の fuzz 7 本と cargo test (`fuzz_c2c.out`): 誤答 0。cargo test は 424 通過・0 失敗。
+    - fuzz_tiny 0/400・0/400
+    - fuzz_highs 0/300
+    - fuzz_objint 0/1000・0/1000
+    - fuzz_slack は mismatches 0 (1000・1000 回)
 - 先端がこの後に進んでも、計測のビルドは c8e468e25 のソースで作る。
   - 先端の src・python/ が c8e468e25 と同じなら (`git diff --stat c8e468e25 HEAD -- src python Cargo.toml Cargo.lock pyproject.toml` が空なら)、そのまま `pip install -e .` でよい。
   - 違えば、`git checkout c8e468e25 -- src python Cargo.toml Cargo.lock pyproject.toml` で固定の版のソースにしてから `pip install -e .`。そのあと `git checkout HEAD -- src python Cargo.toml Cargo.lock pyproject.toml` で作業ツリーを戻す (.so は作り直さない)。
