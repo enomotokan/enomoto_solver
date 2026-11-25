@@ -10,6 +10,9 @@ for tag in "$@"; do
     fl) E="ENOMOTO_MIP_HEUR1T=fl";;
     fps) E="ENOMOTO_MIP_FP_STAGE3=1 ENOMOTO_MIP_POOR_NOINC=1 ENOMOTO_MIP_P2RIT=a ENOMOTO_MIP_FJSYNC_LABEL=1";;
     ad) E="ENOMOTO_MIP_HEUR_ADAPT=1 ENOMOTO_MIP_HEUR_ADAPT_DEBUG=1";;
+    # 2026-11-25 (comboharm_20261124/neos-1582420.md): adn は今のビルドの ad、adm は m (FP の第 3 段をサブ MIP の中では回さない)
+    adn) E="ENOMOTO_MIP_HEUR_ADAPT=1 ENOMOTO_MIP_HEUR_ADAPT_DEBUG=1";;
+    adm) E="ENOMOTO_MIP_HEUR_ADAPT=1m ENOMOTO_MIP_HEUR_ADAPT_DEBUG=1";;
     *) echo "unknown tag $tag"; exit 1;;
   esac
   PS="10teams:120 neos-1171448:120 CMS750_4:200 noswot:60 pg:60"
