@@ -790,6 +790,12 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `t` ([`Solver::nra_t_ratio`]): [選び直しのラウンドの下界の伸びの和, その手間 (ticks) の和,
     /// 普通のノードの下界の伸びの和, その手間の和, 普通のノードの数]
     pub(super) nra_t: [f64; 5],
+    /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `w` ([`Solver::nra_w_share`]): 選び直しのラウンドで LP に戻した行の番号 (`cut_ids` の値)
+    pub(super) nra_ret_ids: std::collections::HashSet<u64>,
+    /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `i` ([`Solver::nra_i_move`]): 戻した行が LP にない普通のノードの [数, 最初の LP までの反復の和]
+    pub(super) nra_i_base: [f64; 2],
+    /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `e`: [伸びずに外したラウンド, 外した行, 伸びて残したラウンド]
+    pub(super) nra_e_stats: [u64; 3],
     /// 診断用: 効き目で続けるノードの分離の結果の内訳 (打ち切り、伸び/差が 0.02 未満、0.1 未満、0.3 未満、0.3 以上)
     pub(super) nca_hist: [u64; 5],
     /// ノードで加えたカットの非零の数の指数移動平均 (`ENOMOTO_T_MIP_NODE_CUT_ADAPT_DENSITY`、[`Solver::nca_dense`])。
@@ -2859,6 +2865,8 @@ pub(crate) struct TreeProf {
     balance: [u64; 2],
     /// 主: 求解の始めから、最初のノードを取り出したとき・従を始めたときまで。
     tree_start_s: f64,
+    /// 試作 `ENOMOTO_MIP_HEUR_ADAPT` の `k` 用: 木のループに入ったときの手間 ([`crate::ticks::total`])
+    tree_start_tk: f64,
     workers_s: f64,
 }
 
@@ -4108,6 +4116,14 @@ pub(crate) fn heur1t(c: char) -> bool {
 pub(crate) fn heur_adapt() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_str!("ENOMOTO_MIP_HEUR_ADAPT").is_some_and(|v| v != "0"))
+}
+
+/// 試作 `ENOMOTO_MIP_HEUR_ADAPT` の値の文字 (`=1m` など、[`heur_adapt`] が真のときだけ意味を持つ):
+/// - `m`: FP の第 3 段 (`fp_stage3`) を、外側の根から出したサブ MIP の中では回さない (analysis/comboharm_20261124/neos-1582420.md)
+/// - `k`: f_t ([`Solver::adapt_tree_f`]) の経過・残りを壁時計でなく手間の秒で数える (analysis/comboharm_20261124/README.md 10 節)
+pub(crate) fn heur_adapt_flag(c: char) -> bool {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    heur_adapt() && V.get_or_init(|| env_str!("ENOMOTO_MIP_HEUR_ADAPT").map_or(String::new(), |v| v.to_string())).contains(c)
 }
 
 fn adapt_sigmoid(z: f64) -> f64 {
@@ -5685,6 +5701,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         nra_removed: std::collections::HashMap::new(),
         nra_rho: [0; 2],
         nra_t: [0.0; 5],
+        nra_ret_ids: std::collections::HashSet::new(),
+        nra_i_base: [0.0; 2],
+        nra_e_stats: [0; 3],
         nca_hist: [0; 5],
         tdd: if super::treedepth::on() && !params.submip { Some(Box::default()) } else { None },
         nca_cut_nnz: None,
@@ -8056,7 +8075,25 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 試作 `ENOMOTO_MIP_POLISH_STRICT=2` (analysis/nattai_20261125/): B&B の LP とは別に、整数を固定した問題を一から解き直して
                 // 研磨する。打ち切り値・共有する最良値も研磨した値になる。研磨で目的値が上がって今の暫定解より良くなくなったら受け取らない
                 if super::polish_strict_mode() >= 2 {
-                    if let Some(zn) = super::polish_in_problem(&self.p, &mut x, z) {
+                    // 試作 `ENOMOTO_MIP_POLISH_WARM`: B&B の LP の基底から温めて、求解の期限つきで解く。間に合わなければ (または `e` なら)
+                    // 漏れの見積り ([`Self::leak_estimate`]) で目的値を正す (解は取り替えない)
+                    let warm = super::polish_warm_mode();
+                    if warm > 0 {
+                        let r = if warm == 3 {
+                            super::WarmPolish::NotSolved
+                        } else {
+                            let b = self.lp.basis();
+                            super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), self.deadline)
+                        };
+                        match r {
+                            super::WarmPolish::Replaced(zn) => z = zn,
+                            super::WarmPolish::Kept => {}
+                            super::WarmPolish::NotSolved => {
+                                z += self.leak_estimate(&x);
+                                super::WARM_POLISH[3].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
+                    } else if let Some(zn) = super::polish_in_problem(&self.p, &mut x, z) {
                         z = zn;
                     }
                     if self.incumbent.as_ref().is_some_and(|(inc, _)| z >= *inc - 1e-9 * inc.abs().max(1.0)) {
@@ -8235,6 +8272,30 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         self.lp.restore_state(&saved);
         self.lp.set_total_iterations(it0);
+    }
+
+    /// 試作 `ENOMOTO_MIP_POLISH_WARM` の漏れの見積り: 点 `x` (この問題の空間) の行・列の境界の違反に、今の LP の双対値・被約費用の
+    /// 絶対値を掛けた和。B&B の LP が許容誤差の範囲で行を破って下げた目的値の分を、整数を固定した LP を解かずに見積もる
+    /// (LP の初めの `p.m` 行が問題の行。カットの行は見ない)
+    pub(super) fn leak_estimate(&self, x: &[f64]) -> f64 {
+        let p = self.p;
+        let y = self.lp.row_duals();
+        let d = self.lp.reduced_costs();
+        let mut s = 0.0;
+        for i in 0..p.m.min(y.len()) {
+            let a: f64 = p.rows[i].iter().map(|&(j, c)| c * x[j]).sum();
+            let v = (p.row_lo[i] - a).max(a - p.row_up[i]);
+            if v > 0.0 {
+                s += y[i].abs() * v;
+            }
+        }
+        for j in 0..p.n.min(d.len()) {
+            let v = (p.col_lo[j] - x[j]).max(x[j] - p.col_up[j]);
+            if v > 0.0 {
+                s += d[j].abs() * v;
+            }
+        }
+        s
     }
 
     /// 今の LP の双対値 `y` (費用 `lp_cost` で解いたもの) を使い、整数列を `x` に固定した LP で `x` が最適なことを
@@ -9911,6 +9972,54 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let (gbar, wbar) = (gt / nt, wt / nt);
         ((gs + gbar) / (ws + wbar)) / (gt / wt)
+    }
+
+    /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `w` (`t` と一緒に使う。analysis/comboharm_20261124/mc11.md): 今の LP の行のうち、選び直しのラウンドで
+    /// 戻した行の割合 s = 戻した行の数 / LP の行の数。普通のノードの最初の LP までの手間 w のうち s × w を、木の手間 W_tree からラウンドの手間 W_sel へ移す
+    /// (戻した行が LP にいる間、その後のノードの LP を重くする分を、行の数の比で按分してラウンドの手間に数える。LP の手間は行の数にほぼ比例するので
+    /// 行の数の比を按分に使った。新しい閾値はない)。戻した行の番号は、LP の行の 2 倍 + 1000 を超えたら今の LP にあるものだけに絞る
+    fn nra_w_share(&mut self) -> f64 {
+        if self.nra_ret_ids.is_empty() {
+            return 0.0;
+        }
+        let m0 = self.p.m;
+        let mr = self.lp.num_rows();
+        if self.nra_ret_ids.len() > 2 * mr + 1000 {
+            let live: std::collections::HashSet<u64> = self.cut_ids.iter().copied().collect();
+            self.nra_ret_ids.retain(|id| live.contains(id));
+        }
+        if mr == 0 {
+            return 0.0;
+        }
+        let cnt = self.cut_ids.iter().take(mr.saturating_sub(m0)).filter(|id| self.nra_ret_ids.contains(id)).count();
+        cnt as f64 / mr as f64
+    }
+
+    /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `w`・`i`: 普通のノードの最初の LP までの手間 `_w` のうち、木の手間からラウンドの手間へ移す割合
+    /// (`w` も `i` もなければ 0)。`its` はこのノードの最初の LP までの反復。
+    /// - `w` ([`Self::nra_w_share`]): 今の LP の行に占める戻した行の割合。
+    /// - `i` (analysis/comboharm_20261124/README.md 10.3 節): 戻した行が LP にあるノードで、反復のうち「戻した行が LP にないノードの反復の平均」ī を
+    ///   超えた分の割合 max(0, its − ī) / its。戻した行がないノードでは ī の観測に足して 0。ī の観測がまだなければ 0 (新しい閾値はない)。
+    ///   戻した行はノードの LP の反復を増やして重くする (mc11 で 1.5 倍) が、行の数の割合 (`w`) ではその重さの 1/3 ほどしか数えなかった
+    fn nra_i_move(&mut self, _w: f64, its: u64) -> f64 {
+        if nra_has('i') {
+            let sh = self.nra_w_share();
+            let its = its as f64;
+            if sh <= 0.0 {
+                self.nra_i_base[0] += 1.0;
+                self.nra_i_base[1] += its;
+                return 0.0;
+            }
+            if self.nra_i_base[0] < 1.0 || its <= 0.0 {
+                return 0.0;
+            }
+            let ibar = self.nra_i_base[1] / self.nra_i_base[0];
+            return ((its - ibar).max(0.0) / its).min(1.0);
+        }
+        if nra_has('w') {
+            return self.nra_w_share();
+        }
+        0.0
     }
 
     /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT`: このノードでプールの選び直しのラウンドを回すか (持ち分に 1 − f を足し、1 以上なら 1 引いて真)
@@ -13845,6 +13954,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if first {
                 self.tprof.tree_start_s = self.start.elapsed().as_secs_f64();
+                self.tprof.tree_start_tk = crate::ticks::total();
                 // 試作 `ENOMOTO_MIP_HEUR_ADAPT` の診断: 木の始めの f_g と、その元の量
                 if !self.params.submip && (env_str!("ENOMOTO_MIP_HEUR_ADAPT_DEBUG").is_some() || (heur_adapt() && self.params.verbose)) {
                     let z = self.incumbent.as_ref().map(|(z, _)| *z);
@@ -13908,7 +14018,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if self.nodes % k == 0 {
                         let rho = (self.nra_rho[0] as f64 + 1.0) / ((self.nra_rho[0] + self.nra_rho[1]) as f64 + 2.0);
                         eprintln!(
-                            "NRA_TRACE tid {} nodes {} t {:.2} inf {} bound {} phi {:.4} f {:.4} rho {:.4} rounds {} tratio {:.4} gsel {:.3e} wsel {:.3e} gtree {:.3e} wtree {:.3e} ntree {}",
+                            "NRA_TRACE tid {} nodes {} t {:.2} inf {} bound {} phi {:.4} f {:.4} rho {:.4} rounds {} tratio {:.4} gsel {:.3e} wsel {:.3e} gtree {:.3e} wtree {:.3e} ntree {} ibase {} ibar {:.1} e_drop {:?}",
                             self.pool_tid,
                             self.nodes,
                             self.start.elapsed().as_secs_f64(),
@@ -13923,7 +14033,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             self.nra_t[1],
                             self.nra_t[2],
                             self.nra_t[3],
-                            self.nra_t[4]
+                            self.nra_t[4],
+                            self.nra_i_base[0],
+                            if self.nra_i_base[0] > 0.0 { self.nra_i_base[1] / self.nra_i_base[0] } else { f64::NAN },
+                            self.nra_e_stats
                         );
                     }
                 }
@@ -14260,12 +14373,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let mut pse_pending: Option<(f64, u64)> = None;
             let mut pse_nopool = false;
             // 試作 `ENOMOTO_MIP_NODEROWS_ADAPT`: このノードでプールの選び直しのラウンドを回すか (持ち分 1 − f)
-            let nra_pool = self.nra_pool_due();
+            let mut nra_pool = self.nra_pool_due();
+            // `NODEROWS_ADAPT` の `e`: 選び直しのラウンドの前の目的値と、戻した行の最初の番号 (伸びなければその場で外す)
+            let mut nra_e_pending: Option<(f64, u64)> = None;
             // `NODEROWS_ADAPT` の `r`: 選び直しのラウンドの前の目的値 (解き直しで伸びたかを数える)
             let mut nra_pending: Option<f64> = None;
             // `NODEROWS_ADAPT` の `t`: 選び直しのラウンドの前の目的値と手間 (ticks)、ノードの処理の始めの手間 ([`Self::nra_t_ratio`])
             let mut nra_t_pending: Option<(f64, f64)> = None;
             let nra_t_tk0 = crate::ticks::total();
+            let nra_t_it0 = self.lp.total_iterations();
             let nra_t_on = nra_on() && nra_has('t') && !self.params.submip;
             // ノードの分離でカットを加えた後の解き直しか (その LP の時間を `node_cut_secs` に足す)
             let mut node_cut_resolve: Option<Instant> = None;
@@ -14703,7 +14819,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 self.nra_t[1] += tk - tk0;
                             } else if resolves == 0 {
                                 self.nra_t[2] += if lim.is_finite() { (lim - node.lower_bound).max(0.0) } else { 0.0 };
-                                self.nra_t[3] += tk - nra_t_tk0;
+                                let w = tk - nra_t_tk0;
+                                let sh = self.nra_i_move(w, self.lp.total_iterations().saturating_sub(nra_t_it0));
+                                self.nra_t[1] += sh * w;
+                                self.nra_t[3] += (1.0 - sh) * w;
                                 self.nra_t[4] += 1.0;
                             }
                         }
@@ -14756,12 +14875,43 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.nra_t[1] += tk - tk0;
                     } else if resolves == 0 && node.lower_bound.is_finite() {
                         self.nra_t[2] += (node_obj - node.lower_bound).max(0.0);
-                        self.nra_t[3] += tk - nra_t_tk0;
+                        // `w`: 戻した行の割合の分の手間をラウンドの手間へ移す ([`Self::nra_w_share`])
+                        let w = tk - nra_t_tk0;
+                        let sh = self.nra_i_move(w, self.lp.total_iterations().saturating_sub(nra_t_it0));
+                        self.nra_t[1] += sh * w;
+                        self.nra_t[3] += (1.0 - sh) * w;
                         self.nra_t[4] += 1.0;
                     }
                 }
                 // 試作 `ENOMOTO_MIP_POOL_SEL` の `e`: 直前にプールから戻したなら、目的値が伸びたかを見る (許容誤差は行の活動量の判定と同じ
                 // 相対 1e-6)。伸びなければ戻したカットを外して解き直し (外した後の LP の最適値は戻す前と同じ)、このノードと子では戻さない
+                // 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `e` (analysis/comboharm_20261124/README.md 10.4 節): 選び直しのラウンドで目的値が伸びなければ
+                // (`POOL_SEL` の `e` と同じ相対 1e-6 の判定)、戻した行をその場で外して解き直す (外した後の LP の最適値は戻す前と同じ)。
+                // このノードではもう選び直しのラウンドを回さない (`POOL_SEL` の `e` と違い、子のノードでは止めない)
+                if let Some((obj0, id0)) = nra_e_pending.take() {
+                    if node_obj <= obj0 + 1e-6 * (1.0 + obj0.abs()) {
+                        nra_pool = false;
+                        self.sync_cut_age();
+                        let m0 = self.p.m;
+                        let mr = self.lp.num_rows();
+                        let mut remove = vec![false; mr];
+                        let mut cnt = 0u64;
+                        for k in 0..self.cut_ids.len().min(mr.saturating_sub(m0)) {
+                            if self.cut_ids[k] >= id0 {
+                                remove[m0 + k] = true;
+                                cnt += 1;
+                            }
+                        }
+                        if cnt > 0 {
+                            self.delete_lp_rows(&remove);
+                            self.nra_e_stats[0] += 1;
+                            self.nra_e_stats[1] += cnt;
+                            continue;
+                        }
+                    } else {
+                        self.nra_e_stats[2] += 1;
+                    }
+                }
                 if let Some((obj0, id0)) = pse_pending.take() {
                     if node_obj > obj0 + 1e-6 * (1.0 + obj0.abs()) {
                         self.poolsel_stats[3] += 1;
@@ -15443,8 +15593,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let (obj_pre, id_pre) = (node_obj, self.next_cut_id);
                     let tk_pre = crate::ticks::total();
                     let added = if poolsel_on() || nra_pool { self.pool_select_round(&x) } else { self.pool_cut_round(&x, max_cuts) };
+                    if added && nra_pool && nra_has('e') && !poolsel_on() {
+                        nra_e_pending = Some((obj_pre, id_pre));
+                    }
                     if added && nra_pool && nra_t_on && !poolsel_on() {
                         nra_t_pending = Some((obj_pre, tk_pre));
+                        if nra_has('w') || nra_has('i') {
+                            self.nra_ret_ids.extend(id_pre..self.next_cut_id);
+                        }
                     }
                     if added && poolsel_has('e') {
                         pse_pending = Some((obj_pre, id_pre));
@@ -23824,9 +23980,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 試作 `ENOMOTO_MIP_GLOBALFIX` の `c` (analysis/globalfix_20261124): 長さ 1 の衝突 (大域的に成り立つリテラルを除いた後) は、そのリテラルの
         // 否定が全ての (打ち切り値より良い) 解で成り立つ = 大域的な固定。否定はプールの伝播 (conflict_pool.rs の「否定」) と同じ形
         // (`x <= v` の否定は整数列 `x >= floor(v) + 1`・連続列 `x >= v`)。プールにもそのまま入れる (ほかの振る舞いは変えない)
-        if l.len() == 1 && super::domain::globalfix('c') {
+        // `k` は `c` を整数列だけにしたもの (連続列は大域にせずプールだけに入れる。`a` が連続列を除くのと同じ理由。pk1 で `c` の大域的な締め付けの
+        // ほとんどが連続列の少しずつの締め付けだった)
+        if l.len() == 1 && (super::domain::globalfix('c') || (super::domain::globalfix('k') && self.p.is_int[l[0].0])) {
             let (j, upper, v) = l[0];
             let int = self.p.is_int[j];
+            if !int {
+                super::domain::GF_STATS[8].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             if upper {
                 self.dom.tighten_global(self.p, j, false, if int { v.floor() + 1.0 } else { v });
             } else {
@@ -26131,11 +26292,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.nodes < self.heur_adapt_ft.0 + 64 && self.heur_adapt_ft.0 > 0 {
             return self.heur_adapt_ft.1;
         }
-        let now = self.start.elapsed().as_secs_f64();
-        let tree_el = now - self.tprof.tree_start_s;
-        let left = match self.deadline {
-            Some(d) => d.saturating_duration_since(Instant::now()).as_secs_f64(),
-            None => tunable!("ENOMOTO_T_MIP_HEUR_TRIG_NOLIMIT_MULT", 10.0, f64) * tree_el,
+        // `k` ([`heur_adapt_flag`]、analysis/comboharm_20261124/README.md 10 節): 経過・木の経過・残りを、壁時計の秒でなく手間の秒
+        // (手間 × 1e-9。1 手間 ≒ 1 ns で、`ENOMOTO_MIP_TICKS` の規則と同じ換算) で数える。残りは この求解の時間の上限 − 手間の経過。
+        // 壁時計では、同じ設定でも温まりの判定 (下) が成り立つノードが回ごとに変わり、1 スレッドでも道筋が決まらなかった
+        let (now, tree_el, left) = if heur_adapt_flag('k') {
+            let el = (crate::ticks::total() - self.ticks0) * 1e-9;
+            let tree_el = (crate::ticks::total() - self.tprof.tree_start_tk) * 1e-9;
+            let left = if self.params.time_limit.is_finite() { (self.params.time_limit - el).max(0.0) } else { tunable!("ENOMOTO_T_MIP_HEUR_TRIG_NOLIMIT_MULT", 10.0, f64) * tree_el };
+            (el, tree_el, left)
+        } else {
+            let now = self.start.elapsed().as_secs_f64();
+            let tree_el = now - self.tprof.tree_start_s;
+            let left = match self.deadline {
+                Some(d) => d.saturating_duration_since(Instant::now()).as_secs_f64(),
+                None => tunable!("ENOMOTO_T_MIP_HEUR_TRIG_NOLIMIT_MULT", 10.0, f64) * tree_el,
+            };
+            (now, tree_el, left)
         };
         let w: f64 = self.queue.iter().chain(cur).map(|n| 0.5f64.powi(n.depth.min(2000) as i32)).sum();
         let done = (1.0 - w).max(0.0);
@@ -28748,6 +28920,30 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 木の写しから解いた求解が見つけた解を受け取る (止める合図で終わるときも)
         let best_bound = if self.take_inbox() { best_bound.min(self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z)) } else { best_bound };
+        // 試作 `ENOMOTO_MIP_POLISH_WARM` (`ENOMOTO_MIP_POLISH_STRICT` と組): 返す暫定解を、この問題の空間で B&B の LP の基底から温めて研磨する。
+        // 解き直せなければ漏れの見積りを [`super::WARM_LEAK`] に置き、返す前の研磨 (元の問題の空間) が取り替えなければ目的値に足す
+        if super::polish_strict() && super::polish_warm_mode() > 0 && !self.params.submip && self.snap.is_none() {
+            let warm = super::polish_warm_mode();
+            let mut leak = 0.0;
+            if let Some((mut z, mut x)) = self.incumbent.take() {
+                let r = if warm == 3 {
+                    super::WarmPolish::NotSolved
+                } else {
+                    let b = self.lp.basis();
+                    super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), if warm == 2 { self.deadline } else { None })
+                };
+                match r {
+                    super::WarmPolish::Replaced(zn) => z = zn,
+                    super::WarmPolish::Kept => {}
+                    super::WarmPolish::NotSolved => {
+                        leak = self.leak_estimate(&x);
+                        super::WARM_POLISH[3].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                self.incumbent = Some((z, x));
+            }
+            super::WARM_LEAK.store(leak.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        }
         // `ENOMOTO_MIP_BOUND_STEP` (試作): 報告の下界を目的値の刻みの格子の点に切り上げる ([`Self::step_lb`])
         let best_bound = if matches!(status, MipStatus::Optimal | MipStatus::Infeasible) { best_bound } else { self.step_lb(best_bound) };
         if prof_tree_par() && self.snap.is_none() && !self.params.submip && self.watch.is_none() {
@@ -29083,7 +29279,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     g[0], g[1], g[2], g[3], g[5], g[4]
                 );
                 let f: Vec<u64> = super::domain::GF_STATS.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
-                eprintln!("MIP: GLOBALAUDIT globalfix: b: propagations {} (integer bounds {}, newly fixed integers {}, infeasible {}); a: root nodes {} (integer bounds {}, newly fixed {}); c: global fixings {} (all threads, cumulative)", f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]);
+                eprintln!("MIP: GLOBALAUDIT globalfix: b: propagations {} (integer bounds {}, newly fixed integers {}, infeasible {}); a: root nodes {} (integer bounds {}, newly fixed {}); c/k: global fixings {} (continuous columns {}) (all threads, cumulative)", f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[8]);
                 let c: Vec<u64> = super::domain::GA_CONF.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
                 eprintln!("MIP: GLOBALAUDIT conflicts: literal conflicts added {}, of length 1 (global fixings kept only in the pool) {} (imported {}) (all threads, cumulative)", c[0], c[1], c[2]);
             }
