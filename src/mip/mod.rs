@@ -911,7 +911,10 @@ pub(super) fn polish_in_problem(p: &MipProblem, x: &mut Vec<f64>, z: f64) -> Opt
 /// 0 = 使わない、1 = 研磨の LP を B&B の LP の基底から温めて解く (返す前の研磨には期限を渡さない)、
 /// 2 (`d`) = 1 に加えて返す前の研磨にも期限を渡し、間に合わなければ漏れの見積り ([`solver::Solver::leak_estimate`]) で目的値を正す、
 /// 3 (`e`) = 研磨の LP を解かず、いつも漏れの見積りで目的値を正す。
-/// 木の中の研磨 (`ENOMOTO_MIP_POLISH_STRICT=2`) には、どれも求解の期限を渡し、間に合わなければ見積りで正す
+/// 木の中の研磨 (`ENOMOTO_MIP_POLISH_STRICT=2`) には、どれも求解の期限を渡し、間に合わなければ研磨せずに受け取って見積りを足し、
+/// 「未研磨」の印をつける。返す前の研磨は、木の中で研磨が済んだ暫定解なら飛ばす。
+/// 見積りの双対値と温める基底は、暫定解の連続部を出した LP ([`solver::Solver::resolve_continuous`] の整数を固定した LP、
+/// または双対値で最適と示せた今の LP) のもの
 pub(super) fn polish_warm_mode() -> u8 {
     static V: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
     *V.get_or_init(|| match env_str!("ENOMOTO_MIP_POLISH_WARM") {
