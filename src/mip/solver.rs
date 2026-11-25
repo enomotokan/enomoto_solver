@@ -8082,8 +8082,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let r = if warm == 3 {
                             super::WarmPolish::NotSolved
                         } else {
+                            // 診断 `ENOMOTO_MIP_POLISH_STATS` の `v`: 見積りと、解き直しで実際に上がった目的値を並べて出す
+                            let est = env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('v')).then(|| self.leak_estimate(&x));
                             let b = self.lp.basis();
-                            super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), self.deadline)
+                            let r = super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), self.deadline);
+                            if let Some(est) = est {
+                                let got = if let super::WarmPolish::Replaced(zn) = r { format!("{:.3e}", zn - z) } else { "-".into() };
+                                eprintln!("MIP: POLISH_WARM: leak estimate {est:.3e}, objective raised by the LP {got}");
+                            }
+                            r
                         };
                         match r {
                             super::WarmPolish::Replaced(zn) => z = zn,
