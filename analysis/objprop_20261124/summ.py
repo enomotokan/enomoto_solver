@@ -15,7 +15,7 @@ sys.path.insert(0, str(D))
 from cfg import CFGS, P1  # noqa: E402
 TL, SH = 60.0, 10.0
 PERPROB = "--perprob" in sys.argv
-files = [a for a in sys.argv[1:] if a != "--perprob"] or [str(D / "res_s*.jsonl")]
+files = [a for a in sys.argv[1:] if a != "--perprob"] or [str(D / "res_s*.jsonl"), str(D / "res2_s*.jsonl")]
 R = {}
 for f in files:
     for g in glob.glob(f):
