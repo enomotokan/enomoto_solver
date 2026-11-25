@@ -794,6 +794,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) nra_ret_ids: std::collections::HashSet<u64>,
     /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `i` ([`Solver::nra_i_move`]): 戻した行が LP にない普通のノードの [数, 最初の LP までの反復の和]
     pub(super) nra_i_base: [f64; 2],
+    /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `e`: [伸びずに外したラウンド, 外した行, 伸びて残したラウンド]
+    pub(super) nra_e_stats: [u64; 3],
     /// 診断用: 効き目で続けるノードの分離の結果の内訳 (打ち切り、伸び/差が 0.02 未満、0.1 未満、0.3 未満、0.3 以上)
     pub(super) nca_hist: [u64; 5],
     /// ノードで加えたカットの非零の数の指数移動平均 (`ENOMOTO_T_MIP_NODE_CUT_ADAPT_DENSITY`、[`Solver::nca_dense`])。
@@ -5701,6 +5703,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         nra_t: [0.0; 5],
         nra_ret_ids: std::collections::HashSet::new(),
         nra_i_base: [0.0; 2],
+        nra_e_stats: [0; 3],
         nca_hist: [0; 5],
         tdd: if super::treedepth::on() && !params.submip { Some(Box::default()) } else { None },
         nca_cut_nnz: None,
@@ -14015,7 +14018,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if self.nodes % k == 0 {
                         let rho = (self.nra_rho[0] as f64 + 1.0) / ((self.nra_rho[0] + self.nra_rho[1]) as f64 + 2.0);
                         eprintln!(
-                            "NRA_TRACE tid {} nodes {} t {:.2} inf {} bound {} phi {:.4} f {:.4} rho {:.4} rounds {} tratio {:.4} gsel {:.3e} wsel {:.3e} gtree {:.3e} wtree {:.3e} ntree {} ibase {} ibar {:.1}",
+                            "NRA_TRACE tid {} nodes {} t {:.2} inf {} bound {} phi {:.4} f {:.4} rho {:.4} rounds {} tratio {:.4} gsel {:.3e} wsel {:.3e} gtree {:.3e} wtree {:.3e} ntree {} ibase {} ibar {:.1} e_drop {:?}",
                             self.pool_tid,
                             self.nodes,
                             self.start.elapsed().as_secs_f64(),
@@ -14032,7 +14035,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             self.nra_t[3],
                             self.nra_t[4],
                             self.nra_i_base[0],
-                            if self.nra_i_base[0] > 0.0 { self.nra_i_base[1] / self.nra_i_base[0] } else { f64::NAN }
+                            if self.nra_i_base[0] > 0.0 { self.nra_i_base[1] / self.nra_i_base[0] } else { f64::NAN },
+                            self.nra_e_stats
                         );
                     }
                 }
@@ -14369,7 +14373,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let mut pse_pending: Option<(f64, u64)> = None;
             let mut pse_nopool = false;
             // 試作 `ENOMOTO_MIP_NODEROWS_ADAPT`: このノードでプールの選び直しのラウンドを回すか (持ち分 1 − f)
-            let nra_pool = self.nra_pool_due();
+            let mut nra_pool = self.nra_pool_due();
+            // `NODEROWS_ADAPT` の `e`: 選び直しのラウンドの前の目的値と、戻した行の最初の番号 (伸びなければその場で外す)
+            let mut nra_e_pending: Option<(f64, u64)> = None;
             // `NODEROWS_ADAPT` の `r`: 選び直しのラウンドの前の目的値 (解き直しで伸びたかを数える)
             let mut nra_pending: Option<f64> = None;
             // `NODEROWS_ADAPT` の `t`: 選び直しのラウンドの前の目的値と手間 (ticks)、ノードの処理の始めの手間 ([`Self::nra_t_ratio`])
@@ -14879,6 +14885,33 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 // 試作 `ENOMOTO_MIP_POOL_SEL` の `e`: 直前にプールから戻したなら、目的値が伸びたかを見る (許容誤差は行の活動量の判定と同じ
                 // 相対 1e-6)。伸びなければ戻したカットを外して解き直し (外した後の LP の最適値は戻す前と同じ)、このノードと子では戻さない
+                // 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の `e` (analysis/comboharm_20261124/README.md 10.4 節): 選び直しのラウンドで目的値が伸びなければ
+                // (`POOL_SEL` の `e` と同じ相対 1e-6 の判定)、戻した行をその場で外して解き直す (外した後の LP の最適値は戻す前と同じ)。
+                // このノードではもう選び直しのラウンドを回さない (`POOL_SEL` の `e` と違い、子のノードでは止めない)
+                if let Some((obj0, id0)) = nra_e_pending.take() {
+                    if node_obj <= obj0 + 1e-6 * (1.0 + obj0.abs()) {
+                        nra_pool = false;
+                        self.sync_cut_age();
+                        let m0 = self.p.m;
+                        let mr = self.lp.num_rows();
+                        let mut remove = vec![false; mr];
+                        let mut cnt = 0u64;
+                        for k in 0..self.cut_ids.len().min(mr.saturating_sub(m0)) {
+                            if self.cut_ids[k] >= id0 {
+                                remove[m0 + k] = true;
+                                cnt += 1;
+                            }
+                        }
+                        if cnt > 0 {
+                            self.delete_lp_rows(&remove);
+                            self.nra_e_stats[0] += 1;
+                            self.nra_e_stats[1] += cnt;
+                            continue;
+                        }
+                    } else {
+                        self.nra_e_stats[2] += 1;
+                    }
+                }
                 if let Some((obj0, id0)) = pse_pending.take() {
                     if node_obj > obj0 + 1e-6 * (1.0 + obj0.abs()) {
                         self.poolsel_stats[3] += 1;
@@ -15560,6 +15593,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let (obj_pre, id_pre) = (node_obj, self.next_cut_id);
                     let tk_pre = crate::ticks::total();
                     let added = if poolsel_on() || nra_pool { self.pool_select_round(&x) } else { self.pool_cut_round(&x, max_cuts) };
+                    if added && nra_pool && nra_has('e') && !poolsel_on() {
+                        nra_e_pending = Some((obj_pre, id_pre));
+                    }
                     if added && nra_pool && nra_t_on && !poolsel_on() {
                         nra_t_pending = Some((obj_pre, tk_pre));
                         if nra_has('w') || nra_has('i') {

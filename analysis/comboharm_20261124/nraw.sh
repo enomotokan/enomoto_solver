@@ -5,7 +5,7 @@
 cd "$(dirname "$0")/../.."
 D=analysis/comboharm_20261124; mkdir -p $D/logs_nraw
 one() { p=$1; th=$2; s=$3; tag=$4; tl=120; [ $p = fhnw-binpack4-4 ] && tl=200
-  case $tag in def) kv="X=1";; t) kv="ENOMOTO_MIP_NODEROWS_ADAPT=t";; tw) kv="ENOMOTO_MIP_NODEROWS_ADAPT=tw";; ti) kv="ENOMOTO_MIP_NODEROWS_ADAPT=ti";; esac
+  case $tag in def) kv="X=1";; t) kv="ENOMOTO_MIP_NODEROWS_ADAPT=t";; tw) kv="ENOMOTO_MIP_NODEROWS_ADAPT=tw";; ti) kv="ENOMOTO_MIP_NODEROWS_ADAPT=ti";; tie) kv="ENOMOTO_MIP_NODEROWS_ADAPT=tie";; esac
   grep -q "\"problem\": \"$p\", \"cfg\": \"$tag\", \"threads\": $th, \"seed\": $s," $D/res_nraw.jsonl 2>/dev/null && return
   f=$D/logs_nraw/${p}_${tag}_t${th}_s$s.log
   env ENOMOTO_MIP_NRA_TRACE=200 ENOMOTO_MIP_LOG=1 ENOMOTO_MIP_THREADS=$th ENOMOTO_T_MIP_SEED=$s $kv .venv/bin/python scripts/run_miplib_benchmark.py --worker-ours .miplib_cache/$p.mps --time-limit $tl --threads $th > $f 2>&1
@@ -13,5 +13,7 @@ one() { p=$1; th=$2; s=$3; tag=$4; tl=120; [ $p = fhnw-binpack4-4 ] && tl=200
   echo "{\"problem\": \"$p\", \"cfg\": \"$tag\", \"threads\": $th, \"seed\": $s, \"result\": ${r:-null}}" >> $D/res_nraw.jsonl
   echo "$p $tag t$th s$s $(echo $r | cut -c1-110)"; }
 export -f one; export D
-for p in mc11 fhnw-binpack4-4 mik-250-20-75-4 roll3000; do for s in 1 2 3; do for tag in def t tw ti; do echo "$p 1 $s $tag"; done; done; done | xargs -P 3 -L 1 bash -c 'one $0 $1 $2 $3'
-for s in 1 2 3; do for tag in def t tw ti; do one mc11 4 $s $tag; done; done
+for p in mc11 fhnw-binpack4-4 mik-250-20-75-4 roll3000; do for s in 1 2 3; do for tag in def t tw ti tie; do echo "$p 1 $s $tag"; done; done; done | xargs -P 3 -L 1 bash -c 'one $0 $1 $2 $3'
+for s in 1 2 3; do for tag in def t tw ti tie; do one mc11 4 $s $tag; done; done
+# 10.4 節: POOL_SEL=e が P の 4 スレッドで害の出た neos-911970・neos5 (protoscreen 9.3) を 4 スレッドで
+for p in neos-911970 neos5; do for s in 1 2 3; do for tag in def t ti tie; do one $p 4 $s $tag; done; done; done
