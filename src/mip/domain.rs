@@ -178,7 +178,7 @@ pub fn act_work() -> u64 {
 
 /// 試作 `ENOMOTO_MIP_GLOBALFIX` (analysis/globalfix_20261124、既定では使わない): 値の文字で部品を選ぶ。
 /// `a` 根のノード (深さ 0) の整数列の締め付けを大域的な境界に入れる、`b` `reset_to_root` で保留中の大域的な締め付けを置いた後に伝播し切って
-/// 大域的な境界にする、`c` 長さ 1 のリテラルの衝突を大域的な固定にする。
+/// 大域的な境界にする、`c` 長さ 1 のリテラルの衝突を大域的な固定にする、`k` `c` を整数列だけにしたもの。
 pub(crate) fn globalfix(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     V.get_or_init(|| match env_str!("ENOMOTO_MIP_GLOBALFIX") {
@@ -190,8 +190,8 @@ pub(crate) fn globalfix(c: char) -> bool {
 
 /// [`globalfix`] の数え (全スレッドの合計、`ENOMOTO_MIP_LOG` の終わりに出す): [`b` の伝播の回数, `b` で締めた整数列の境界の数,
 /// `b` で固定した整数列の数, `b` の矛盾の回数, `a` を当てた回数, `a` で大域にした整数列の境界の数, `a` で固定した整数列の数,
-/// `c` で大域に置いた固定の数]
-pub(crate) static GF_STATS: [std::sync::atomic::AtomicU64; 8] = [const { std::sync::atomic::AtomicU64::new(0) }; 8];
+/// `c`・`k` で大域に置いた固定の数, そのうち連続列の数]
+pub(crate) static GF_STATS: [std::sync::atomic::AtomicU64; 9] = [const { std::sync::atomic::AtomicU64::new(0) }; 9];
 
 /// 診断 `ENOMOTO_MIP_DIAG_GLOBALAUDIT` (analysis/globalaudit_20261124、既定では使わない。解き方は変えない): 大域的に分かった情報を
 /// 捨てている量を数えて `ENOMOTO_MIP_LOG` に出す
