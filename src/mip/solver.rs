@@ -6418,7 +6418,8 @@ pub(super) fn pool_close_on() -> bool {
 }
 
 /// 試作 `ENOMOTO_MIP_ROOTPAR_PH=<文字>` (既定では使わない、analysis/rootpar_ph_20261126): 4 スレッドの根の前処理・ヒューリスティクスの段で、
-/// 空いているスレッドを使う。`r`: カット前の LP 解の RENS をカットのループの前に並列のサブ MIP として出す
+/// 空いているスレッドを使う。`r`: カット前の LP 解の RENS をカットのループの前に並列のサブ MIP として出す。
+/// `w`: 暫定解を受け取るときの研磨の LP に、整数を固定した LP と同じ時間の上限を付ける (1 スレッドの道筋も変わる)
 pub(super) fn rootpar_ph(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     V.get_or_init(|| env_str!("ENOMOTO_MIP_ROOTPAR_PH").map_or(String::new(), |v| v.to_string())).contains(c)
@@ -8202,7 +8203,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             super::WarmPolish::NotSolved
                         } else {
                             let b = if env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('n')) { Some(self.lp.basis()) } else { rb.or_else(|| Some(self.lp.basis())) };
-                            let r = super::polish_in_problem_warm(&self.p, &mut x, z, b.as_ref(), self.deadline);
+                            // 試作 `ENOMOTO_MIP_ROOTPAR_PH` の `w` ([`rootpar_ph`]、analysis/rootpar_ph_20261126): 研磨の LP に、整数を固定した LP
+                            // (`resolve_continuous`) と同じ時間の上限 (`ENOMOTO_T_MIP_INC_LP_TIME_FRAC` (0.02) × 時間の上限、最低 1 秒) を付ける。
+                            // 間に合わなければ下の `NotSolved` の道 (その点を出した LP の双対値からの見積り `Est`、取れなければ `Unknown` で返す前に確かめる) に入る。
+                            // dano3_3 (4 スレッド) では根のカットのループの乱択丸めの解の研磨が 20 秒かかり、カットのループの時間の上限を越えていた
+                            let deadline = if rootpar_ph('w') && self.params.frac_tl().is_finite() {
+                                let cap = (tunable!("ENOMOTO_T_MIP_INC_LP_TIME_FRAC", 0.02, f64) * self.params.frac_tl()).max(1.0);
+                                let d = Instant::now() + std::time::Duration::from_secs_f64(cap);
+                                Some(self.deadline.map_or(d, |g| g.min(d)))
+                            } else {
+                                self.deadline
+                            };
+                            let r = super::polish_in_problem_warm(&self.p, &mut x, z, b.as_ref(), deadline);
                             // 診断 `ENOMOTO_MIP_POLISH_STATS` の `v`: 見積りと、解き直しで実際に上がった目的値を並べて出す
                             if env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('v')) {
                                 let got = if let super::WarmPolish::Replaced(zn) = r { format!("{:.3e}", zn - z) } else { "-".into() };
