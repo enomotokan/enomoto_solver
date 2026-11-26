@@ -161,18 +161,7 @@ impl St<'_> {
 
     fn set_viol(&mut self, r: usize) {
         let v = self.viol_at(r, self.act[r]) > 0.0;
-        if v && self.vpos[r] == usize::MAX {
-            self.vpos[r] = self.vset.len();
-            self.vset.push(r);
-        } else if !v && self.vpos[r] != usize::MAX {
-            let k = self.vpos[r];
-            let last = *self.vset.last().unwrap();
-            self.vset.swap_remove(k);
-            if last != r {
-                self.vpos[last] = k;
-            }
-            self.vpos[r] = usize::MAX;
-        }
+        super::idxset::set_member(&mut self.vset, &mut self.vpos, r, v);
     }
 
     fn reset(&mut self) {

@@ -9,6 +9,7 @@
 
 /// 分枝切除法の LP とやり取りする型 (基底・結果・打ち切り条件)。
 pub(crate) mod lp;
+pub(crate) mod idxset;
 /// `ENOMOTO_MIP_FOLD` (既定): 色の細分化で MIP を畳む。
 pub(crate) mod fold;
 /// 完全単模の判定 (fold と implint_tu で共通)。
