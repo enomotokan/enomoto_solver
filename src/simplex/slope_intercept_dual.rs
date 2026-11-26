@@ -1515,7 +1515,7 @@ thread_local! {
     /// 試作 `ENOMOTO_MIP_LPPROBE_FIX` の `d` (analysis/lpprobe_20261126): 前処理の LP プロービングの子の LP の間 (このスレッドで
     /// [`lpprobe_dse_scope`] で立てた間) だけ、厳密な DSE 重みを (行列の場所, 行の数, 基底) ごとに覚えて使い回す
     static LPP_DSE_ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static LPP_DSE: std::cell::RefCell<Option<(usize, usize, Vec<usize>, Vec<f64>, bool)>> = const { std::cell::RefCell::new(None) };
+    static LPP_DSE: std::cell::RefCell<Option<(usize, usize, Vec<usize>, Vec<f64>, bool, [u64; crate::ticks::NK])>> = const { std::cell::RefCell::new(None) };
     /// 診断: [使い回した回数, 作った回数, 検査で値が違った回数]
     static LPP_DSE_STATS: std::cell::Cell<[u64; 3]> = const { std::cell::Cell::new([0; 3]) };
 }
@@ -1543,7 +1543,7 @@ fn lpp_dse_exact(std: &StdForm, basis: &[usize], m: usize, lu: &sparse_lu::FtLu,
         return super::DseState::from_basis(m, lu);
     }
     let key = (std as *const StdForm as usize, m);
-    let hit = LPP_DSE.with(|c| c.borrow().as_ref().filter(|e| e.0 == key.0 && e.1 == key.1 && e.2 == basis).map(|e| (e.3.clone(), e.4)));
+    let hit = LPP_DSE.with(|c| c.borrow().as_ref().filter(|e| e.0 == key.0 && e.1 == key.1 && e.2 == basis).map(|e| (e.3.clone(), e.4, e.5)));
     let check = env_str!("ENOMOTO_MIP_LPPROBE_DIAG") == Some("dsecheck");
     let bump = |k: usize| {
         LPP_DSE_STATS.with(|c| {
@@ -1552,8 +1552,13 @@ fn lpp_dse_exact(std: &StdForm, basis: &[usize], m: usize, lu: &sparse_lu::FtLu,
             c.set(v);
         })
     };
-    if let Some((w, par)) = hit {
+    if let Some((w, par, tk)) = hit {
         bump(0);
+        // 決定的な手間の時計 ([`crate::ticks`]) は作り直したときと同じだけ進める (4 スレッドでは手間の時計で道筋が決まる所がある。
+        // 足さないと noswot の 4 スレッドで道筋が変わった)
+        if !check {
+            crate::ticks::add_raw(&tk);
+        }
         if check {
             let fresh = super::DseState::from_basis(m, lu);
             if fresh.w.iter().zip(&w).any(|(a, b)| a.to_bits() != b.to_bits()) {
@@ -1564,10 +1569,13 @@ fn lpp_dse_exact(std: &StdForm, basis: &[usize], m: usize, lu: &sparse_lu::FtLu,
         return super::DseState { w, use_parallel: par };
     }
     let past = super::dse_past_deadline_fn();
+    let tk0 = crate::ticks::raw();
     let r = super::DseState::from_basis(m, lu);
+    let tk1 = crate::ticks::raw();
+    let tk: [u64; crate::ticks::NK] = std::array::from_fn(|k| tk1[k].wrapping_sub(tk0[k]));
     bump(1);
     if !past() {
-        LPP_DSE.with(|c| *c.borrow_mut() = Some((key.0, key.1, basis.to_vec(), r.w.clone(), r.use_parallel)));
+        LPP_DSE.with(|c| *c.borrow_mut() = Some((key.0, key.1, basis.to_vec(), r.w.clone(), r.use_parallel, tk)));
     }
     r
 }
