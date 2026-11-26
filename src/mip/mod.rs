@@ -10173,7 +10173,20 @@ fn fj_p3_problem_inner(pc: &MipProblem) -> Option<(MipProblem, Vec<crate::presol
         eprint!("MIP:   FJ_P3 ");
     }
     crate::set_fj_p3_force(true);
+    // 試作 `ENOMOTO_MIP_ENUM_ADAPT` の `t` (analysis/nrashare_20261126 7 節): このスレッドに ENUM_ADAPT の時計 (`ENUM_T0`、主のスレッドの求解の始めに置く) が
+    // なければ、この前処理の始めを時計にする (前処理の後は元に戻す)。時計がないと経過は無限大で「c = 0 で常に続ける」になり、FJ のスレッドの FJ_P3 の前処理で
+    // 列挙とプロービングの繰り返し・かけ直しが止まらず、期限を過ぎて FJ・Local-MIP が回らなかった (neos-631710 の 4 スレッド、10.1 秒)
+    let enum_clock = enum_adapt_on() && env_str!("ENOMOTO_MIP_ENUM_ADAPT").is_some_and(|v| v.contains('t')) && ENUM_T0.with(|c| c.get()).is_none();
+    let step_prev = ENUM_STEP_LAST.with(|c| c.get());
+    if enum_clock {
+        ENUM_T0.with(|c| c.set(Some(std::time::Instant::now())));
+        ENUM_STEP_LAST.with(|c| c.set(None));
+    }
     let r = presolve_mip(pc, false, false, None);
+    if enum_clock {
+        ENUM_T0.with(|c| c.set(None));
+        ENUM_STEP_LAST.with(|c| c.set(step_prev));
+    }
     crate::set_fj_p3_force(false);
     if pt {
         pretime::report(pc.m, pc.n, pc.nnz, 0);
