@@ -3906,7 +3906,8 @@ pub(super) fn tree_share_cuts() -> bool {
     env_def!("ENOMOTO_MIP_TREE_SHARE_CUTS", "1").is_some()
 }
 
-/// 試作 `ENOMOTO_MIP_PAR4` (既定では使わない、analysis/par4_20261126/README.md): 複数スレッドに特有の直しの文字。
+/// `ENOMOTO_MIP_PAR4` (2026-11-26 から既定 `fmr`、`=0` で以前の動き。analysis/par4_20261126/README.md): 複数スレッドに特有の直しの文字。
+/// 1 スレッドの道筋は変えない。P の 4 スレッドで `mr` は既定どうしの揺れの中 (中立)、`f` は fhnw-binpack4-4 の 4 スレッドで 0.57 倍。
 /// - `f`: 実行可能性問題の早めの FJ・Local-MIP ([`super::feas_fj_lmip_early_from`]) で、2 本以上でも 1 本ごとに手間の期限を使う
 ///   (今は 1 本のときだけ。4 本では壁時計の上限まで回り、fhnw-binpack4-4 の 4 スレッドで 20 秒を使い切る)
 /// - `m`: 主 (tid 0) が木の中で作ったカットもほかのスレッドに流す (今は従のものだけ流す)
@@ -3914,7 +3915,7 @@ pub(super) fn tree_share_cuts() -> bool {
 ///   証明・衝突・カットを押し出す)
 pub(crate) fn par4(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_str!("ENOMOTO_MIP_PAR4").map_or(String::new(), |v| v.to_string())).contains(c)
+    V.get_or_init(|| env_def!("ENOMOTO_MIP_PAR4", "fmr").map_or(String::new(), |v| v.to_string())).contains(c)
 }
 
 /// 学習の記録に加える (古いものから捨てて `ENOMOTO_T_MIP_TREE_LEARNED_MAX` 件まで残す)。
@@ -10791,7 +10792,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 木の写しから解く: 写しを作ったときの LP のカットの行とカットプールを入れる
         if let Some(snap) = self.snap.clone() {
-            // 試作 `ENOMOTO_MIP_PAR4` の `r` ([`par4`]): 根のプールは全スレッドが写しで持つので、学習の記録に流し直さない
+            // `ENOMOTO_MIP_PAR4` の `r` (既定、[`par4`]): 根のプールは全スレッドが写しで持つので、学習の記録に流し直さない
             let imp = self.importing;
             self.importing = imp || par4('r');
             for (c, r) in &snap.pool {
