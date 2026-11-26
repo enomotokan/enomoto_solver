@@ -29882,7 +29882,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         None
                     };
                     let t = Instant::now();
+                    // `j`: 求解の終わりでは従のスレッドは止まっている ([`Self::join_workers`] の後) ので、研磨の LP の同時実行にスレッド数を渡す
+                    // (木の主のスレッドは 1 にしてある)
+                    let prev = (rootpar_ph('j') && self.params.threads > 1).then(|| crate::simplex::mip_lp::set_cold_race_threads(self.params.threads));
                     let r = super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), dl);
+                    if let Some(k) = prev {
+                        crate::simplex::mip_lp::set_cold_race_threads(k);
+                    }
                     if warm == 3 && self.params.verbose {
                         let got = if let super::WarmPolish::Replaced(zn) = r { format!("{:.3e}", zn - z) } else { "-".into() };
                         let est = match mark {
