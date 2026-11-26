@@ -1511,6 +1511,67 @@ pub(crate) fn xprof_enable(on: bool) {
     });
 }
 
+thread_local! {
+    /// 試作 `ENOMOTO_MIP_LPPROBE_FIX` の `d` (analysis/lpprobe_20261126): 前処理の LP プロービングの子の LP の間 (このスレッドで
+    /// [`lpprobe_dse_scope`] で立てた間) だけ、厳密な DSE 重みを (行列の場所, 行の数, 基底) ごとに覚えて使い回す
+    static LPP_DSE_ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static LPP_DSE: std::cell::RefCell<Option<(usize, usize, Vec<usize>, Vec<f64>, bool)>> = const { std::cell::RefCell::new(None) };
+    /// 診断: [使い回した回数, 作った回数, 検査で値が違った回数]
+    static LPP_DSE_STATS: std::cell::Cell<[u64; 3]> = const { std::cell::Cell::new([0; 3]) };
+}
+
+/// 試作 `ENOMOTO_MIP_LPPROBE_FIX` の `d`: このスレッドで厳密な DSE 重みの使い回しを始める (`true`)・やめる (`false`)。どちらでも覚えた重みは消す
+pub(crate) fn lpprobe_dse_scope(on: bool) {
+    LPP_DSE_ON.with(|c| c.set(on));
+    LPP_DSE.with(|c| *c.borrow_mut() = None);
+}
+
+/// 試作 `ENOMOTO_MIP_LPPROBE_FIX` の `d` の診断: このスレッドの [使い回した回数, 作った回数, 検査で値が違った回数] を取り出して 0 に戻す
+pub(crate) fn lpprobe_dse_stats_take() -> [u64; 3] {
+    LPP_DSE_STATS.with(|c| c.replace([0; 3]))
+}
+
+/// 厳密な DSE 重み ([`super::DseState::from_basis`]) を作る。`ENOMOTO_MIP_LPPROBE_FIX` の `d` の間 ([`lpprobe_dse_scope`]) は、
+/// 同じ行列 (`std` の場所・行の数) の同じ基底を一から分解した直後 (`lu_fresh`、前の分解を使わない [`refactorize`]) なら、前に作った重みを
+/// そのまま返す。一から分解した LU は基底だけで決まるので、重みは作り直した値とビット単位で同じ (前処理の LP プロービングの子の LP は
+/// どれも同じ基底から始まり、LU の更新が 64 回を超えているので毎回一から分解し、m 回の BTRAN で重みを作り直していた。
+/// cvs16r128-89 では子の LP 1 本に約 0.12 秒)。期限で途中まで作った重み (残りは単位重み) は覚えない。
+/// 検査 `ENOMOTO_MIP_LPPROBE_DIAG=dsecheck`: 使い回すときも作り直して値を比べ、違えば数える (返すのは作り直した値)
+fn lpp_dse_exact(std: &StdForm, basis: &[usize], m: usize, lu: &sparse_lu::FtLu, lu_fresh: bool) -> super::DseState {
+    let _ = lu_fresh;
+    if !LPP_DSE_ON.with(|c| c.get()) || lu.update_count() != 0 {
+        return super::DseState::from_basis(m, lu);
+    }
+    let key = (std as *const StdForm as usize, m);
+    let hit = LPP_DSE.with(|c| c.borrow().as_ref().filter(|e| e.0 == key.0 && e.1 == key.1 && e.2 == basis).map(|e| (e.3.clone(), e.4)));
+    let check = env_str!("ENOMOTO_MIP_LPPROBE_DIAG") == Some("dsecheck");
+    let bump = |k: usize| {
+        LPP_DSE_STATS.with(|c| {
+            let mut v = c.get();
+            v[k] += 1;
+            c.set(v);
+        })
+    };
+    if let Some((w, par)) = hit {
+        bump(0);
+        if check {
+            let fresh = super::DseState::from_basis(m, lu);
+            if fresh.w.iter().zip(&w).any(|(a, b)| a.to_bits() != b.to_bits()) {
+                bump(2);
+            }
+            return fresh;
+        }
+        return super::DseState { w, use_parallel: par };
+    }
+    let past = super::dse_past_deadline_fn();
+    let r = super::DseState::from_basis(m, lu);
+    bump(1);
+    if !past() {
+        LPP_DSE.with(|c| *c.borrow_mut() = Some((key.0, key.1, basis.to_vec(), r.w.clone(), r.use_parallel)));
+    }
+    r
+}
+
 /// 診断用: 前回の印からここまでの時間を区間 `label` に足す。
 pub(crate) fn xprof(label: &'static str) {
     if !XPROF_ANY.load(std::sync::atomic::Ordering::Relaxed) {
@@ -4744,9 +4805,14 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // 現基底の LU 分解(Forrest-Tomlin 更新付き)。
     xprof("setup1");
     let lu_checked = WARM_LU_CHECKED.with(|c| c.replace(false)) && env_str!("ENOMOTO_SIMPLEX_WARM_LU_RECHECK").is_none_or(|v| v == "0");
+    // `lu_fresh`: この求解の始めに基底を一から分解した (前の分解を使わない) か ([`lpp_dse_exact`] の使い回しの条件)
+    let mut lu_fresh = false;
     let mut lu = match WARM_LU.with(|w| w.borrow_mut().take()) {
         Some(l) if warm_started && (lu_checked || warm_lu_matches(std, &basis, &l)) => *l,
-        _ => refactorize(std, &basis_pos, None)?,
+        _ => {
+            lu_fresh = true;
+            refactorize(std, &basis_pos, None)?
+        }
     };
     xprof("setup_lu");
 
@@ -5164,7 +5230,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 eprintln!("DEBUG_EXT: DSE weights: exact for the whole basis");
             }
             dse_kind = 2;
-            super::DseState::from_basis(m, &lu)
+            lpp_dse_exact(std, &basis, m, &lu, lu_fresh)
         }
         // 試作 `ENOMOTO_MIP_DSE_INIT` の `u` ([`dse_init_has`]、既定では使わない): warm start で重みが渡らなかったときも、基底に構造列が
         // あれば厳密な重みから始める (HiGHS の `HEkkDual::solve`: 全スラックでない基底では `computeDualSteepestEdgeWeights`)。
@@ -5172,7 +5238,7 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         // 試作 `ENOMOTO_MIP_DSE_COST` ([`dse_cost_skip`]): 作り直しの手間がこの求解の見込みの手間を超えるなら作らない (単位重み)
         _ if warm_started && dse_init_has('u') && basis.iter().any(|&j| j < n_orig) && !dse_cost_skip(m) => {
             dse_kind = 2;
-            super::DseState::from_basis(m, &lu)
+            lpp_dse_exact(std, &basis, m, &lu, lu_fresh)
         }
         w => {
             if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {

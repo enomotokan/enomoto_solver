@@ -4216,6 +4216,11 @@ pub(crate) fn heur1t(c: char) -> bool {
 /// 列の効き目も入るので、強分枝しない分枝 (擬似費用だけで選ぶ分枝) の選び方を狂わせる (neos859080 の 1 スレッドで、SB_PROBEBD だけで
 /// ノードが 2〜5 千から 1.5〜5.6 万に増え、子の LP に境界を渡さない診断 `SB_PROP_NO_LP`・`BT_EARLY` では既定並みに戻った)。
 /// 子の判定 (切る・ノードに置く境界) にはそのまま使う
+/// 診断 `ENOMOTO_MIP_SB_PROP_TWIN` (analysis/c2c1t_20261126 の 4 節): 伝播の境界つきで解いた強分枝の子を、境界なしでも解き直して伸びを並べて出す
+pub(crate) fn sb_prop_twin() -> bool {
+    env_str!("ENOMOTO_MIP_SB_PROP_TWIN").is_some_and(|v| v != "0")
+}
+
 pub(crate) fn sb_prop_pskip() -> bool {
     env_str!("ENOMOTO_MIP_SB_PROP_PSKIP").is_some_and(|v| v != "0")
 }
@@ -20190,6 +20195,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let mut side_bd: [std::collections::HashMap<usize, (f64, f64)>; 2] = Default::default();
             // 試作 `ENOMOTO_MIP_SB_PROP_PSKIP` ([`sb_prop_pskip`]): 子の LP を伝播で締まった境界つきで解いたか (側ごと)
             let mut prop_lp = [false; 2];
+            // 診断 `ENOMOTO_MIP_SB_PROP_TWIN` ([`sb_prop_twin`]): 子の LP に渡す前の、伝播で締まった列の境界 (ノードの値)
+            let mut prop_orig: [Vec<(usize, f64, f64)>; 2] = Default::default();
             // `ENOMOTO_MIP_SB_PROBEBD=2` (試作): 両方の子に共通の境界をノードに置いたら、その場でノードで伝播して連鎖させる
             let sb_probebd2 = sb_probebd && env_str!("ENOMOTO_MIP_SB_PROBEBD").is_some_and(|v| v == "2");
             // 試作 `ENOMOTO_MIP_PCL` の `a`: 子の LP が反復上限で途中の値になった側があるか
@@ -20409,9 +20416,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.dom.backtrack_to(self.p, pos);
                     } else if env_str!("ENOMOTO_MIP_SB_PROP_NO_LP").is_none() {
                         for (c, _, _) in self.dom.changes_since(pos) {
+                            if sb_prop_twin() && c != j && !prop_orig[side].iter().any(|e| e.0 == c) {
+                                let (l0, u0) = self.lp.col_bounds(c);
+                                prop_orig[side].push((c, l0, u0));
+                            }
                             self.lp.set_col_bounds(c, self.dom.lo[c], self.dom.up[c]);
                             self.sb_prop_stats[1] += 1;
-                            prop_lp[side] = true;
+                            // 分けた列 `j` 自身の境界は伝播の効き目ではないので数えない
+                            if c != j {
+                                prop_lp[side] = true;
+                            }
                         }
                     }
                 }
@@ -20603,6 +20617,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             child_rc[side] = sb_child_rc(&self.lp, j, is_up);
                         }
                         let delta = self.hnfbr_delta(j, v, is_up);
+                        // 診断 `ENOMOTO_MIP_PCLOG`: 強分枝の観測も 1 行出す (PSB ノード 深さ 列 上か 単位あたりの伸び 伝播の境界つきか 擬似費用に入れたか)
+                        if pclog_on() && !self.params.submip {
+                            eprintln!("PSB {} {} {j} {} {:.6e} {} {}", self.nodes, depth, is_up as u8, gains[side] / delta.max(1e-9), prop_lp[side] as u8, !(prop_lp[side] && sb_prop_pskip()) as u8);
+                        }
+                        // 診断 `ENOMOTO_MIP_SB_PROP_TWIN`: 同じ子を、伝播で締まった列の境界をノードの値に戻して解き直し、伸び (単位あたり) を並べて出す
+                        // (PTW ノード 深さ 列 上か 伝播つきの伸び 伝播なしの伸び 伝播なしの状態 戻した列の数)。LP は解き直しの前の状態に戻す (道筋は変わりうる)
+                        if sb_prop_twin() && prop_lp[side] && !self.params.submip {
+                            let cur = self.lp.save_state();
+                            for &(c, l0, u0) in &prop_orig[side] {
+                                self.lp.set_col_bounds(c, l0, u0);
+                            }
+                            let st2 = self.lp.solve(&self.limits_k(sb_iter_limit, 1));
+                            let g2 = if st2 == LpStatus::Optimal { (self.lp.objective() + self.p.offset - node_obj).max(0.0) } else { f64::NAN };
+                            eprintln!("PTW {} {} {j} {} {:.6e} {:.6e} {st2:?} {}", self.nodes, depth, is_up as u8, gains[side] / delta.max(1e-9), g2 / delta.max(1e-9), prop_orig[side].len());
+                            self.lp.restore_state(&cur);
+                        }
                         if prop_lp[side] && sb_prop_pskip() {
                             self.sb_prop_stats[5] += 1;
                         } else {
@@ -30020,7 +30050,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 研磨で上げた目的値の幅 (共有の最良値は研磨の前の値のままなので、最後の守りではこの幅を引いて比べる)
         let mut warm_raise = 0.0;
         // 試作 `ROOTPAR_PH` の `f`: 最後の研磨の前の値 (木で刈りに使った、見積りを足した値) と、研磨で上がった幅
-        let mut rph_f_raise: Option<(f64, f64)> = None;
+        let mut rph_f_raise: Option<(f64, f64, (f64, f64))> = None;
         if super::polish_strict() && super::polish_warm_mode() > 0 && !self.params.submip && self.snap.is_none() {
             let warm = super::polish_warm_mode();
             let mut leak = 0.0;
@@ -30029,6 +30059,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 通らなかった解)
                 let mark = self.warm_mark.as_ref().filter(|(xm, _)| *xm == x).map(|(_, m)| *m);
                 let z0 = z;
+                super::POLISH_TOL_LEAK.with(|c| c.set((0.0, 0.0)));
                 let r = if mark == Some(WarmMark::Polished) {
                     super::WarmPolish::Kept
                 } else if warm == 3 && !rootpar_ph('f') && !rootpar_ph('g') {
@@ -30062,7 +30093,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             Some(WarmMark::Est(e)) => format!("{e:.3e}"),
                             _ => "-".into(),
                         };
-                        eprintln!("MIP: ROOTPAR_PH f: final polish {:.3}s, leak estimate {est} (already added), objective changed by the LP {got}", t.elapsed().as_secs_f64());
+                        let (w1, w2) = super::POLISH_TOL_LEAK.with(|c| c.get());
+                        eprintln!("MIP: ROOTPAR_PH f: final polish {:.3}s, leak estimate {est} (already added), objective changed by the LP {got}, tolerance leak bound LP {w1:.3e} MIP {w2:.3e}", t.elapsed().as_secs_f64());
                     }
                     r
                 };
@@ -30122,7 +30154,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 warm_raise = (z - z0).max(0.0);
                 if warm == 3 && (rootpar_ph('f') || rootpar_ph('g')) {
-                    rph_f_raise = Some((z0, z - z0));
+                    rph_f_raise = Some((z0, z - z0, super::POLISH_TOL_LEAK.with(|c| c.get())));
                 }
                 self.incumbent = Some((z, x));
             }
@@ -30655,9 +30687,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 試作 `ROOTPAR_PH` の `f`: 木は見積りを足した値 z0 で刈った。刈った枝に z0 − (刈りの許容差) より良い解はないので、全体の下界は z0 の側で
         // 抑えられる。最後の研磨で値が z0 より上がった (見積りが足りなかった) とき、返す値 z と z0 の差が既存の許容 (abs_gap、rel_gap × |z|) の中なら
         // 最適のまま返す。越えたら最適とは言えないので、下界を z0 に下げ、最適でない印 (`NotSolved`、共有の最良値の守りと同じ) で返す
+        // 目的値の格子 (`obj_step`・`obj_lat`) があれば、刈りの上限 ([`prune_limit_of`]) が z0 と z で同じ (同じ格子の目) なら、刈った枝は z でも
+        // 刈られるので最適のまま (fuzz_objint で、許容の中の違反の分 4.5e-7 上がって最適と言わなくなっていた。README 5.7 節)
+        let same_limit = |z0: f64, z: f64| {
+            let lim = |v: f64| prune_limit_of(Some(v), f64::INFINITY, self.obj_step, self.obj_lat, self.p.offset, self.params.rel_gap, self.params.abs_gap, f64::INFINITY);
+            lim(z) <= lim(z0)
+        };
         let (status, best_bound) = match (status, rph_f_raise) {
-            (MipStatus::Optimal, Some((z0, dz))) if dz > self.params.abs_gap.max(self.params.rel_gap * (z0 + dz).abs()).max(1e-9 * z0.abs().max(1.0)) => {
-                eprintln!("MIP: ROOTPAR_PH f: the final polish raised the objective by {dz:.3e} beyond the gap tolerance; not reporting optimality (bound {z0:.10e})");
+            // 許容: 刈りの余裕 (abs_gap・rel_gap・1e-9 |z0|) と、研磨の LP の双対値での「許容の中で実行可能な点の漏れの最大」W
+            // (`d` の返す研磨した解もこの大きさまでの漏れを含みうる。d と同じ許容の水準。README 5.7 節) の大きい方
+            // W は W_mip (MIP の実行可能性の許容の水準)。e の木は研磨しない暫定解をこの許容で受け取って刈りに使うので、刈りの誤りもこの水準まである
+            // (W_lp = `d` の水準では fuzz_objint の 5 回が越えた。README 5.7 節)
+            (MipStatus::Optimal, Some((z0, dz, (w_lp, w)))) if dz > self.params.abs_gap.max(self.params.rel_gap * (z0 + dz).abs()).max(1e-9 * z0.abs().max(1.0)).max(w) && !same_limit(z0, z0 + dz) => {
+                eprintln!("MIP: ROOTPAR_PH f: the final polish raised the objective by {dz:.3e} beyond the gap tolerance and the tolerance leak bound {w:.3e} (LP level {w_lp:.3e}); not reporting optimality (bound {z0:.10e})");
                 (MipStatus::NotSolved, best_bound.min(z0))
             }
             (s, _) => (s, best_bound),
