@@ -4821,6 +4821,12 @@ impl FtLu {
             let flops: u64 = (0..m).map(|s| base.l_col.seg(s).len() as u64 * owner_count[s] as u64).sum();
             build_tick += flop_coef * flops;
         }
+        // 試作 `ENOMOTO_LU_REFAC_BAL` ([`super::basis_kernel`] の `refac_bal_due`): 構築の手間を見積りの係数でなく演算の数で数える
+        // (行の走査 m + 因子の非零 + 消去の積和 Σ_s |L 列 s| · |U 行 s|。密なブロックも割り引かない)
+        if super::basis_kernel::refac_bal_on() {
+            let flops: u64 = (0..m).map(|s| base.l_col.seg(s).len() as u64 * owner_count[s] as u64).sum();
+            build_tick = m as u64 + l_nnz + u_off + flops;
+        }
         // fill 基準は対角も含めた全格納要素数 (`factorize_reusing_order` の数え方と一致)。
         let fill_baseline = (l_nnz + u_off) as usize + m;
         let mut singles: Vec<SEta> = Vec::new();
