@@ -2888,6 +2888,8 @@ pub(crate) struct TreeProf {
     lns_s: f64,
     /// 最後の待ち (探索の終わり・止める合図までノードが来なかった) の時間。
     tail_s: f64,
+    /// 木の探索を始めた時刻から、共有の待ち行列から最初のノードを受け取るまで (従。`ready_s` + 最初の待ち。analysis/paridle_20261126)。
+    first_s: f64,
     /// スレッドの間の同期 (境界・学習・擬似費用・ノードを渡す) の時間。
     sync_s: f64,
     /// 処理したノードの数 (取り出した数)。
@@ -2931,9 +2933,9 @@ impl TreeProf {
         let per = |k: usize| if self.kind_n[k] > 0 { self.kind_it[k] as f64 / self.kind_n[k] as f64 } else { 0.0 };
         let pms = |k: usize| if self.kind_n[k] > 0 { 1e3 * self.kind_s[k] / self.kind_n[k] as f64 } else { 0.0 };
         format!(
-            "{} | tid {} ready {:.2}s end {:.2}s idle {:.2}s ({} waits, lock {:.2}s sleep {:.2}s, pool mean {:.1}) lns {:.2}s tail {:.2}s sync {:.3}s nodes {} (lb>=opt {}) first LP [dive {} {:.1}it {:.2}ms | queue {} {:.1}it {:.2}ms | pool {} {:.1}it {:.2}ms]",
+            "{} | tid {} ready {:.2}s first {:.2}s end {:.2}s idle {:.2}s ({} waits, lock {:.2}s sleep {:.2}s, pool mean {:.1}) lns {:.2}s tail {:.2}s sync {:.3}s nodes {} (lb>=opt {}) first LP [dive {} {:.1}it {:.2}ms | queue {} {:.1}it {:.2}ms | pool {} {:.1}it {:.2}ms]",
             self.proofs_line(),
-            self.tid, self.ready_s, self.end_s, self.idle_s, self.waits, self.lock_s, self.sleep_s, self.pool_len_sum as f64 / self.kind_n[2].max(1) as f64, self.lns_s, self.tail_s, self.sync_s, self.nodes, waste,
+            self.tid, self.ready_s, self.first_s, self.end_s, self.idle_s, self.waits, self.lock_s, self.sleep_s, self.pool_len_sum as f64 / self.kind_n[2].max(1) as f64, self.lns_s, self.tail_s, self.sync_s, self.nodes, waste,
             self.kind_n[0], per(0), pms(0), self.kind_n[1], per(1), pms(1), self.kind_n[2], per(2), pms(2)
         )
     }
@@ -29081,6 +29083,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     self.pool_stats[1] += 1;
                     self.pool1_cnt[2] += 1;
+                    if self.tprof.first_s == 0.0 && self.snap.is_some() {
+                        self.tprof.first_s = pool.t0.elapsed().as_secs_f64();
+                    }
                     let n = self.open_from_pool(sn);
                     self.tprof.lock_s += t_lock.elapsed().as_secs_f64();
                     break Ok(Some(n));
