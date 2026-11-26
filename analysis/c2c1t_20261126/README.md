@@ -172,3 +172,17 @@ python analysis/c2c1t_20261126/pskt/run.py K analysis/c2c1t_20261126/pskt/shards
   締まった境界は被約費用 0 でない非基底でも、戻しても目的値が変わらない (双対退化で、双対解に別の取り方がある)。被約費用の判定では見抜けない。
 - 次の候補: 既存の診断 `ENOMOTO_MIP_SB_PROP_NO_LP` (伝播は子を切る判定とノードに置く境界にだけ使い、子の LP には渡さない)。
   擬似費用は正しい値になり、LP も増えない。neos859080 では既定並みに戻る (3 節)。SB_PROBEBD の効き目のうち、子の LP を伝播つきで解く分は失う。
+
+## 10. (b) SB_PROP_NO_LP の確かめ (親の判断)
+
+- 形: c2c + `ENOMOTO_MIP_SB_PROP_NO_LP=1` (既存の診断。強分枝の子の伝播は、子を切る判定とノードに置く境界にだけ使い、子の LP には境界を渡さない)。
+  擬似費用は伝播の入らない正しい値になり、LP も増えない。新しい閾値はない。
+- 4 問 (neos859080・binkar10_1・nu25-pr12・eil33-2) の比べ: `run.py` の `c2cpnl` (`res10.jsonl`)。
+- P: `psknl/` (pskt と同じ形、4 分担、`def_*` は c2c)。回し方 (K = 0〜3):
+
+```
+git fetch origin ccr-1beed81b-ex0uhq && git merge --no-edit FETCH_HEAD
+pip install -e .
+python analysis/protoscreen_20261124/check_default.py
+python analysis/c2c1t_20261126/psknl/run.py K analysis/c2c1t_20261126/psknl/shards.json analysis/c2c1t_20261126/psknl/res_sK.jsonl
+```
