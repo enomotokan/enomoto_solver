@@ -236,12 +236,31 @@ mod tests {
         let mut b = Adaptive::default();
         b.decrease();
         assert!((b.value - (0.5 / f).max(1.0 - 0.5 * f)).abs() < 1e-12);
-        // 交互なら 0.5 の近くに留まる
+        // 上げ下げは d と 1 − d で対称 (成功と失敗を入れ替えた列を 1 − d から始めると、いつも 1 − d の位置にいる)。この対称性のために、
+        // 成功率が 50% になる d で釣り合う (d = 0.5 に戻るのではない: 係数が回ごとに小さくなるので、成功・失敗を交互に与えると
+        // 初めの向きの側 (Increase からなら 0.6 付近) に落ち着く)
         let mut c = Adaptive::default();
-        for i in 0..200 {
-            if i % 2 == 0 { c.increase() } else { c.decrease() }
+        let mut m = Adaptive::default();
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        for i in 0..300 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            if x % 2 == 0 {
+                c.increase();
+                m.decrease();
+            } else {
+                c.decrease();
+                m.increase();
+            }
+            assert!((c.value + m.value - 1.0).abs() < 1e-9, "step {i}: {} + {} != 1", c.value, m.value);
+            assert!((0.0..=1.0).contains(&c.value));
         }
-        assert!((c.value - 0.5).abs() < 0.1);
+        let mut a = Adaptive::default();
+        for i in 0..200 {
+            if i % 2 == 0 { a.increase() } else { a.decrease() }
+        }
+        assert!(a.value > 0.5 && a.value < 0.75, "alternating from Increase settles above 0.5: {}", a.value);
         // 値は [0, 1] から出ない
         let mut e = Adaptive::default();
         for _ in 0..100 {
