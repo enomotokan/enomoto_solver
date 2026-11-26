@@ -52,4 +52,20 @@
 
 ## 3. まとめの記録
 
-(1 件ずつ足していく)
+(1 件ずつ足していく。確かめは毎回、cargo test・`pip install -e .`・check_default の順)
+
+### 3.1 期限のヘルパ `deadline_in(secs)` と `secs_left()` (1 節の 3・4)
+
+- `Solver` に 2 つのヘルパを置いた (solver.rs の `time_up` の前)。
+  - `deadline_in(secs)`: 今から `secs` 秒後と `self.deadline` の早い方。秒を [0, 1e6] に押さえる (負・NaN は 0、無限・大きすぎる値は 1e6)。
+  - `secs_left()`: 期限までの残り秒 (期限がなければ無限)。
+- 置き換えたのは 34 か所。
+  - 期限の手書き 15 か所: separation.rs 9、solver.rs 4、ほか。
+  - 残り秒の手書き 19 か所: solver.rs 11、heuristics.rs 6、heur_scip.rs 2。
+- 手で残したもの:
+  - separation.rs:1456: 手間の期限 (`tk_c` で 10 倍) と `fit_d` を重ねる形。
+  - solver.rs:7170: `tk_m = false` で使われていない道。
+  - Solver の外のもの (crossover.rs など)。
+- 動き: 有限で正の秒なら、前と同じ計算。`.min(1e6)` を付けていた所は、ヘルパの中の押さえで同じになる。
+- 直った所: 2 節の 3 (separation.rs:3785) が、秒を押さえるので落ちなくなった。
+- 確かめ: cargo test 424 通過、check_default 全部一致。

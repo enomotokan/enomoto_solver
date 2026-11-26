@@ -399,10 +399,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         let sub = super::problem::MipProblem::from_rows(col_lo, col_up, cost, 0.0, 1.0, is_int, rows, p.row_lo.clone(), p.row_up.clone());
-        let remaining = match self.deadline {
-            Some(d) => d.saturating_duration_since(std::time::Instant::now()).as_secs_f64(),
-            None => f64::INFINITY,
-        };
+        let remaining = self.secs_left();
         let params = super::solver::MipParams {
             time_limit: (tunable!("ENOMOTO_T_MIP_MINREL_TIME_FRAC", 0.1, f64) * remaining).min(10.0),
             node_limit: 1000,
@@ -706,10 +703,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         let sub = super::problem::MipProblem::from_rows(col_lo, col_up, cost, 0.0, 1.0, is_int, rows, p.row_lo.clone(), p.row_up.clone());
-        let remaining = match self.deadline {
-            Some(d) => d.saturating_duration_since(std::time::Instant::now()).as_secs_f64(),
-            None => f64::INFINITY,
-        };
+        let remaining = self.secs_left();
         let params = super::solver::MipParams {
             time_limit: (0.07 * remaining).min(6.0),
             node_limit: 500,
