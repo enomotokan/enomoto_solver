@@ -789,6 +789,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) poolsel_stats: [u64; 6],
     /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` ([`Solver::nra_f`]): 閉じた葉の数 [実行不能で閉じた, 下界で閉じた]
     pub(super) nra_leaves: [u64; 2],
+    /// 試作 `ENOMOTO_MIP_NRA_SHARE`: 木を分け合うプールがない間に閉じた葉 (共有の加算器に足していない分。プールができた後の φ にも足す)
+    nra_leaves_unshared: [u64; 2],
+    /// 試作 `ENOMOTO_MIP_NRA_SHARE`: プールがない間のプールのラウンドの伸び (共有の加算器に足していない分)
+    pc_gain_unshared: [f64; 2],
     /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT`: プールの選び直しのラウンドの持ち分 (毎ノード 1 − f を足し、1 以上なら 1 引いて回す)
     pub(super) nra_credit: f64,
     /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の数: [片づけた回, 外した行, 外さなかった行, 選び直しのラウンド, f の和 (× 1e6), f を見た回]
@@ -2747,6 +2751,11 @@ impl SnapNode {
 /// ノードを取り、ほかのスレッドは待っているスレッドがいれば自分の待ち行列の下界の小さいノードをここへ渡す。
 /// 全てのスレッドが待っていて、ここも空なら探索は終わり。
 pub(crate) struct WorkPool {
+    /// 試作 `ENOMOTO_MIP_NRA_SHARE` ([`nra_share_on`]、analysis/nrashare_20261126): 全スレッドの閉じた葉の数 [実行不能, 下界]
+    /// (NODEROWS_ADAPT の φ を全スレッドの合計から数える)
+    pub(super) nra_sh_leaves: [std::sync::atomic::AtomicU64; 2],
+    /// 試作 `ENOMOTO_MIP_NRA_SHARE`: 全スレッドのプールのラウンドの伸び [伸びの和, 回] (NODEROWS_ADAPT の `p`・`g` の ĝ を全スレッドの合計から数える)
+    pub(super) nra_sh_gain: std::sync::Mutex<[f64; 2]>,
     /// 試作 `ENOMOTO_MIP_NODECNT` の `r`: 根の情報で決めたノードの経路集約の可否 (0 未定、1 使う、2 使わない)。主が決め、従はこれを読む
     pub(super) nc_rdec: std::sync::atomic::AtomicU8,
     /// 試作 `ENOMOTO_MIP_RCSTRONG` の `k`: 主の根の被約費用の表 (従は写しに持たないので、ここから読む。src/mip/rcstrong.rs)
@@ -2879,6 +2888,8 @@ pub(crate) struct TreeProf {
     lns_s: f64,
     /// 最後の待ち (探索の終わり・止める合図までノードが来なかった) の時間。
     tail_s: f64,
+    /// 木の探索を始めた時刻から、共有の待ち行列から最初のノードを受け取るまで (従。`ready_s` + 最初の待ち。analysis/paridle_20261126)。
+    first_s: f64,
     /// スレッドの間の同期 (境界・学習・擬似費用・ノードを渡す) の時間。
     sync_s: f64,
     /// 処理したノードの数 (取り出した数)。
@@ -2922,9 +2933,9 @@ impl TreeProf {
         let per = |k: usize| if self.kind_n[k] > 0 { self.kind_it[k] as f64 / self.kind_n[k] as f64 } else { 0.0 };
         let pms = |k: usize| if self.kind_n[k] > 0 { 1e3 * self.kind_s[k] / self.kind_n[k] as f64 } else { 0.0 };
         format!(
-            "{} | tid {} ready {:.2}s end {:.2}s idle {:.2}s ({} waits, lock {:.2}s sleep {:.2}s, pool mean {:.1}) lns {:.2}s tail {:.2}s sync {:.3}s nodes {} (lb>=opt {}) first LP [dive {} {:.1}it {:.2}ms | queue {} {:.1}it {:.2}ms | pool {} {:.1}it {:.2}ms]",
+            "{} | tid {} ready {:.2}s first {:.2}s end {:.2}s idle {:.2}s ({} waits, lock {:.2}s sleep {:.2}s, pool mean {:.1}) lns {:.2}s tail {:.2}s sync {:.3}s nodes {} (lb>=opt {}) first LP [dive {} {:.1}it {:.2}ms | queue {} {:.1}it {:.2}ms | pool {} {:.1}it {:.2}ms]",
             self.proofs_line(),
-            self.tid, self.ready_s, self.end_s, self.idle_s, self.waits, self.lock_s, self.sleep_s, self.pool_len_sum as f64 / self.kind_n[2].max(1) as f64, self.lns_s, self.tail_s, self.sync_s, self.nodes, waste,
+            self.tid, self.ready_s, self.first_s, self.end_s, self.idle_s, self.waits, self.lock_s, self.sleep_s, self.pool_len_sum as f64 / self.kind_n[2].max(1) as f64, self.lns_s, self.tail_s, self.sync_s, self.nodes, waste,
             self.kind_n[0], per(0), pms(0), self.kind_n[1], per(1), pms(1), self.kind_n[2], per(2), pms(2)
         )
     }
@@ -4396,6 +4407,8 @@ impl WorkPool {
     }
     fn new(threads: usize, lo: Vec<f64>, up: Vec<f64>, pc: Pseudocost) -> Self {
         WorkPool {
+            nra_sh_leaves: [std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)],
+            nra_sh_gain: std::sync::Mutex::new([0.0; 2]),
             nc_rdec: std::sync::atomic::AtomicU8::new(0),
             rcs_root: Default::default(),
             learned: std::sync::Mutex::new(Learned::default()),
@@ -5744,6 +5757,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         rs_stats: [0; 6],
         poolsel_stats: [0; 6],
         nra_leaves: [0; 2],
+        nra_leaves_unshared: [0; 2],
+        pc_gain_unshared: [0.0; 2],
         nra_credit: 0.0,
         nra_stats: [0; 6],
         nra_removed: std::collections::HashMap::new(),
@@ -6401,6 +6416,13 @@ pub(super) fn pool_close_on() -> bool {
     *V.get_or_init(|| env_str!("ENOMOTO_MIP_POOL_CLOSE").is_some_and(|v| v != "0"))
 }
 
+/// 試作 `ENOMOTO_MIP_ROOTPAR_PH=<文字>` (既定では使わない、analysis/rootpar_ph_20261126): 4 スレッドの根の前処理・ヒューリスティクスの段で、
+/// 空いているスレッドを使う。`r`: カット前の LP 解の RENS をカットのループの前に並列のサブ MIP として出す
+pub(super) fn rootpar_ph(c: char) -> bool {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| env_str!("ENOMOTO_MIP_ROOTPAR_PH").map_or(String::new(), |v| v.to_string())).contains(c)
+}
+
 /// プールから戻すラウンドの伸びを測るか (`POOL_CLOSE` か、`NODEROWS_ADAPT` の `p`)
 pub(super) fn pool_gain_on() -> bool {
     pool_close_on() || (nra_on() && (nra_has('p') || nra_has('g')))
@@ -6414,6 +6436,13 @@ pub(super) fn nra_order() -> char {
 }
 
 /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の文字 (`r`: 選び直しの頻度を効き目 ρ 倍にする)
+/// 試作 `ENOMOTO_MIP_NRA_SHARE` (既定では使わない、analysis/nrashare_20261126): 木を分け合うとき (4 スレッドなど)、NODEROWS_ADAPT の統計
+/// (閉じた葉の数 → φ・f、`p`・`g` のプールのラウンドの伸び ĝ) を全スレッドの合計で数える ([`WorkPool::nra_sh_leaves`]・`nra_sh_gain`)。
+/// 1 スレッド (プールなし) では何も変わらない
+pub(super) fn nra_share_on() -> bool {
+    env_str!("ENOMOTO_MIP_NRA_SHARE").is_some_and(|v| v != "0")
+}
+
 pub(super) fn nra_has(c: char) -> bool {
     env_str!("ENOMOTO_MIP_NODEROWS_ADAPT").is_some_and(|v| v.contains(c))
 }
@@ -10201,11 +10230,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 打ち切り値から遠いノード (行を戻しても刈れない) では外し、近いノード (行があれば刈れる見込み) では外さない。真ん中は比 1、傾きは対数のオッズで 1
     /// (`t` の比と同じ形)。U か ĝ がなければ 1 (今の f のまま)
     fn nra_g_factor(&self) -> f64 {
-        if !nra_has('g') || self.pc_gain[1] <= 0.0 {
+        let pg = self.nra_gain_sums();
+        if !nra_has('g') || pg[1] <= 0.0 {
             return 1.0;
         }
         let lim = self.prune_limit();
-        let ghat = self.pc_gain[0] / self.pc_gain[1];
+        let ghat = pg[0] / pg[1];
         if !lim.is_finite() || !self.nra_cur_lb.is_finite() || ghat <= 0.0 {
             return 1.0;
         }
@@ -10224,18 +10254,71 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if inf && nra_on() && nra_has('p') {
                 self.nra_p_stats[0] += 1;
                 let lim = self.prune_limit();
-                if self.pc_gain[1] > 0.0 && lim.is_finite() && self.nra_cur_lb + self.pc_gain[0] / self.pc_gain[1] >= lim {
+                let pg = self.nra_gain_sums();
+                if pg[1] > 0.0 && lim.is_finite() && self.nra_cur_lb + pg[0] / pg[1] >= lim {
                     self.nra_p_stats[1] += 1;
                     inf = false;
                 }
             }
             self.nra_leaves[usize::from(!inf)] += 1;
+            // 試作 `ENOMOTO_MIP_NRA_SHARE`: 共有の加算器にも足す (プールがない間は、後で φ に足す分として取っておく)
+            if nra_share_on() {
+                match &self.pool {
+                    Some(pool) => {
+                        pool.nra_sh_leaves[usize::from(!inf)].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    None => self.nra_leaves_unshared[usize::from(!inf)] += 1,
+                }
+            }
         }
+    }
+
+    /// 試作 `ENOMOTO_MIP_NRA_SHARE` ([`nra_share_on`]): NODEROWS_ADAPT が使う閉じた葉の数 [実行不能, 下界]。木を分け合うときは全スレッドの合計
+    /// (共有の加算器 + このスレッドがプールのない間に数えた分)、そうでなければこのスレッドの数
+    fn nra_leaf_counts(&self) -> [u64; 2] {
+        if nra_share_on() {
+            if let Some(pool) = &self.pool {
+                let l = &pool.nra_sh_leaves;
+                return [l[0].load(std::sync::atomic::Ordering::Relaxed) + self.nra_leaves_unshared[0], l[1].load(std::sync::atomic::Ordering::Relaxed) + self.nra_leaves_unshared[1]];
+            }
+        }
+        self.nra_leaves
+    }
+
+    /// プールのラウンドの伸び `g` を 1 回分数える (`pc_gain`。試作 `ENOMOTO_MIP_NRA_SHARE` なら共有の加算器にも足す)
+    fn pc_gain_add(&mut self, g: f64) {
+        self.pc_gain[0] += g;
+        self.pc_gain[1] += 1.0;
+        if nra_share_on() {
+            match &self.pool {
+                Some(pool) => {
+                    let mut s = pool.nra_sh_gain.lock().unwrap();
+                    s[0] += g;
+                    s[1] += 1.0;
+                }
+                None => {
+                    self.pc_gain_unshared[0] += g;
+                    self.pc_gain_unshared[1] += 1.0;
+                }
+            }
+        }
+    }
+
+    /// NODEROWS_ADAPT の `p`・`g` が使うプールのラウンドの伸びの [和, 回] (試作 `ENOMOTO_MIP_NRA_SHARE` で木を分け合うときは全スレッドの合計)
+    fn nra_gain_sums(&self) -> [f64; 2] {
+        if nra_share_on() {
+            if let Some(pool) = &self.pool {
+                let s = pool.nra_sh_gain.lock().unwrap();
+                return [s[0] + self.pc_gain_unshared[0], s[1] + self.pc_gain_unshared[1]];
+            }
+        }
+        self.pc_gain
     }
 
     /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT`: これまでに閉じた葉のうち実行不能で閉じた割合 φ = (実行不能 + 1) / (全部 + 2) (葉がなければ 0.5)
     fn nra_share(&self) -> f64 {
-        (self.nra_leaves[0] as f64 + 1.0) / ((self.nra_leaves[0] + self.nra_leaves[1]) as f64 + 2.0)
+        let l = self.nra_leaf_counts();
+        (l[0] as f64 + 1.0) / ((l[0] + l[1]) as f64 + 2.0)
     }
 
     /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` (既定では使わない、analysis/nodespeed_20261123/README.md 8 節): ノードの行の管理の強さ
@@ -11661,6 +11744,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
+        // 試作 `ENOMOTO_MIP_ROOTPAR_PH` の `r` ([`rootpar_ph`]、analysis/rootpar_ph_20261126): 2 スレッド以上の外側の根で、根のヒューリスティクスの段で
+        // 回す「RENS (LP before cuts)」(カット前の LP 解の RENS) を、カットのループの前に並列のサブ MIP として出し、カットのループの間に空いた
+        // スレッドで解かせる。受け取りは今までどおり根のヒューリスティクスの段の待ち (`join_submips`) で行う。1 スレッドの動きは変えない
+        let mut rph_early_rens = false;
+        if rootpar_ph('r') && mip_threads() > 1 && !self.params.submip && self.snap.is_none() && self.nodes <= 1 && !self.fractional(&x_root0).is_empty() {
+            let lpbc_depth_ok = (super::heuristics::SUBMIP_DEPTH.with(|d| d.get()) as usize) < tunable!("ENOMOTO_MIP_RENS_LPBC_MAX_DEPTH", 1, usize);
+            if lpbc_depth_ok {
+                let keep = self.parallel_submips;
+                self.parallel_submips = true;
+                self.heur_label = "RENS (LP before cuts)";
+                let n0 = self.pending_submips.len();
+                let _ = self.rens(&x_root0);
+                self.heur_label = "";
+                self.parallel_submips = keep;
+                rph_early_rens = self.pending_submips.len() > n0;
+                if self.params.verbose {
+                    eprintln!("MIP: ROOTPAR_PH r: RENS (LP before cuts) started before the root cuts as a parallel sub-MIP: {rph_early_rens} ({:.2}s)", self.start.elapsed().as_secs_f64());
+                }
+            }
+        }
         // 根の切除平面
         // 主の根のカットのループの時間 (`ENOMOTO_MIP_BG_CUTS_WAIT` の待ちの上限に使う)
         let mut root_cut_secs = 0.0f64;
@@ -12473,7 +12576,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // `RENS (LP before cuts)` (深さ 2) を止める。今の既定では深さ 2 の `RENS (LP before cuts)` は 58 問で 41 本・16.4 秒、
                 // 外側に届いた解なし (analysis/submip_where_20261101.md・analysis/rens_depth3_20261101.md)
                 let lpbc_depth_ok = (super::heuristics::SUBMIP_DEPTH.with(|d| d.get()) as usize) < tunable!("ENOMOTO_MIP_RENS_LPBC_MAX_DEPTH", 1, usize);
-                if self.incumbent.is_none() && self.ref_sol.is_none() && lpbc_depth_ok && !self.fractional(&x_root0).is_empty() {
+                // `ROOTPAR_PH` の `r`: カットのループの前に出していれば、ここでは回さない
+                if self.incumbent.is_none() && self.ref_sol.is_none() && lpbc_depth_ok && !self.fractional(&x_root0).is_empty() && !rph_early_rens {
                     heur!("RENS (LP before cuts)", self.rens(&x_root0));
                 }
                 // `ENOMOTO_MIP_SUBMIP_LIGHT_HEUR`: サブ MIP の根では Feasibility Pump とダイビングを使わない。30n20b8 の根の RENS の
@@ -15134,8 +15238,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             let lim = self.prune_limit();
                             for o0 in [pcg_pending.take(), pc_pending.take().map(|(o, _)| o)].into_iter().flatten() {
                                 if lim.is_finite() {
-                                    self.pc_gain[0] += (lim - o0).max(0.0);
-                                    self.pc_gain[1] += 1.0;
+                                    self.pc_gain_add((lim - o0).max(0.0));
                                 }
                             }
                             if let Some(tk0) = pc_tk0.take() {
@@ -15201,8 +15304,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.nra_rho[usize::from(node_obj <= obj0 + 1e-6 * (1.0 + obj0.abs()))] += 1;
                 }
                 if let Some(o0) = pcg_pending.take() {
-                    self.pc_gain[0] += (node_obj - o0).max(0.0);
-                    self.pc_gain[1] += 1.0;
+                    self.pc_gain_add((node_obj - o0).max(0.0));
                 }
                 if nra_t_on {
                     let tk = crate::ticks::total();
@@ -15335,8 +15437,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if let Some((o0, _)) = pc_pending.take() {
                         let lim = self.prune_limit();
                         if lim.is_finite() {
-                            self.pc_gain[0] += (lim - o0).max(0.0);
-                            self.pc_gain[1] += 1.0;
+                            self.pc_gain_add((lim - o0).max(0.0));
                         }
                         self.pc_stats[1] += 1.0;
                         if let Some(tk0) = pc_tk0.take() {
@@ -29010,6 +29111,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     self.pool_stats[1] += 1;
                     self.pool1_cnt[2] += 1;
+                    if self.tprof.first_s == 0.0 && self.snap.is_some() {
+                        self.tprof.first_s = pool.t0.elapsed().as_secs_f64();
+                    }
                     let n = self.open_from_pool(sn);
                     self.tprof.lock_s += t_lock.elapsed().as_secs_f64();
                     break Ok(Some(n));
