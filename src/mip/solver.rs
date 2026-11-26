@@ -4229,11 +4229,19 @@ pub(crate) fn sb_prop_pskip() -> bool {
 }
 
 /// `ENOMOTO_MIP_SB_PROP_PSKIP` の形: `l` = 伝播なしの伸びの下界 (双対の弱定理) で観測を入れ直す (案 2、LP を足さない)、
-/// `t` = 締まった境界を戻して子の LP を解き直し、その伸びで観測を入れ直す (案 1、LP を 1 本足す)、そのほか (`1`) = 観測を捨てる。
+/// `t` = 締まった境界を戻して子の LP を解き直し、その伸びで観測を入れ直す (案 1、LP を 1 本足す)、
+/// `lt` = `l` の下界の差が 0 (締まった境界がどれも、被約費用 0 でない非基底でない) ならその伸びがそのまま正しいので解き直さず、そうでなければ `t`
+/// (eil33-2 の 4 スレッドで `t` の解き直しが 4.2 秒・2.5 万反復かかり、入れ直した伸びは全部伝播つきと同じだった: analysis/c2c1t_20261126 の 9 節)、
+/// そのほか (`1`) = 観測を捨てる。
 /// binkar10_1・nu25-pr12 (4 スレッド) では、SB_PROBEBD の下で強分枝の子のほとんどが伝播の境界つきになり、捨てる形では擬似費用が育たず遅れた
 /// (analysis/combo3_20261126 の 2 節、analysis/c2c1t_20261126 の 7 節)
 pub(crate) fn sb_prop_pmode() -> Option<char> {
-    env_str!("ENOMOTO_MIP_SB_PROP_PSKIP").filter(|v| *v != "0").map(|v| if v.contains('l') { 'l' } else if v.contains('t') { 't' } else { '1' })
+    env_str!("ENOMOTO_MIP_SB_PROP_PSKIP").filter(|v| *v != "0").map(|v| match (v.contains('l'), v.contains('t')) {
+        (true, true) => 'b',
+        (true, false) => 'l',
+        (false, true) => 't',
+        _ => '1',
+    })
 }
 
 pub(crate) fn heur_adapt() -> bool {
@@ -20570,7 +20578,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.dom.backtrack_to(self.p, pos);
                     } else if env_str!("ENOMOTO_MIP_SB_PROP_NO_LP").is_none() {
                         for (c, _, _) in self.dom.changes_since(pos) {
-                            if (sb_prop_twin() || matches!(sb_prop_pmode(), Some('l' | 't'))) && c != j && !prop_orig[side].iter().any(|e| e.0 == c) {
+                            if (sb_prop_twin() || matches!(sb_prop_pmode(), Some('l' | 't' | 'b'))) && c != j && !prop_orig[side].iter().any(|e| e.0 == c) {
                                 let (l0, u0) = self.lp.col_bounds(c);
                                 prop_orig[side].push((c, l0, u0));
                             }
@@ -20788,7 +20796,28 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             self.lp.restore_state(&cur);
                         }
                         if prop_lp[side] && sb_prop_pskip() {
-                            match sb_prop_pmode() {
+                            // `lt` (`b`): 下界の差が 0 なら伸びはそのまま正しい (解き直さない)、そうでなければ `t` と同じく解き直す
+                            let mode = match sb_prop_pmode() {
+                                Some('b') => {
+                                    let rc = self.lp.reduced_costs();
+                                    let exact = prop_orig[side].iter().all(|&(c, l0, u0)| {
+                                        let (l1, u1) = self.lp.col_bounds(c);
+                                        let d = rc.get(c).copied().unwrap_or(0.0);
+                                        !((d > 0.0 && l1 > l0) || (d < 0.0 && u1 < u0))
+                                    });
+                                    if exact {
+                                        self.sb_prop_stats[6] += 1;
+                                        self.sb_prop_stats[7] += 1;
+                                        self.pc.add_observation(j, is_up, delta, gains[side]);
+                                        None
+                                    } else {
+                                        Some('t')
+                                    }
+                                }
+                                m => m,
+                            };
+                            if let Some(mode) = mode {
+                            match Some(mode) {
                                 // `l` (案 2): 伝播なしの子の伸びの下界で観測を入れ直す。伝播つきの子の双対解は、締まった境界を戻した LP でも
                                 // 双対実行可能で、戻す幅だけ双対の目的値が下がる: 伝播なしの値 ≥ 伝播つきの値 − Σ |d_c| Δ_c
                                 // (d_c は締まった列 c の被約費用、Δ_c は被約費用の向きの境界を戻す幅。締まった境界で被約費用 0 なら差は 0)
@@ -20835,6 +20864,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                     }
                                 }
                                 _ => self.sb_prop_stats[5] += 1,
+                            }
                             }
                         } else {
                             self.pc.add_observation(j, is_up, delta, gains[side]);
