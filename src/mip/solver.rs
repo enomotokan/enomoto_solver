@@ -1594,8 +1594,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     objredo_g: [u64; 3],
     /// 試作 `ENOMOTO_MIP_OBJPROBE` ([`Self::objprobe_round`]) の状態
     pub(super) objp: ObjProbeState,
-    /// 強分枝の子の伝播の数え: [伝播で切れた子, 子の LP に渡した境界, ノードに置いた境界, 連鎖, 刈ったノード, 擬似費用に入れなかった子 (`SB_PROP_PSKIP`)]
-    sb_prop_stats: [u64; 6],
+    /// 強分枝の子の伝播の数え: [伝播で切れた子, 子の LP に渡した境界, ノードに置いた境界, 連鎖, 刈ったノード, 擬似費用に入れなかった子 (`SB_PROP_PSKIP`)、
+    /// 入れ直した子 (`l`・`t`)、そのうち伝播なしの伸びが伝播つきと同じだった子、`t` の解き直しの時間 (ナノ秒)、`t` の解き直しの反復]
+    sb_prop_stats: [u64; 10],
     /// 強分岐の子の LP 値から凸性で締めた一般整数の境界の数 (`ENOMOTO_MIP_SB_TIGHTEN`)
     sb_tighten_count: u64,
     /// 強分岐の下の子で軌道に沿って 0 にした列の数 (`ENOMOTO_MIP_SB_OF`)
@@ -4227,6 +4228,14 @@ pub(crate) fn sb_prop_pskip() -> bool {
     env_str!("ENOMOTO_MIP_SB_PROP_PSKIP").is_some_and(|v| v != "0")
 }
 
+/// `ENOMOTO_MIP_SB_PROP_PSKIP` の形: `l` = 伝播なしの伸びの下界 (双対の弱定理) で観測を入れ直す (案 2、LP を足さない)、
+/// `t` = 締まった境界を戻して子の LP を解き直し、その伸びで観測を入れ直す (案 1、LP を 1 本足す)、そのほか (`1`) = 観測を捨てる。
+/// binkar10_1・nu25-pr12 (4 スレッド) では、SB_PROBEBD の下で強分枝の子のほとんどが伝播の境界つきになり、捨てる形では擬似費用が育たず遅れた
+/// (analysis/combo3_20261126 の 2 節、analysis/c2c1t_20261126 の 7 節)
+pub(crate) fn sb_prop_pmode() -> Option<char> {
+    env_str!("ENOMOTO_MIP_SB_PROP_PSKIP").filter(|v| *v != "0").map(|v| if v.contains('l') { 'l' } else if v.contains('t') { 't' } else { '1' })
+}
+
 pub(crate) fn heur_adapt() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_str!("ENOMOTO_MIP_HEUR_ADAPT").is_some_and(|v| v != "0"))
@@ -6423,7 +6432,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         objredo_stats: [0; 3],
         objredo_g: [0; 3],
         objp: ObjProbeState::default(),
-        sb_prop_stats: [0; 6],
+        sb_prop_stats: [0; 10],
         sb_tighten_count: 0,
         sb_of_count: 0,
         sb_rc_count: 0,
@@ -20561,7 +20570,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.dom.backtrack_to(self.p, pos);
                     } else if env_str!("ENOMOTO_MIP_SB_PROP_NO_LP").is_none() {
                         for (c, _, _) in self.dom.changes_since(pos) {
-                            if sb_prop_twin() && c != j && !prop_orig[side].iter().any(|e| e.0 == c) {
+                            if (sb_prop_twin() || matches!(sb_prop_pmode(), Some('l' | 't'))) && c != j && !prop_orig[side].iter().any(|e| e.0 == c) {
                                 let (l0, u0) = self.lp.col_bounds(c);
                                 prop_orig[side].push((c, l0, u0));
                             }
@@ -20779,7 +20788,54 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             self.lp.restore_state(&cur);
                         }
                         if prop_lp[side] && sb_prop_pskip() {
-                            self.sb_prop_stats[5] += 1;
+                            match sb_prop_pmode() {
+                                // `l` (案 2): 伝播なしの子の伸びの下界で観測を入れ直す。伝播つきの子の双対解は、締まった境界を戻した LP でも
+                                // 双対実行可能で、戻す幅だけ双対の目的値が下がる: 伝播なしの値 ≥ 伝播つきの値 − Σ |d_c| Δ_c
+                                // (d_c は締まった列 c の被約費用、Δ_c は被約費用の向きの境界を戻す幅。締まった境界で被約費用 0 なら差は 0)
+                                Some('l') => {
+                                    let rc = self.lp.reduced_costs();
+                                    let mut loss = 0.0f64;
+                                    for &(c, l0, u0) in &prop_orig[side] {
+                                        let (l1, u1) = self.lp.col_bounds(c);
+                                        let d = rc.get(c).copied().unwrap_or(0.0);
+                                        if d > 0.0 && l1 > l0 {
+                                            loss += d * (l1 - l0);
+                                        } else if d < 0.0 && u1 < u0 {
+                                            loss += -d * (u0 - u1);
+                                        }
+                                    }
+                                    let g = if loss.is_finite() { (gains[side] - loss).max(0.0) } else { 0.0 };
+                                    if loss == 0.0 {
+                                        self.sb_prop_stats[7] += 1;
+                                    }
+                                    self.sb_prop_stats[6] += 1;
+                                    self.pc.add_observation(j, is_up, delta, g);
+                                }
+                                // `t` (案 1): 締まった境界を戻して同じ子の LP を解き直し、その伸びで観測を入れ直す (LP を 1 本足す)。LP は解き直しの前に戻す
+                                Some('t') => {
+                                    let t0 = Instant::now();
+                                    let it0 = self.lp.total_iterations();
+                                    let cur = self.lp.save_state();
+                                    for &(c, l0, u0) in &prop_orig[side] {
+                                        self.lp.set_col_bounds(c, l0, u0);
+                                    }
+                                    let st2 = self.lp.solve(&self.limits_k(sb_iter_limit, 1));
+                                    let g2 = (st2 == LpStatus::Optimal).then(|| (self.lp.objective() + self.p.offset - node_obj).max(0.0));
+                                    self.sb_prop_stats[9] += self.lp.total_iterations() - it0;
+                                    self.lp.restore_state(&cur);
+                                    self.sb_prop_stats[8] += t0.elapsed().as_nanos() as u64;
+                                    if let Some(g2) = g2 {
+                                        if g2 >= gains[side] - 1e-9 * (1.0 + node_obj.abs()) {
+                                            self.sb_prop_stats[7] += 1;
+                                        }
+                                        self.sb_prop_stats[6] += 1;
+                                        self.pc.add_observation(j, is_up, delta, g2);
+                                    } else {
+                                        self.sb_prop_stats[5] += 1;
+                                    }
+                                }
+                                _ => self.sb_prop_stats[5] += 1,
+                            }
                         } else {
                             self.pc.add_observation(j, is_up, delta, gains[side]);
                         }
@@ -30572,7 +30628,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if !super::pseudocost::gap1().is_empty() {
                 eprintln!("MIP: GAP1 {}: child selection down {} up {}; branching selections {}, with ties {} (candidates in ties {}), changed by the queue counts {}; objective proofs not violated beyond the tolerance {}", super::pseudocost::gap1(), self.gap1_stats[0], self.gap1_stats[1], self.gap1_stats[2], self.gap1_stats[3], self.gap1_stats[4], self.gap1_stats[5], self.gap1_stats[6]);
             }
-            eprintln!("MIP: objective propagation: pruned {} nodes, tightened {} bounds; strong branching children infeasible by propagation {}, propagated bounds passed to child LPs {}, node bounds from both children {} (ENOMOTO_MIP_SB_PROBEBD), chained by node propagation {}, nodes pruned {} (=2), child gains kept out of the pseudocosts {} (ENOMOTO_MIP_SB_PROP_PSKIP)", self.obj_prop_stats[0], self.obj_prop_stats[1], self.sb_prop_stats[0], self.sb_prop_stats[1], self.sb_prop_stats[2], self.sb_prop_stats[3], self.sb_prop_stats[4], self.sb_prop_stats[5]);
+            eprintln!("MIP: objective propagation: pruned {} nodes, tightened {} bounds; strong branching children infeasible by propagation {}, propagated bounds passed to child LPs {}, node bounds from both children {} (ENOMOTO_MIP_SB_PROBEBD), chained by node propagation {}, nodes pruned {} (=2), child gains kept out of the pseudocosts {}, re-entered {} (same as with propagation {}), re-solves {:.3}s {} iters (ENOMOTO_MIP_SB_PROP_PSKIP)", self.obj_prop_stats[0], self.obj_prop_stats[1], self.sb_prop_stats[0], self.sb_prop_stats[1], self.sb_prop_stats[2], self.sb_prop_stats[3], self.sb_prop_stats[4], self.sb_prop_stats[5], self.sb_prop_stats[6], self.sb_prop_stats[7], self.sb_prop_stats[8] as f64 / 1e9, self.sb_prop_stats[9]);
             if objprop_redo('p') || objprop_redo('g') {
                 eprintln!("MIP: OBJPROP_REDO: p: probing runs {}, fixed {}, proved {} ({:.2}s incl. the root runs); g: calls {}, integer bounds tightened {}, fixed {}", self.objredo_stats[0], self.objredo_stats[1], self.objredo_stats[2], self.objredo_secs, self.objredo_g[0], self.objredo_g[1], self.objredo_g[2]);
             }
