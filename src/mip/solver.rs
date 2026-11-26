@@ -707,6 +707,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     sb_agree_tick: u64,
     /// `ENOMOTO_MIP_SB_AGREE` の集計: [判定した回, 一致した回, 強分岐を省いたノード]
     sb_agree_stats: [u64; 3],
+    /// 試作 `ENOMOTO_MIP_SBDEGEN` ([`sbdegen_on`]): [強分枝をしたノードの数, そのうち強分枝で選んだ列が擬似費用だけの 1 位と違った数]
+    sbdg_stats: [u64; 2],
     /// 直前の分枝の選択で、選んだ列の強分岐の子の LP 値 (列, 下の子, 上の子)。最適まで解けなかった側は -inf。
     pub(super) last_sb: Option<(usize, f64, f64)>,
     /// clique カット用の 2 値列の衝突グラフ (根で作る)。
@@ -5936,6 +5938,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         sb_agree: std::collections::VecDeque::new(),
         sb_agree_tick: 0,
         sb_agree_stats: [0; 3],
+        sbdg_stats: [0; 2],
         last_sb: None,
         clique_graph: None,
         cut_clique_adj: std::collections::HashMap::new(),
@@ -10069,7 +10072,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if !matches!(root_kind, Some(3) | Some(4)) || env_str!("ENOMOTO_MIP_ROOTLP_PRESOLVE").is_none_or(|v| v == "0") || self.lp.has_warm_basis() {
             return None;
         }
-        use crate::types::{ConstraintRow, LinearExpr, Objective, RowSense, Sense, VarType, VariableData};
+        use crate::types::{VarType, VariableData};
         let t0 = Instant::now();
         let n = self.p.n;
         let vars: Vec<VariableData> = (0..n)
@@ -10079,22 +10082,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             })
             .collect();
         let cost = self.lp.costs();
-        let obj = Objective { expr: LinearExpr { coeffs: (0..n).filter(|&j| cost[j] != 0.0).map(|j| (j, cost[j])).collect(), constant: 0.0 }, sense: Sense::Minimize };
-        let mut cons: Vec<ConstraintRow> = Vec::with_capacity(self.lp.num_rows());
-        for i in 0..self.lp.num_rows() {
+        let obj = super::min_objective(&cost, 0.0);
+        // 行の範囲 lo = up = ±∞ はない (LP の行の範囲は lo <= up で、両側とも無限なら等式にならない) ので、ほかと同じ形で直してよい
+        let nr = self.lp.num_rows();
+        let cons = super::ranged_constraints((0..nr).map(|i| {
             let (lo, up) = self.lp.row_bounds(i);
-            let expr = || LinearExpr { coeffs: self.lp.row_ref(i).iter().map(|&(j, a)| (j, a)).collect(), constant: 0.0 };
-            if lo.is_finite() && up.is_finite() && lo == up {
-                cons.push(ConstraintRow { expr: expr(), sense: RowSense::Eq, rhs: lo });
-                continue;
-            }
-            if lo.is_finite() {
-                cons.push(ConstraintRow { expr: expr(), sense: RowSense::Ge, rhs: lo });
-            }
-            if up.is_finite() {
-                cons.push(ConstraintRow { expr: expr(), sense: RowSense::Le, rhs: up });
-            }
-        }
+            (self.lp.row_ref(i), lo, up)
+        }), nr);
         let t_build = t0.elapsed().as_secs_f64();
         let r = crate::cancel::with_deadline(self.deadline, || crate::simplex::solve_lp_dual_with(&vars, &obj, &cons, crate::types::LpOptions::default()));
         let t_lp = t0.elapsed().as_secs_f64() - t_build;
@@ -20213,6 +20207,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             _ => (quot, maxsb),
         };
+        // 試作 `ENOMOTO_MIP_SBDEGEN` ([`sbdegen_on`]、analysis/sbdegen_20261126): 予算を既定 (0.125 x + 25000) と HiGHS・SCIP の大きさ
+        // (0.5 x + 100000) の間で、強分枝の効き目 s で内分する。s は強分枝をしたノードのうち、強分枝で選んだ列が擬似費用だけの 1 位と違った割合の
+        // 対数オッズのシグモイド (ラプラスの数え方) = (違った数 + 1) / (強分枝をしたノード + 2)。始めは 0.5
+        let (quot, maxsb) = if sbdegen_on() && !sb_highs && sbad.is_none() && !self.params.submip {
+            let sv = (self.sbdg_stats[1] + 1) as f64 / (self.sbdg_stats[0] + 2) as f64;
+            let qh = tunable!("ENOMOTO_T_MIP_SB_HIGHS_QUOT", 0.5, f64) * self.node_iters as f64;
+            let mh = qh + tunable!("ENOMOTO_T_MIP_SB_HIGHS_BASE", 100_000.0, f64);
+            (quot + sv * (qh - quot), maxsb + sv * (mh - maxsb))
+        } else {
+            (quot, maxsb)
+        };
         let sb = self.sb_iters as f64;
         // 双対退化の強いノードでは強分岐をしない (根以外)
         // `ENOMOTO_MIP_SB_NO_DEGEN_SKIP`: 双対退化でも強分岐を止めない
@@ -20342,6 +20347,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // このノードで強分岐した候補の (擬似費用のスコア (強分岐の前), 強分岐のスコア)。`ENOMOTO_MIP_SB_AGREE` の一致の判定に使う
         let mut sb_eval: Vec<(f64, f64)> = Vec::new();
         let mut ci = 0usize;
+        // 試作 `ENOMOTO_MIP_SBDEGEN`: 擬似費用だけで選ぶなら選ばれる列 (強分枝の前の点数の 1 位)
+        let pc_top = cands.first().map(|c| c.0);
         while ci < cands.len() {
             let (j, v, pscore) = cands[ci];
             ci += 1;
@@ -21182,6 +21189,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if sb_agree_on() && sb_eval.len() >= 2 {
             self.sb_agree_record(&sb_eval);
+        }
+        // 試作 `ENOMOTO_MIP_SBDEGEN`: 強分枝をしたノードで、選んだ列が擬似費用だけの 1 位と違ったかを数える
+        if sbdegen_on() && tried > 0 {
+            self.sbdg_stats[0] += 1;
+            self.sbdg_stats[1] += (best.map(|b| b.0) != pc_top) as u64;
         }
         // `ENOMOTO_MIP_SB_TIGHTEN_PROP` (試作、既定では使わない): 凸性で境界を締めたら、その場で伝播する。矛盾ならノードを刈り、
         // 締まった境界から今の LP 解が外れたら解き直す (`Resolve`)。そうでなければそのまま分枝する (伝播の結果は子が受け継ぐ)。
@@ -30817,6 +30829,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: NODECNT degenerate duals (tid {}): nodes {}, candidates {}, btran {}, fixed by theta >= gap {}, fixed by theta = inf {}, nodes changed {}, sign mismatch {}", self.pool_tid, c[0], c[1], c[2], c[3], c[4], c[5], c[6]);
             }
             eprintln!("MIP: branching: {} selections, {} without strong branching for dual degeneracy; sb LPs {} iters {}", self.sb_degen_stats[0], self.sb_degen_stats[1], self.sb_lps, self.sb_iters);
+            if sbdegen_on() {
+                eprintln!("MIP: SBDEGEN: strong-branching nodes {}, changed the pseudocost pick {} (s = {:.3})", self.sbdg_stats[0], self.sbdg_stats[1], (self.sbdg_stats[1] + 1) as f64 / (self.sbdg_stats[0] + 2) as f64);
+            }
             if feat_diag().is_some() {
                 eprintln!("{}", self.feat_line("end"));
             }
@@ -31556,6 +31571,13 @@ pub(super) fn cutoff_user_tree() -> bool {
 pub(super) fn sb_adapt_on() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_str!("ENOMOTO_MIP_SB_ADAPT").is_some_and(|v| v != "0"))
+}
+
+/// 試作 `ENOMOTO_MIP_SBDEGEN` (analysis/sbdegen_20261126、既定では使わない、`=1` で使う): 強分枝の予算を、強分枝の効き目 (選び方を
+/// 変えた割合) のシグモイドで既定と HiGHS・SCIP の大きさの間に置く (`select_branch_inner`)。主の木だけ (サブ MIP では使わない)
+pub(super) fn sbdegen_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_MIP_SBDEGEN").is_some_and(|v| v != "0"))
 }
 
 /// 試作 `ENOMOTO_MIP_SB_ADAPT` の確率の判定に使う [0, 1) の擬似乱数 (ノード番号 `k` と用途 `salt` から決まる。同じ種なら同じ値)
