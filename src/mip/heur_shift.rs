@@ -55,18 +55,7 @@ struct State {
 impl State {
     fn set_row(&mut self, i: usize) {
         let v = viol(self.act[i], self.lo[i], self.up[i]) > 0.0;
-        if v && self.pos[i] == usize::MAX {
-            self.pos[i] = self.violated.len();
-            self.violated.push(i);
-        } else if !v && self.pos[i] != usize::MAX {
-            let k = self.pos[i];
-            let last = *self.violated.last().unwrap();
-            self.violated.swap_remove(k);
-            if last != i {
-                self.pos[last] = k;
-            }
-            self.pos[i] = usize::MAX;
-        }
+        super::idxset::set_member(&mut self.violated, &mut self.pos, i, v);
     }
 }
 
