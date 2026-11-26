@@ -33,6 +33,7 @@ pub(crate) mod localmip;
 pub(crate) mod fjsub;
 mod heuristics;
 mod subb;
+mod alns_cp;
 pub(crate) mod sympre;
 mod sympre0;
 pub(crate) mod heur_subfix;
