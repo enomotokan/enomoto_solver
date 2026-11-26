@@ -27609,7 +27609,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
         adapt_sigmoid(a * (g - tunable!("ENOMOTO_T_MIP_FJ_POOR_GAP", 0.5, f64)))
     }
 
-    /// 試作 `ENOMOTO_MIP_HEUR_ADAPT` ([`heur_adapt`]) の f_t (1 スレッドの外側の木、64 ノードおきに測り直す)。`cur` は今のノード
     /// 試作 `ENOMOTO_MIP_ALNS` の `b`: 1 スレッドの木の大近傍探索の割合 = `LNS_TIME_MIN` + (`HEUR_ROLE_FRAC` − `LNS_TIME_MIN`) × σ(ln(r_lns / r_tree))
     /// = 下限 + 幅 × r_lns / (r_lns + r_tree)。新しい閾値はなく、両端は今の木の大近傍探索の下限 (0.02) と 4 スレッドのヒューリスティクス役の割合 (0.25)。
     /// - r_tree: 測り始めからの主ギャップ (暫定解 − 下界) / max(|暫定解|, 1) の減り (ALNS-CP の改善の分を除く) ÷ 木の手間 (大近傍探索の手間を除く)
@@ -27619,7 +27618,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
     pub(super) fn alns_budget_frac(&mut self) -> f64 {
         let lo = tunable!("ENOMOTO_T_MIP_LNS_TIME_MIN", 0.02, f64);
         let hi = tunable!("ENOMOTO_T_MIP_HEUR_ROLE_FRAC", 0.25, f64).max(lo);
-        let Some(z) = self.incumbent.as_ref().map(|(z, _)| *z) else { return lo };
+        let Some((r_lns, r_tree)) = self.alns_rates() else { return lo };
+        let share = if r_lns + r_tree > 0.0 { r_lns / (r_lns + r_tree) } else { 0.5 };
+        lo + (hi - lo) * share
+    }
+
+    /// 改善の大きさ / 手間 (1 手間 ≒ 1 ns) の (r_lns, r_tree) ([`Self::alns_budget_frac`] の説明のとおり)。暫定解がなければ None。
+    /// 初めて呼んだ時を測り始めにする。ほかの 1 スレッドの解探し (T1PRIMAL など) の効き目の入力にも使える
+    pub(super) fn alns_rates(&mut self) -> Option<(f64, f64)> {
+        let z = self.incumbent.as_ref().map(|(z, _)| *z)?;
         let gap = ((z - self.global_lower_bound()) / z.abs().max(1.0)).max(0.0);
         let tk = crate::ticks::total();
         let (g0, t0, l0) = *self.alns_bud0.get_or_insert((gap, tk, self.lns_ticks));
@@ -27628,10 +27635,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let tree_tk = (tk - t0 - lns_tk).max(piece);
         let r_tree = ((g0 - gap) - self.alns_lns_gain).max(0.0) / tree_tk;
         let r_lns = (self.alns_lns_gain + r_tree * piece) / (lns_tk + piece);
-        let share = if r_lns + r_tree > 0.0 { r_lns / (r_lns + r_tree) } else { 0.5 };
-        lo + (hi - lo) * share
+        Some((r_lns, r_tree))
     }
 
+    /// 試作 `ENOMOTO_MIP_HEUR_ADAPT` ([`heur_adapt`]) の f_t (1 スレッドの外側の木、64 ノードおきに測り直す)。`cur` は今のノード
     fn adapt_tree_f(&mut self, cur: Option<&OpenNode>) -> f64 {
         if self.nodes < self.heur_adapt_ft.0 + 64 && self.heur_adapt_ft.0 > 0 {
             return self.heur_adapt_ft.1;
