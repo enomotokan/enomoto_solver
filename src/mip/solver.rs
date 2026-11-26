@@ -1592,7 +1592,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     objredo_g: [u64; 3],
     /// 試作 `ENOMOTO_MIP_OBJPROBE` ([`Self::objprobe_round`]) の状態
     pub(super) objp: ObjProbeState,
-    sb_prop_stats: [u64; 5],
+    /// 強分枝の子の伝播の数え: [伝播で切れた子, 子の LP に渡した境界, ノードに置いた境界, 連鎖, 刈ったノード, 擬似費用に入れなかった子 (`SB_PROP_PSKIP`)]
+    sb_prop_stats: [u64; 6],
     /// 強分岐の子の LP 値から凸性で締めた一般整数の境界の数 (`ENOMOTO_MIP_SB_TIGHTEN`)
     sb_tighten_count: u64,
     /// 強分岐の下の子で軌道に沿って 0 にした列の数 (`ENOMOTO_MIP_SB_OF`)
@@ -4210,6 +4211,15 @@ pub(crate) fn heur1t(c: char) -> bool {
 ///   (既定の「割合 × 全体の経過」の形で一時の f_t に経過全体を掛けない。`HEUR1T` の `l` は f_t = 1 で経過全体に掛ける形)。
 ///   木を始めて 1 秒・全体の時間の `ENOMOTO_T_MIP_HEUR_TRIG_WARM_FRAC` (5%) までは測らず f_t = 0 (役の起動の判定と同じ温まり。ノード数の下限は使わない)。
 /// - `FJSYNC_LABEL` (同期の FJ の解の名札) はそのまま有効にする。
+/// 試作 `ENOMOTO_MIP_SB_PROP_PSKIP` (既定では使わない、analysis/c2c1t_20261126/): 強分枝の子の伝播 (`ENOMOTO_MIP_SB_PROP`・`SB_PROBEBD`) で
+/// 締まった境界つきで子の LP を解いたとき、その子の目的値の伸びを擬似費用の観測に入れない。伸びには分けた列の効き目のほかに伝播で締まった
+/// 列の効き目も入るので、強分枝しない分枝 (擬似費用だけで選ぶ分枝) の選び方を狂わせる (neos859080 の 1 スレッドで、SB_PROBEBD だけで
+/// ノードが 2〜5 千から 1.5〜5.6 万に増え、子の LP に境界を渡さない診断 `SB_PROP_NO_LP`・`BT_EARLY` では既定並みに戻った)。
+/// 子の判定 (切る・ノードに置く境界) にはそのまま使う
+pub(crate) fn sb_prop_pskip() -> bool {
+    env_str!("ENOMOTO_MIP_SB_PROP_PSKIP").is_some_and(|v| v != "0")
+}
+
 pub(crate) fn heur_adapt() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_str!("ENOMOTO_MIP_HEUR_ADAPT").is_some_and(|v| v != "0"))
@@ -6273,7 +6283,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         objredo_stats: [0; 3],
         objredo_g: [0; 3],
         objp: ObjProbeState::default(),
-        sb_prop_stats: [0; 5],
+        sb_prop_stats: [0; 6],
         sb_tighten_count: 0,
         sb_of_count: 0,
         sb_rc_count: 0,
@@ -20178,6 +20188,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 試作 `ENOMOTO_MIP_SB_ADAPT`: 強さ f_B の確率でこのノードの強分岐で子の伝播をする
             let sb_probebd = env_str!("ENOMOTO_MIP_SB_PROBEBD").is_some() || sbad.is_some_and(|(_, fb)| sbad_u(self.nodes, 2) < fb);
             let mut side_bd: [std::collections::HashMap<usize, (f64, f64)>; 2] = Default::default();
+            // 試作 `ENOMOTO_MIP_SB_PROP_PSKIP` ([`sb_prop_pskip`]): 子の LP を伝播で締まった境界つきで解いたか (側ごと)
+            let mut prop_lp = [false; 2];
             // `ENOMOTO_MIP_SB_PROBEBD=2` (試作): 両方の子に共通の境界をノードに置いたら、その場でノードで伝播して連鎖させる
             let sb_probebd2 = sb_probebd && env_str!("ENOMOTO_MIP_SB_PROBEBD").is_some_and(|v| v == "2");
             // 試作 `ENOMOTO_MIP_PCL` の `a`: 子の LP が反復上限で途中の値になった側があるか
@@ -20399,6 +20411,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         for (c, _, _) in self.dom.changes_since(pos) {
                             self.lp.set_col_bounds(c, self.dom.lo[c], self.dom.up[c]);
                             self.sb_prop_stats[1] += 1;
+                            prop_lp[side] = true;
                         }
                     }
                 }
@@ -20454,7 +20467,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 child_rc[side] = r.rc;
                             }
                             let delta = self.hnfbr_delta(j, v, is_up);
-                            self.pc.add_observation(j, is_up, delta, gains[side]);
+                            if !(prop_lp[side] && sb_prop_pskip()) {
+                                self.pc.add_observation(j, is_up, delta, gains[side]);
+                            }
                             if o >= self.prune_limit() {
                                 cut[side] = true;
                                 if self.dbg_on {
@@ -20588,7 +20603,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             child_rc[side] = sb_child_rc(&self.lp, j, is_up);
                         }
                         let delta = self.hnfbr_delta(j, v, is_up);
-                        self.pc.add_observation(j, is_up, delta, gains[side]);
+                        if prop_lp[side] && sb_prop_pskip() {
+                            self.sb_prop_stats[5] += 1;
+                        } else {
+                            self.pc.add_observation(j, is_up, delta, gains[side]);
+                        }
                         if o >= self.prune_limit() {
                             cut[side] = true;
                             if self.dbg_on {
@@ -30306,7 +30325,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if !super::pseudocost::gap1().is_empty() {
                 eprintln!("MIP: GAP1 {}: child selection down {} up {}; branching selections {}, with ties {} (candidates in ties {}), changed by the queue counts {}; objective proofs not violated beyond the tolerance {}", super::pseudocost::gap1(), self.gap1_stats[0], self.gap1_stats[1], self.gap1_stats[2], self.gap1_stats[3], self.gap1_stats[4], self.gap1_stats[5], self.gap1_stats[6]);
             }
-            eprintln!("MIP: objective propagation: pruned {} nodes, tightened {} bounds; strong branching children infeasible by propagation {}, propagated bounds passed to child LPs {}, node bounds from both children {} (ENOMOTO_MIP_SB_PROBEBD), chained by node propagation {}, nodes pruned {} (=2)", self.obj_prop_stats[0], self.obj_prop_stats[1], self.sb_prop_stats[0], self.sb_prop_stats[1], self.sb_prop_stats[2], self.sb_prop_stats[3], self.sb_prop_stats[4]);
+            eprintln!("MIP: objective propagation: pruned {} nodes, tightened {} bounds; strong branching children infeasible by propagation {}, propagated bounds passed to child LPs {}, node bounds from both children {} (ENOMOTO_MIP_SB_PROBEBD), chained by node propagation {}, nodes pruned {} (=2), child gains kept out of the pseudocosts {} (ENOMOTO_MIP_SB_PROP_PSKIP)", self.obj_prop_stats[0], self.obj_prop_stats[1], self.sb_prop_stats[0], self.sb_prop_stats[1], self.sb_prop_stats[2], self.sb_prop_stats[3], self.sb_prop_stats[4], self.sb_prop_stats[5]);
             if objprop_redo('p') || objprop_redo('g') {
                 eprintln!("MIP: OBJPROP_REDO: p: probing runs {}, fixed {}, proved {} ({:.2}s incl. the root runs); g: calls {}, integer bounds tightened {}, fixed {}", self.objredo_stats[0], self.objredo_stats[1], self.objredo_stats[2], self.objredo_secs, self.objredo_g[0], self.objredo_g[1], self.objredo_g[2]);
             }
