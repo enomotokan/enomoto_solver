@@ -3935,7 +3935,23 @@ pub(crate) fn tiny_drop() -> f64 {
 #[inline]
 pub(crate) fn tiny_hs() -> f64 {
     static V: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
-    *V.get_or_init(|| if env_str!("ENOMOTO_LU_TINY_HS").is_some_and(|v| v != "0") { 1e-14 } else { 0.0 })
+    *V.get_or_init(|| if env_str!("ENOMOTO_LU_TINY_HS").is_some_and(|v| v != "0" && !v.contains('r')) { 1e-14 } else { 0.0 })
+}
+
+/// `ENOMOTO_LU_TINY_HS` に `r` があれば、書き出す点の切り捨てを絶対 1e-14 でなく「1e-14 × そのベクトルの最大の絶対値」(相対) で行う
+/// (尺度を調整しない LP の経路では、絶対値の判定は値の大きい列で効かず、値の小さい列で意味のある値を捨てうる。README 6.3 節)。
+#[inline]
+pub(crate) fn tiny_hs_rel() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_LU_TINY_HS").is_some_and(|v| v.contains('r')))
+}
+
+/// `ENOMOTO_LU_TINY_HS` に `i` があれば、超疎の `U` 段 (`u_solve_hyper_*`) で絶対値 1e-14 以下の値を起点にせず 0 にする
+/// (HiGHS の `ftranU` の `fabs(pivotX) > kHighsTiny` と同じ。雑音から eta をたどる手間を省く)。
+#[inline]
+fn tiny_in() -> f64 {
+    static V: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| if env_str!("ENOMOTO_LU_TINY_HS").is_some_and(|v| v.contains('i')) { 1e-14 } else { 0.0 })
 }
 
 /// 書き出す点で使う切り捨ての閾値 ([`tiny_drop`] と [`tiny_hs`] の大きいほう)。
@@ -5348,6 +5364,7 @@ impl FtLu {
     /// - `U` に密 eta がある場合は `x` に触れずに [`UHyper::NotTried`] を返す (呼び出し側が全走査する)。
     fn u_solve_hyper_heap(&self, x: &mut [f64], gp: &mut GpScratch) -> UHyper {
         let m = self.base.m;
+        let tin = tiny_in();
         if !self.u_seq.dense.is_empty() {
             return UHyper::NotTried;
         }
@@ -5375,6 +5392,10 @@ impl FtLu {
             let k = k as usize;
             let p = self.u_seq.key[k] as usize;
             if x[p] == 0.0 {
+                continue;
+            }
+            if tin > 0.0 && x[p].abs() <= tin {
+                x[p] = 0.0;
                 continue;
             }
             x[p] /= self.u_seq.pivot[k];
@@ -5416,6 +5437,7 @@ impl FtLu {
 
     /// 作業 #10 (F): [`Self::u_solve_hyper_heap`] の待ち行列を [`MonoMaxQueue`] にしたもの (取り出し順・演算は同じ)。
     fn u_solve_hyper_queue(&self, x: &mut [f64], gp: &mut GpScratch, limit: usize) -> UHyper {
+        let tin = tiny_in();
         let GpScratch { reach, r_seeds, u_marks, u_queue, u_list, .. } = gp;
         u_queue.ensure(self.u_seq.key.len());
         u_marks.begin();
@@ -5434,6 +5456,10 @@ impl FtLu {
         while let Some(k) = u_queue.pop() {
             let p = self.u_seq.key[k] as usize;
             if x[p] == 0.0 {
+                continue;
+            }
+            if tin > 0.0 && x[p].abs() <= tin {
+                x[p] = 0.0;
                 continue;
             }
             x[p] /= self.u_seq.pivot[k];
@@ -5634,7 +5660,7 @@ impl FtLu {
     /// 付きで散布する。非ゼロ数を返す。`u_zero_skip` on かつ微小値切捨てなしのときのみ使う。
     fn permute_list(&self, scratch: &[f64], out: &mut [f64], list: &[usize]) -> usize {
         out.fill(0.0);
-        let tiny = tiny_hs();
+        let tiny = if tiny_hs_rel() { 1e-14 * list.iter().map(|&q| (scratch[q] / if self.single_piv[q] != 0.0 { self.single_piv[q] } else { 1.0 }).abs()).fold(0.0, f64::max) } else { tiny_hs() };
         let mut nnz = 0usize;
         let col_perm = &self.base.col_perm;
         let piv = &self.single_piv;
@@ -5656,7 +5682,7 @@ impl FtLu {
     /// 前回の位置を消してから書き、書いた位置を `t` に記録する [`Self::permute_list`] (策1)。
     fn permute_list_tracked(&self, scratch: &[f64], out: &mut [f64], list: &[usize], t: &mut NzTrack) -> usize {
         t.reset(out);
-        let tiny = tiny_hs();
+        let tiny = if tiny_hs_rel() { 1e-14 * list.iter().map(|&q| (scratch[q] / if self.single_piv[q] != 0.0 { self.single_piv[q] } else { 1.0 }).abs()).fold(0.0, f64::max) } else { tiny_hs() };
         let mut nnz = 0usize;
         let col_perm = &self.base.col_perm;
         let piv = &self.single_piv;
@@ -6690,7 +6716,7 @@ impl FtLu {
     #[inline]
     fn permute_out(&self, scratch: &[f64], out: &mut [f64]) -> usize {
         let mut nnz = 0usize;
-        let tiny = tiny_out();
+        let tiny = if tiny_hs_rel() { tiny_drop().max(1e-14 * (0..self.base.m).map(|q| (scratch[q] / if self.u_zero_skip && self.single_piv[q] != 0.0 { self.single_piv[q] } else { 1.0 }).abs()).fold(0.0, f64::max)) } else { tiny_out() };
         let m = self.base.m;
         let col_perm = &self.base.col_perm[..m];
         let scratch = &scratch[..m];
