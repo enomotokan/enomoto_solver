@@ -26,10 +26,10 @@ def balance(groups, est, n, out, tl):
     (D / out).write_text(json.dumps({"cfgs": CF, "shards": shards, "est_hours": [round(x / 3600, 2) for x in load]}, indent=0))
     print(out, len(groups), "組", sum(len(s) for s in shards), "回", "見積り (時間):", min(round(x / 3600, 2) for x in load), "〜",
           max(round(x / 3600, 2) for x in load), "計", round(sum(load) / 3600, 1))
-if SET == "P":
+if SET.startswith("P"):  # P (w・b の回)、P2 (4 スレッドの d・eg・egj)、P1 (1 スレッドの def_t1・eg_t1・egj_t1)。分担表は shards_<SET>.json
     TP = times(D.parents[1] / "final_20261118" / "res_P_s*.jsonl", 60)
     balance({(p, s): [(p, c, s) for c in rot(i + s)] for i, p in enumerate(PROBS) for s in (1, 2, 3)},
-            lambda p, c, s: TP.get((p, s), TP.get((p, 1), 60)) + 8, NS, "shards_P.json", 60)
+            lambda p, c, s: TP.get((p, s), TP.get((p, 1), 60)) + 8, NS, f"shards_{SET}.json", 60)
 elif SET == "M":
     TM = times(D.parents[1] / "vsscip_20261120" / "res_M_s*.jsonl", 600)
     MP = sorted({x for part in json.loads((D.parents[1] / "cbcimpl_20261029/mitt_parts.json").read_text()) for x in part})
