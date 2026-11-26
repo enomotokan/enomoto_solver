@@ -1,5 +1,5 @@
 """kasai の nra の害 (2026-11-26、親の依頼): python analysis/nrakasai_20261126/run.py OUT.jsonl 問題 スレッド数 種 CFG[,CFG...] [--tl 秒]
-設定: def・c2cp (c2c の nra を r0k23p)・c2cp-nra (c2cp から nra を抜く)・c2cp-sbpb (SB_PROBEBD を抜く)・c2cp+X (c2cp に環境変数 X=V を足す: "c2cp+ENOMOTO_...=v")。
+設定: def・c2cp (c2c の nra を r0k23p)・c2cp-nra (c2cp から nra を抜く)・c2cp-sbpb (SB_PROBEBD を抜く)・c2cp+X・def+X (環境変数 X=V を足す: "c2cp+ENOMOTO_...=v")。
 stderr はまるごと logs/ に残す (ENOMOTO_PROF_TREE_PAR・ENOMOTO_MIP_NRA_TRACE=2000 をつける。解き方は変えない)。同じ行があれば飛ばす。"""
 import json, os, subprocess, sys, time
 from pathlib import Path
@@ -17,6 +17,7 @@ def cfg_env(c):
     if c == "c2cp-nra": return {k: v for k, v in C2CP.items() if k != "ENOMOTO_MIP_NODEROWS_ADAPT"}
     if c == "c2cp-sbpb": return {k: v for k, v in C2CP.items() if k != "ENOMOTO_MIP_SB_PROBEBD"}
     if c.startswith("c2cp+"): return dict(C2CP, **dict(a.split("=", 1) for a in c[5:].split("+")))
+    if c.startswith("def+"): return dict(a.split("=", 1) for a in c[4:].split("+"))
     raise ValueError(c)
 
 
