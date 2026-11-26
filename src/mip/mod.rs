@@ -1007,6 +1007,32 @@ pub(super) fn polish_in_problem_warm(p: &MipProblem, x: &mut Vec<f64>, z: f64, b
     polish_in_problem_warm_ext(p, x, z, basis, deadline, false)
 }
 
+thread_local! {
+    /// 試作 `ROOTPAR_PH` の `f`・`g` (README 5.7 節): このスレッドで最後に解けた研磨の LP で、許容の中で実行可能な点が持ちうる漏れの最大
+    /// W = Σ_行 |y_i| ε_i + Σ_連続列 |d_j| ε_j (ε = 1e-9 max(1, |境界|)、単体法の主の許容と同じ)。研磨して返す解 (`d`) もこの大きさまでの漏れを含みうる
+    pub(super) static POLISH_TOL_LEAK: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+}
+
+/// 研磨の LP の双対値から [`POLISH_TOL_LEAK`] の W を計算する
+fn tol_leak_bound(p: &MipProblem, lp: &crate::simplex::mip_lp::TwoStageLp) -> f64 {
+    let eps = |a: f64, b: f64| {
+        let m = [a, b].iter().filter(|v| v.is_finite()).fold(0.0f64, |m, v| m.max(v.abs()));
+        1e-9 * m.max(1.0)
+    };
+    let y = lp.row_duals();
+    let d = lp.reduced_costs();
+    let mut w = 0.0;
+    for i in 0..p.m.min(y.len()) {
+        w += y[i].abs() * eps(p.row_lo[i], p.row_up[i]);
+    }
+    for j in 0..p.n.min(d.len()) {
+        if !p.is_int[j] {
+            w += d[j].abs() * eps(p.col_lo[j], p.col_up[j]);
+        }
+    }
+    w
+}
+
 /// 研磨の LP の反復の上限 (試作 `ROOTPAR_PH` の `j`): `ENOMOTO_T_MIP_G5SEQ_C` (0.5) × (行 + 列)。1 スレッドの基底のない求解の
 /// 二段解法 → 内点法 + クロスオーバーの切り替え (`G5SEQ`) と同じ物差し
 pub(super) fn polish_iter_cap(rows: usize, cols: usize) -> u64 {
@@ -1086,6 +1112,9 @@ pub(super) fn polish_in_problem_warm_ext(p: &MipProblem, x: &mut Vec<f64>, z: f6
     let mut out = WarmPolish::NotSolved;
     if st == lp::LpStatus::Optimal {
         out = WarmPolish::Kept;
+        if jcap || solver::rootpar_ph('f') || solver::rootpar_ph('g') {
+            POLISH_TOL_LEAK.with(|c| c.set(tol_leak_bound(p, &lp)));
+        }
         let mut xn = lp.col_values();
         for j in 0..p.n {
             if p.is_int[j] {
