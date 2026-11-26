@@ -1,5 +1,5 @@
 """c2c と c2c + NRA_SHARE の比べ: python analysis/nrashare_20261126/run.py OUT.jsonl 問題[,問題...] 種[,種...] スレッド 秒 設定[,設定...]
-設定: c2c (analysis/combo2_20261125/cfg.py の C2C)・c2cs (c2c + ENOMOTO_MIP_NRA_SHARE=1)・def。1 本ずつ順に解く (4 スレッドは 4 コアを使う)。
+設定: c2c (analysis/combo2_20261125/cfg.py の C2C)・c2cs (c2c + ENOMOTO_MIP_NRA_SHARE=1)・c2cp (c2c の nra を r0k23p)・c2cps (c2cp + 共有)・def。1 本ずつ順に解く (4 スレッドは 4 コアを使う)。
 同じ (問題, 設定, スレッド, 種) の行があれば飛ばす。止めても同じコマンドで続きから回る。"""
 import json, os, subprocess, sys, time
 from pathlib import Path
@@ -9,7 +9,9 @@ sys.path.insert(0, str(WT / "analysis" / "combo2_20261125"))
 sys.path.insert(0, str(WT / "scripts"))
 from cfg import C2C  # noqa: E402
 import run_miplib_benchmark as rb  # noqa: E402
-CFGS = {"def": {}, "c2c": dict(C2C), "c2cs": dict(C2C, ENOMOTO_MIP_NRA_SHARE="1")}
+CFGS = {"def": {}, "c2c": dict(C2C), "c2cs": dict(C2C, ENOMOTO_MIP_NRA_SHARE="1"),
+        # 親の追加: nra の採用候補 r0k23p (`p` は φ の補正) の上でも、共有なし・ありを比べる
+        "c2cp": dict(C2C, ENOMOTO_MIP_NODEROWS_ADAPT="r0k23p"), "c2cps": dict(C2C, ENOMOTO_MIP_NODEROWS_ADAPT="r0k23p", ENOMOTO_MIP_NRA_SHARE="1")}
 OUT = Path(sys.argv[1]); probs = sys.argv[2].split(","); seeds = [int(x) for x in sys.argv[3].split(",")]; th = sys.argv[4]; tl = float(sys.argv[5]); cfgs = sys.argv[6].split(",")
 done = set()
 if OUT.exists():
