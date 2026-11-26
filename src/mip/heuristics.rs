@@ -1205,10 +1205,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let p = self.p;
         let n = p.n;
         let (lo, up) = (self.dom.lo.clone(), self.dom.up.clone());
-        let remaining = match self.deadline {
-            Some(d) => d.saturating_duration_since(std::time::Instant::now()).as_secs_f64(),
-            None => f64::INFINITY,
-        };
+        let remaining = self.secs_left();
         // 試作 `ENOMOTO_MIP_HEUR_ADAPT` ([`super::solver::heur_adapt`]): ノードと時間の上限に f_g を掛ける (`FP_STAGE3` だけなら 1)
         let fa = if super::solver::heur_adapt() && env_str!("ENOMOTO_MIP_FP_STAGE3").is_none() { self.adapt_gap_f() } else { 1.0 };
         // 試作 `ENOMOTO_MIP_SUBMIP_TICKS` の `f` (analysis/workcount_20261125): 残り時間を手間で数える (手間の期限があればその残り、なければ
@@ -1224,10 +1221,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         } else {
             remaining
         };
-        let wall_left = match self.deadline {
-            Some(d) => d.saturating_duration_since(std::time::Instant::now()).as_secs_f64(),
-            None => f64::INFINITY,
-        };
+        let wall_left = self.secs_left();
         let mut cap = fa * (0.1 * remaining).min(10.0);
         // 試作 `ENOMOTO_MIP_FP_STAGE3_LS` (既定では使わない。analysis/fpstage3ls_20261125): 第 3 段を、`r` を出発点にした FJ2・Local-MIP
         // (前処理の早めの探索 [`super::feas_fj_lmip_early`] の 1 本の形、手間の期限も同じ物差し) で解く。予算は第 3 段のサブ MIP と同じ秒の上限。
@@ -1976,10 +1970,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     pub(super) fn submip_time_limit(&self) -> (f64, Option<f64>) {
-        let remaining = match self.deadline {
-            Some(d) => d.saturating_duration_since(Instant::now()).as_secs_f64(),
-            None => f64::INFINITY,
-        };
+        let remaining = self.secs_left();
         // 試作 `ENOMOTO_MIP_TICKS` の `s`: 手間の期限の中のサブ MIP では、残り時間を手間の残り (秒に直したもの) にする
         let remaining = match self.tk_s_left() {
             Some(l) => l,
@@ -2161,7 +2152,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         let time_limit = match tk_u_budget {
             Some(b) => {
-                let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
+                let remaining = self.secs_left();
                 (10.0 * b * 1e-9).min(remaining)
             }
             None => time_limit,
@@ -2169,7 +2160,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_DET1T` (既定 `onil`) の `n` (analysis/det1t_20261120): 手間の期限の中 (木の大近傍探索の `ENOMOTO_MIP_TICKS` の `n` など) で解く
         // サブ MIP は、時間の上限を 10 倍の安全網にする (手間の期限より先に壁時計で止まり、同じ種でも止まる所が回ごとに変わっていた。neos-1456979)
         let time_limit = if super::solver::det1t('n') && tk_u_budget.is_none() && crate::ticks::has_budget() && !self.parallel_submips {
-            let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
+            let remaining = self.secs_left();
             (10.0 * time_limit).min(remaining)
         } else {
             time_limit
@@ -2184,7 +2175,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let time_limit = if u_set {
             super::solver::SUBMIP_ITER_CAP.with(|c| c.set(u_cap));
-            let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
+            let remaining = self.secs_left();
             (10.0 * time_limit).min(remaining)
         } else {
             time_limit
@@ -3693,36 +3684,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 整数列を `x` の値 (丸めたもの) に固定し、連続列を元の費用の LP で解き直した点を暫定解の候補にする。
     /// LP の状態は戻す。
     pub(super) fn fixed_int_lp(&mut self, x: &[f64]) -> bool {
-        let p = self.p;
         if self.time_up() {
             return false;
         }
-        let saved = self.lp.save_state();
-        let it0 = self.lp.total_iterations();
         let cost = self.lp.costs();
-        let swap = cost != p.cost;
-        if swap {
-            self.lp.set_costs(&p.cost);
-        }
-        for j in 0..p.n {
-            let (lo, up) = if p.is_int[j] { (x[j].round(), x[j].round()) } else { (self.dom.global_lo[j], self.dom.global_up[j]) };
-            self.lp.set_col_bounds(j, lo, up);
-        }
-        let st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
-        let y = (st == LpStatus::Optimal).then(|| {
-            let mut y = self.lp.col_values();
-            for j in 0..p.n {
-                if p.is_int[j] {
-                    y[j] = x[j].round();
-                }
-            }
-            y
-        });
-        if swap {
-            self.lp.set_costs(&cost);
-        }
-        self.lp.restore_state(&saved);
-        self.lp.set_total_iterations(it0);
+        let (_, _, y) = self.with_fixed_int_lp(x, true, cost, |s, j| (s.dom.global_lo[j], s.dom.global_up[j]), self.deadline, |_, y| y);
         y.is_some_and(|y| self.try_incumbent(y))
     }
 
