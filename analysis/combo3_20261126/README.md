@@ -4,12 +4,16 @@
 
 c3 = 今の c2c (analysis/combo2_20261125/cfg.py の C2C = C2 + SB_PROBEBD=1) に、次の 4 つの部品を足したもの。
 
+**2026-11-26 夜の差し替え (親の判断)**: pskip を外し、nolp (`ENOMOTO_MIP_SB_PROP_NO_LP=1`) を入れた。今の c3 = c2c + nrap + share + enumt + nolp。
+根拠は analysis/c2c1t_20261126/README.md 10 節 (P で c2c 比 1 スレッド 1.012・4 スレッド 1.003、binkar10_1・nu25-pr12 の害なし、eil33-2 は伝播つきの子の LP の得を失う分 1.16〜1.23 倍) と、この README 2 節 (pskip の仕組みの害)。2 節の前測りの結果は pskip 入りの形のもの。
+
 | 部品 | 環境変数 | c2c の値 → c3 の値 | 出どころ |
 |---|---|---|---|
 | nrap | ENOMOTO_MIP_NODEROWS_ADAPT | r0k23 → r0k23p | analysis/nrashare_20261126 3 節 (neos-911970 の害を消す) |
 | share | ENOMOTO_MIP_NRA_SHARE | (なし) → 1 | analysis/nrashare_20261126 6 節 (P の 4 スレッドで中立) |
 | enumt | ENOMOTO_MIP_ENUM_ADAPT | 1s → 1st | analysis/nrashare_20261126 7 節 (主でないスレッドの前処理の時計の直し、P で確かめ中) |
-| pskip | ENOMOTO_MIP_SB_PROP_PSKIP | (なし) → 1 | analysis/c2c1t_20261126 (伝播込みの強分枝の子の伸びを擬似費用に入れない、P で確かめ中) |
+| ~~pskip~~ (外した) | ENOMOTO_MIP_SB_PROP_PSKIP | (なし) → 1 | analysis/c2c1t_20261126 (伝播込みの強分枝の子の伸びを擬似費用に入れない) |
+| nolp (pskip の代わり) | ENOMOTO_MIP_SB_PROP_NO_LP | (なし) → 1 | analysis/c2c1t_20261126 10 節 (伝播の境界を子の LP に渡さない。判定は値の有無だけで、0 でも有効) |
 
 - 環境変数の判定はコードで確かめた (先端 188008a5d):
   - `nra_share_on`・`sb_prop_pskip` は 0 でなければ有効。
@@ -66,7 +70,8 @@ OOM 2 回で確定する決まりもそのまま。
 - 問題: s2/problems.json (combo2 の第 2 段と同じ 240 問: M 186 問 + 残り 54 問)。s2/solu.json も同じ。
 - 分担: `python analysis/combo3_20261126/s2/plan.py` → s2/shards.json (11 分担、960 回、見積りは各 10.7 時間)。
   同じ (問題, スレッド) の def と c3 は、同じ分担で続けて回す。誰がどの分担を回すかは親が決める。
-- 版: 回す前に親が決めて、ここに書く (第 1 段の版から進んでいれば、check_default と c3 の fuzz を回し直す)。
+- 版: **(空欄。egj・UNIFY_FIX の z・p・PARSB・RETRY_ZMAX・LPPROBE_FIX=d が既定になってから、親が決めて書く)**。
+  決めた版で check_default と、今の c3 (nolp 入り) の fuzz 7 本・cargo test を回し直してから始める。
 
 ### 手伝いの子が回す手順 (分担 K)
 
