@@ -6466,6 +6466,7 @@ pub(super) fn pool_close_on() -> bool {
 /// `w`: 暫定解を受け取るときの研磨の LP に、整数を固定した LP と同じ時間の上限を付ける (1 スレッドの道筋も変わる)。
 /// `b`: 2 スレッド以上の外側の根では、研磨を別スレッドで回し、見積りの印で先に受け取って、根のヒューリスティクスの終わりと求解の終わりで待って受け取る。
 /// `i`: 研磨を、`resolve_continuous` の整数を固定して最適になった B&B の LP の中で、カットの行の境界を外して続けて解く (1 スレッドの道筋も変わる)。
+/// `f` (`ENOMOTO_MIP_POLISH_WARM=e` と組): 木の中は漏れの見積りだけで受け取り、研磨の LP は返す前に 1 回だけ解く。上がった幅が許容を越えれば最適と言わない。
 /// `j`: 研磨の LP (温めた単体法、`i` なら LP の中の研磨) に反復の上限 `G5SEQ_C` × (行 + 列) を付け、上限に当たれば基底を捨てて
 /// 基底のない求解の既存の入口 (空いたスレッドがあれば同時実行、なければ二段解法 → 内点法 + クロスオーバー) で解き直す
 pub(super) fn rootpar_ph(c: char) -> bool {
@@ -29683,6 +29684,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 解き直せなければ漏れの見積りを [`super::WARM_LEAK`] に置き、返す前の研磨 (元の問題の空間) が取り替えなければ目的値に足す
         // 研磨で上げた目的値の幅 (共有の最良値は研磨の前の値のままなので、最後の守りではこの幅を引いて比べる)
         let mut warm_raise = 0.0;
+        // 試作 `ROOTPAR_PH` の `f`: 最後の研磨の前の値 (木で刈りに使った、見積りを足した値) と、研磨で上がった幅
+        let mut rph_f_raise: Option<(f64, f64)> = None;
         if super::polish_strict() && super::polish_warm_mode() > 0 && !self.params.submip && self.snap.is_none() {
             let warm = super::polish_warm_mode();
             let mut leak = 0.0;
@@ -29693,14 +29696,27 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let z0 = z;
                 let r = if mark == Some(WarmMark::Polished) {
                     super::WarmPolish::Kept
-                } else if warm == 3 {
+                } else if warm == 3 && !rootpar_ph('f') {
                     super::WarmPolish::NotSolved
                 } else {
                     let b = self.lp.basis();
                     if env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('v')) {
                         eprintln!("MIP: POLISH_WARM: final polish from the basis of the last LP (time up {}, mark {mark:?})", self.time_up());
                     }
-                    super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), if warm == 2 { self.deadline } else { None })
+                    // 試作 `ROOTPAR_PH` の `f` (`POLISH_WARM=e` と組): 木の中は見積りだけで受け取り、研磨の LP は返す前のここで 1 回だけ解く。
+                    // 期限は `d` と同じ求解の期限 (時間切れで終わるときは解かず、見積りを足して返す = `e` と同じ)
+                    let dl = if warm == 2 || (warm == 3 && rootpar_ph('f')) { self.deadline } else { None };
+                    let t = Instant::now();
+                    let r = super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), dl);
+                    if warm == 3 && self.params.verbose {
+                        let got = if let super::WarmPolish::Replaced(zn) = r { format!("{:.3e}", zn - z) } else { "-".into() };
+                        let est = match mark {
+                            Some(WarmMark::Est(e)) => format!("{e:.3e}"),
+                            _ => "-".into(),
+                        };
+                        eprintln!("MIP: ROOTPAR_PH f: final polish {:.3}s, leak estimate {est} (already added), objective changed by the LP {got}", t.elapsed().as_secs_f64());
+                    }
+                    r
                 };
                 match r {
                     super::WarmPolish::Replaced(zn) => z = zn,
@@ -29757,6 +29773,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     },
                 }
                 warm_raise = (z - z0).max(0.0);
+                if warm == 3 && rootpar_ph('f') {
+                    rph_f_raise = Some((z0, z - z0));
+                }
                 self.incumbent = Some((z, x));
             }
             super::WARM_LEAK.store(leak.to_bits(), std::sync::atomic::Ordering::Relaxed);
@@ -30277,6 +30296,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 (MipStatus::NotSolved, sb)
             }
             (s, _, _) => (s, best_bound),
+        };
+        // 試作 `ROOTPAR_PH` の `f`: 木は見積りを足した値 z0 で刈った。刈った枝に z0 − (刈りの許容差) より良い解はないので、全体の下界は z0 の側で
+        // 抑えられる。最後の研磨で値が z0 より上がった (見積りが足りなかった) とき、返す値 z と z0 の差が既存の許容 (abs_gap、rel_gap × |z|) の中なら
+        // 最適のまま返す。越えたら最適とは言えないので、下界を z0 に下げ、最適でない印 (`NotSolved`、共有の最良値の守りと同じ) で返す
+        let (status, best_bound) = match (status, rph_f_raise) {
+            (MipStatus::Optimal, Some((z0, dz))) if dz > self.params.abs_gap.max(self.params.rel_gap * (z0 + dz).abs()).max(1e-9 * z0.abs().max(1.0)) => {
+                eprintln!("MIP: ROOTPAR_PH f: the final polish raised the objective by {dz:.3e} beyond the gap tolerance; not reporting optimality (bound {z0:.10e})");
+                (MipStatus::NotSolved, best_bound.min(z0))
+            }
+            (s, _) => (s, best_bound),
         };
         // 診断 (`poly_diag`): 木の従のスレッドの数を主に渡す
         if !self.params.submip && self.snap.is_some() && self.poly_diag[0] > 0 {
