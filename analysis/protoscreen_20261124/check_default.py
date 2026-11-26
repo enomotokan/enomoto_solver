@@ -11,6 +11,9 @@
 2026-11-25 (3 回目): `ENOMOTO_MIP_OBJ_PROP=1` + `ENOMOTO_MIP_OBJ_PROP_INT=1` の既定化で mik-250-20-75-4 (6157 → 5856)・markshare_4_0 (236024 → 272319) の
 ノード数が変わった (目的値は同じ。2 回解いて同じ) ので、`ref_default.json` を書き直した。`ENOMOTO_MIP_OBJ_PROP=0` を引数で渡すと 2 回目の基準と全部一致する
 (analysis/objprop_20261124 6 節)。
+2026-11-26: `ENOMOTO_MIP_POLISH_FINAL` (研磨は返す前の 1 回だけ = `POLISH_WARM=e` + `ROOTPAR_PH=gj`) の既定化で mik-250-20-75-4 のノード数が変わった
+(5856 → 6277、目的値は同じ。2 回解いて同じ) ので、`ref_default.json` を書き直した。`ENOMOTO_MIP_POLISH_FINAL=0` を引数で渡すと前の基準と全部一致する
+(analysis/rootpar_ph_20261126 の 5.11 節)。
 `--save` で今の結果を `ref_default.json` に書く (既定の道筋を変えたときだけ。理由をここに書き足す)。"""
 import json, os, subprocess, sys
 from pathlib import Path

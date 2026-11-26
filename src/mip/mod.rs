@@ -964,6 +964,7 @@ pub(super) fn polish_in_problem(p: &MipProblem, x: &mut Vec<f64>, z: f64) -> Opt
 
 /// `ENOMOTO_MIP_POLISH_WARM` (`ENOMOTO_MIP_POLISH_STRICT` と組で使う。analysis/nattai_20261125/。
 /// **2026-11-25 に既定にした: 値 `d`。`0`・`off` で使わない (研磨の LP を前処理つきで一から解き、期限を渡さない前の形)。**
+/// **2026-11-26 から、付けなければ [`polish_final_on`] (既定) で `e`。**
 /// 根拠は [`polish_strict_mode`] と同じ。dano3_3・dano3_5 の時間切れの回で上限を越えない (60.02 秒。期限なしでは 73〜78 秒)):
 /// 0 = 使わない、1 = 研磨の LP を B&B の LP の基底から温めて解く (返す前の研磨には期限を渡さない)、
 /// 2 (`d`) = 1 に加えて返す前の研磨にも期限を渡し、間に合わなければ漏れの見積り ([`solver::Solver::leak_estimate`]) で目的値を正す、
@@ -972,14 +973,30 @@ pub(super) fn polish_in_problem(p: &MipProblem, x: &mut Vec<f64>, z: f64) -> Opt
 /// 「未研磨」の印をつける。返す前の研磨は、木の中で研磨が済んだ暫定解なら飛ばす。
 /// 見積りの双対値と温める基底は、暫定解の連続部を出した LP ([`solver::Solver::resolve_continuous`] の整数を固定した LP、
 /// または双対値で最適と示せた今の LP) のもの
+/// `ENOMOTO_MIP_POLISH_WARM` を付けていなければ、[`polish_final_on`] (既定) で 3 (`e`)、切っていれば 2 (`d`)。
 pub(super) fn polish_warm_mode() -> u8 {
     static V: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
-    *V.get_or_init(|| match env_def!("ENOMOTO_MIP_POLISH_WARM", "d") {
-        Some(v) if v == "e" => 3,
-        Some(v) if v == "d" => 2,
-        Some(_) => 1,
-        None => 0,
+    *V.get_or_init(|| {
+        if env_str!("ENOMOTO_MIP_POLISH_WARM").is_none() && polish_final_on() {
+            return 3;
+        }
+        match env_def!("ENOMOTO_MIP_POLISH_WARM", "d") {
+            Some(v) if v == "e" => 3,
+            Some(v) if v == "d" => 2,
+            Some(_) => 1,
+            None => 0,
+        }
     })
+}
+
+/// `ENOMOTO_MIP_POLISH_FINAL` (**2026-11-26 に既定にした。`0`・`off` で前の形 `POLISH_WARM=d` に戻す**。analysis/rootpar_ph_20261126 の 5 節):
+/// 研磨は返す前の 1 回だけにする。木の中では暫定解を研磨せず、漏れの見積りを足して受け取る (`POLISH_WARM=e`)。返す前に研磨の LP を期限なしで
+/// 1 回解き (試作 `ROOTPAR_PH` の `g`)、空いたスレッドがあれば温めた単体法と内点法 + クロスオーバーの同時実行で解く (`j`)。
+/// 最後の研磨で上がった幅が刈りの余裕と W_mip (研磨の LP の双対値 × MIP の実行可能性の許容) の大きい方を越えれば最適と言わない
+/// (「最適」は MIP の実行可能性の許容の中での最適。以前の `d` は単体法の主の許容の水準)。dano3_3 (4 スレッド) で木の中の研磨 22〜33 秒が
+/// 最後の 1 回 3.3 秒になる。`ENOMOTO_MIP_POLISH_WARM` を付ければその形 (`g`・`j` は `ROOTPAR_PH` で付けたときだけ)
+pub(super) fn polish_final_on() -> bool {
+    env_def!("ENOMOTO_MIP_POLISH_FINAL", "1").is_some()
 }
 
 /// `ENOMOTO_MIP_POLISH_WARM` で、返す暫定解の目的値に足す漏れの見積り (f64 のビット)。木の求解の終わり ([`solver::Solver::finish`]) で
@@ -1088,7 +1105,7 @@ pub(super) fn polish_in_problem_warm_ext(p: &MipProblem, x: &mut Vec<f64>, z: f6
     // 解の研磨が手間の期限で 3 反復で止まり、研磨しないまま見積り (その解を出した LP の双対値がなく、今の LP の双対値から取った小さな値) で
     // 受け取って、4 スレッドの nattai が最適値より 9.4e-5 良い値を返した (analysis/nattai_20261125 の 9 節)
     let lim = lp::SolveLimits { deadline, ..Default::default() };
-    let jcap = solver::rootpar_ph('j');
+    let jcap = solver::polish_final('j');
     let mut how = "";
     let st = crate::ticks::without_budget(|| {
         if cold {
@@ -1117,7 +1134,7 @@ pub(super) fn polish_in_problem_warm_ext(p: &MipProblem, x: &mut Vec<f64>, z: f6
     let mut out = WarmPolish::NotSolved;
     if st == lp::LpStatus::Optimal {
         out = WarmPolish::Kept;
-        if jcap || solver::rootpar_ph('f') || solver::rootpar_ph('g') {
+        if jcap || solver::rootpar_ph('f') || solver::polish_final('g') {
             POLISH_TOL_LEAK.with(|c| c.set(tol_leak_bound(p, &lp)));
         }
         let mut xn = lp.col_values();
