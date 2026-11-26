@@ -30655,8 +30655,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 試作 `ROOTPAR_PH` の `f`: 木は見積りを足した値 z0 で刈った。刈った枝に z0 − (刈りの許容差) より良い解はないので、全体の下界は z0 の側で
         // 抑えられる。最後の研磨で値が z0 より上がった (見積りが足りなかった) とき、返す値 z と z0 の差が既存の許容 (abs_gap、rel_gap × |z|) の中なら
         // 最適のまま返す。越えたら最適とは言えないので、下界を z0 に下げ、最適でない印 (`NotSolved`、共有の最良値の守りと同じ) で返す
+        // 目的値の格子 (`obj_step`・`obj_lat`) があれば、刈りの上限 ([`prune_limit_of`]) が z0 と z で同じ (同じ格子の目) なら、刈った枝は z でも
+        // 刈られるので最適のまま (fuzz_objint で、許容の中の違反の分 4.5e-7 上がって最適と言わなくなっていた。README 5.7 節)
+        let same_limit = |z0: f64, z: f64| {
+            let lim = |v: f64| prune_limit_of(Some(v), f64::INFINITY, self.obj_step, self.obj_lat, self.p.offset, self.params.rel_gap, self.params.abs_gap, f64::INFINITY);
+            lim(z) <= lim(z0)
+        };
         let (status, best_bound) = match (status, rph_f_raise) {
-            (MipStatus::Optimal, Some((z0, dz))) if dz > self.params.abs_gap.max(self.params.rel_gap * (z0 + dz).abs()).max(1e-9 * z0.abs().max(1.0)) => {
+            (MipStatus::Optimal, Some((z0, dz))) if dz > self.params.abs_gap.max(self.params.rel_gap * (z0 + dz).abs()).max(1e-9 * z0.abs().max(1.0)) && !same_limit(z0, z0 + dz) => {
                 eprintln!("MIP: ROOTPAR_PH f: the final polish raised the objective by {dz:.3e} beyond the gap tolerance; not reporting optimality (bound {z0:.10e})");
                 (MipStatus::NotSolved, best_bound.min(z0))
             }
