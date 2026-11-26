@@ -6826,6 +6826,8 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
                         wk.push(lp.clone());
                     }
                     let rem = if work { lp_iter_cap.saturating_sub(tot_it(&lp)).max(1) } else { u64::MAX };
+                    // `ENOMOTO_MIP_LPPROBE_FIX` の `c`: 窓の始めの効き目で子の上限を縮める
+                    let per_lp = lpp_cap(per_lp, n_tried - 1, n_fixed + fixes.len());
                     let blocks: Vec<&[(usize, f64)]> = cands[ci..end].chunks((end - ci).div_ceil(nb).max(1)).collect();
                     let (col_lo, col_up, saved_r) = (&prob.col_lo, &prob.col_up, &saved);
                     let n_cols = prob.n;
@@ -6891,6 +6893,8 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
                         lp.set_col_bounds(j, lo, v.floor());
                     }
                     // `ENOMOTO_MIP_PRESOLVE_WORK`: 反復の上限 `lp_iter_cap` を越えない (時間の期限で途中で止まる分を手間で決める)
+                    // `ENOMOTO_MIP_LPPROBE_FIX` の `c`: この列の前までの効き目で子の上限を縮める
+                    let per_lp = lpp_cap(per_lp, n_tried - 1, n_fixed + fixes.len());
                     let lim = if work { per_lp.min(lp_iter_cap.saturating_sub(tot_it(&lp)).max(1)) } else { per_lp };
                     let (td, itd) = (std::time::Instant::now(), lp.total_iterations());
                     let st = lp.solve(&SolveLimits { iteration_limit: lim, deadline, ..Default::default() });
@@ -8049,8 +8053,23 @@ thread_local! {
 /// 越えたらあきらめる (手間の既定 `ENOMOTO_MIP_PRESOLVE_WORK` のときだけ)。反復 x (行 + 列) の数えは 1 反復の重い密な問題 (cod105) で軽く出る
 /// 試作 `ENOMOTO_MIP_LPPROBE_FIX=<文字>` (analysis/lpprobe_20261126、既定では使わない): 前処理の LP プロービング ([`lp_probe`]) の直し。
 /// - `d` (結果を変えない): 子の LP の厳密な DSE 重みを使い回す ([`crate::simplex::slope_intercept_dual::lpprobe_dse_scope`])
+/// - `c` (結果が変わりうる): 子の LP 1 本の反復の上限 `per_lp` に、ここまでの効き目 (試した列のうち固定が出た割合) のシグモイドを掛ける。
+///   効き目の対数オッズ (ラプラスの数え方) L = ln((固定 + 1) / (試した列 − 固定 + 1)) で 2σ(L) = 2 (固定 + 1) / (試した列 + 2) (1 で頭打ち)。
+///   まだ何も試していなければ 1 (今と同じ)、固定のないまま列を試すほど縮む (2 列で 1/2、6 列で 1/4)。窓では窓の始めの値を使う (数えた量だけで決まる)。
+///   P では結果を生む子 (実行不能) は上限の 0.55 倍以内で終わり、上限まで走る子は何も生まない (analysis/lpprobe_20261126 1.2 節)
 pub(crate) fn lpprobe_fix(c: char) -> bool {
     env_str!("ENOMOTO_MIP_LPPROBE_FIX").is_some_and(|v| v.contains(c))
+}
+
+/// 試作 `ENOMOTO_MIP_LPPROBE_FIX` の `c` ([`lpprobe_fix`]): 子の LP の反復の上限 `per_lp` に、試した列 `tried` のうち固定 `fixed` の効き目の
+/// シグモイド 2σ(ln((fixed + 1) / (tried − fixed + 1))) = 2 (fixed + 1) / (tried + 2) を掛ける (1 で頭打ち、最低 1 反復)。`c` でなければ `per_lp`
+fn lpp_cap(per_lp: u64, tried: usize, fixed: usize) -> u64 {
+    if !lpprobe_fix('c') {
+        return per_lp;
+    }
+    let fixed = fixed.min(tried);
+    let s = (2.0 * (fixed as f64 + 1.0) / (tried as f64 + 2.0)).min(1.0);
+    ((per_lp as f64 * s).round() as u64).max(1)
 }
 
 /// 診断 `ENOMOTO_MIP_LPPROBE_DIAG` (analysis/lpprobe_20261126): 前処理の LP プロービングの子の LP ごとに、状態・反復・秒・目的値を stderr に出す
