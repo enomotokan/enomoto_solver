@@ -1776,6 +1776,8 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
     if outer {
         subb::reset();
         heur_subfix::reset();
+        // 試作 `ENOMOTO_MIP_OBJSHAVE`: 下界の専任が示した下界の持ち越しを戻す
+        solver::OBJSHAVE_CARRY.with(|c| c.set(f64::NEG_INFINITY));
         condrev::decide(p, params.verbose);
     }
     if outer {
