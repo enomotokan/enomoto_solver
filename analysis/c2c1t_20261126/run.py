@@ -34,6 +34,8 @@ CFGS["p+sbpbk"] = {"ENOMOTO_MIP_SB_PROBEBD": "1", "ENOMOTO_MIP_SB_PROP_PSKIP": "
 # 観測を捨てずに入れ直す形 (README 7 節、親の依頼): `l` = 双対の下界 (案 2)、`t` = 伝播なしで解き直す (案 1)
 CFGS["c2cpl"] = dict(C2CP, ENOMOTO_MIP_SB_PROP_PSKIP="l")
 CFGS["c2cpt"] = dict(C2CP, ENOMOTO_MIP_SB_PROP_PSKIP="t")
+# (b) 強分枝の子の伝播を子の LP に渡さない (既存の診断 `ENOMOTO_MIP_SB_PROP_NO_LP`、README 10 節)
+CFGS["c2cpnl"] = dict(C2CP, ENOMOTO_MIP_SB_PROP_NO_LP="1")
 OUT = Path(sys.argv[1]); probs = sys.argv[2].split(","); seeds = [int(x) for x in sys.argv[3].split(",")]; th = sys.argv[4]; tl = float(sys.argv[5]); cfgs = sys.argv[6].split(",")
 done = set()
 if OUT.exists():

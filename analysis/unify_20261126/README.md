@@ -305,3 +305,39 @@
   - physiciansched6-2 は 0.74 倍。既定の 4 スレッド種 2 の 56.3 秒が、直しで 20.7 秒になった。
 - 見立て: 中立 (1・4 スレッドとも目安は候補)。
 - 集計のしかた: `UNIFY_SET=2 python summ.py 'res2_s*.jsonl'`。環境変数を付けないと、設定 `uf2` を拾わず「結果なし」になる (GcYE の指摘)。
+
+### 5.3 第 2 弾を既定にした (2026-11-26、利用者の承認、親の指示)
+
+- `unify_fix` の `1` に `z`・`p` を含めた (`frsmltzp`)。`=frsmlt` で第 1 弾だけになり、`=0`・`off` で以前の形に戻る。
+- 確かめ (既定のビルド):
+  - check_default 全部一致 (基準 ref_default.json は変えない)。
+  - cargo test 425 通過。取り込んだ alns の試験は、その担当の直しで通るようになっていた。
+  - fuzz 7 本と fuzz_bigact 2 本は誤答 0 (`fuzz_def2.out`)。
+- docs/improvement_history.md に記録した。
+
+### 5.4 LP の入口の行と目的を作る処理 `ranged_constraints`・`min_objective` (1 節の 12、egj を取り込んでから)
+
+- 範囲つきの行 `lo <= a x <= up` を LP の入口の行 (`ConstraintRow`: lo = up なら等式、そうでなければ有限な側ごとに ≥・≤) に直す 15 行が、4 か所にあった。これを `mip::ranged_constraints` にまとめた。
+  - 研磨 `polish_in_problem` (mod.rs)
+  - 後処理の修復 `repair_postsolved` (mod.rs)
+  - 前処理の代わりの道 (mod.rs、`build_a_g` に渡す行)
+  - 根の LP の前処理つきの解き直し `rootlp_presolve_solve` (solver.rs)
+- 問題の行は `problem_constraints(p)` で直す。
+- 費用から最小化の目的を作る写し (3 か所) は `min_objective(cost, constant)` にした。
+- 動き: 行の順・中身は同じ。
+  - `rootlp_presolve_solve` だけ、等式の判定で両側の有限も見ていた。LP の行の範囲が lo = up = ±∞ になることはないので、同じ。
+- 確かめ: cargo test 425 通過、check_default 全部一致 (egj を既定にした後の基準)。
+- 区切りの fuzz (unify 12・13 の後、既定のビルド、`fuzz_u13.out`): fuzz 7 本と fuzz_bigact 2 本は誤答 0。cargo test 425 通過。
+
+## 6. ここまでのまとめ (2026-11-26)
+
+- 道筋の変わらないまとめは 13 件 (unify 1〜13)。どれも cargo test が通り、check_default は一致した。
+  - 期限、整数を固定した LP、サブ MIP の設定、feasRelax の補助 MIP
+  - カットの貯めの伝播、1 本の行の伝播、違反行の集合、環境変数の二重のキャッシュ
+  - 改善の判定 (`better_obj`)、TwoStageLp の尺度の写し、LP の入口の行と目的
+- 写し違いの直しは `ENOMOTO_MIP_UNIFY_FIX` の 8 文字 (`frsmltzp`)。2 回の P (各 696 回) で中立だったので、どちらも既定にした。
+- 見送り・ほかへ回したもの:
+  - 研磨の重複 (同じ固定 LP を 2〜3 回解く件・採否の判定) は FMjE (egj として既定になった)。
+  - 9 (FJ に渡す問題の写し) と 10 (問題全体の活動度) は、値打ちが小さいので見送り (親の判断)。
+  - `apply_dual_proofs` の締め方は、安全な側にあるので変えない。
+  - 2 節の 7 (ROOTCAP の基底) は意図的なので変えない。

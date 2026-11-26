@@ -3793,16 +3793,39 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 試作 `ENOMOTO_MIP_ALNS` ([`super::alns_cp`]): CP-SAT の難しさを合わせる 3 本の近傍 (rins・random・graph) を使う。
         // 呼ぶ時期・予算の決め方が今の腕の成功率を使うので、腕 0〜2 の回数・報酬にも足す
-        if super::alns_cp::on() {
-            let k = super::alns_cp::pick();
-            let z0 = self.incumbent.as_ref().map(|(z, _)| *z).unwrap();
-            self.heur_label = ["tree ALNS-CP rins", "tree ALNS-CP random", "tree ALNS-CP graph"][k];
-            let ok = self.alns_cp_run(k, x);
-            self.heur_label = "";
-            let z1 = self.incumbent.as_ref().map(|(z, _)| *z).unwrap();
-            self.alns_count[k] += 1;
-            self.alns_reward[k] += if ok && z1 < z0 { 1.0 + ((z0 - z1) / z0.abs().max(1.0)).min(1.0) } else { 0.0 };
-            return ok;
+        // サブ MIP (RENS などの中の木) では使わない: 中では手間の期限があるので分けたループが期限を使い切り、全スレッドで 1 つの近傍の状態も
+        // サブ MIP の呼び出しで汚れる (analysis/alns_20261126/README.md 8 節。0b4133149〜c99d75d20 はサブ MIP でも使っていた)
+        if super::alns_cp::on() && !self.params.submip {
+            // 1 回の呼び出しの手間の期限 (木の大近傍探索の予算から決まる、[`crate::ticks::push_budget`]) があるときは、それを
+            // `ENOMOTO_T_MIP_LNS_CALL_MIN` (既定 0.3 秒に当たる手間、今の 1 回の下限と同じ値) ずつに分けて近傍を続けて試す
+            // (改善するか期限が尽きたら止める)。初めの近傍 (d = 0.5) が 1 回で期限を全部使って時間切れになり、d が下がる前に
+            // 予算を使い切るのを防ぐ。期限がない (ヒューリスティクス役の時間の上限で回る) ときは今までどおり 1 本だけ
+            let piece = tunable!("ENOMOTO_T_MIP_LNS_CALL_MIN", 0.3, f64) * 1e9;
+            let split = crate::ticks::has_budget() && super::alns_cp::split_on();
+            let mut any = false;
+            loop {
+                let k = super::alns_cp::pick();
+                let z0 = self.incumbent.as_ref().map(|(z, _)| *z).unwrap();
+                self.heur_label = ["tree ALNS-CP rins", "tree ALNS-CP random", "tree ALNS-CP graph"][k];
+                let ok = if split {
+                    let _g = crate::ticks::budget_guard(piece.min(crate::ticks::left()));
+                    self.alns_cp_run(k, x)
+                } else {
+                    self.alns_cp_run(k, x)
+                };
+                self.heur_label = "";
+                let z1 = self.incumbent.as_ref().map(|(z, _)| *z).unwrap();
+                self.alns_count[k] += 1;
+                self.alns_reward[k] += if ok && z1 < z0 { 1.0 + ((z0 - z1) / z0.abs().max(1.0)).min(1.0) } else { 0.0 };
+                any |= ok;
+                if z1 < z0 {
+                    self.alns_lns_gain += (z0 - z1) / z0.abs().max(1.0);
+                }
+                if !split || ok || crate::ticks::left() <= 0.0 || self.time_up() || self.incumbent.is_none() {
+                    break;
+                }
+            }
+            return any;
         }
         const ARMS: usize = 6;
         let total: f64 = self.alns_count.iter().sum::<u32>() as f64;

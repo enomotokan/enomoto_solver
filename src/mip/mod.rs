@@ -32,6 +32,7 @@ pub(crate) mod fj;
 pub(crate) mod localmip;
 pub(crate) mod fjsub;
 mod heuristics;
+mod t1primal;
 mod subb;
 mod alns_cp;
 pub(crate) mod sympre;
@@ -904,31 +905,14 @@ pub(super) fn polish_strict() -> bool {
 /// `ENOMOTO_MIP_POLISH_STRICT=2` の集計: 研磨した回数、解を取り替えた回数、かかった時間 (ナノ秒)
 pub(super) static INC_POLISH: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
 
-/// `ENOMOTO_MIP_POLISH_STRICT=2` (試作): 暫定解 `x` (問題 `p` の空間、目的値 `z`) の整数列を固定した `p` を、B&B の LP とは別に
-/// 一から (前処理 + 単体法) 解き直す。B&B の LP はカット・境界のずらしの入った問題を許容誤差の範囲で解くので、行ごとには許容誤差以下の違反が
-/// 多くの行で積もり、目的値が本当の値より低い暫定解になる (neos-5188808-nattai: 112 行 × 9.5e-7 で 1e-4)。採り方は [`polish_solution`] の
-/// 試作と同じ (違反が増えず目的値が悪くならない、または違反が真に減る)。取り替えたら新しい目的値を返す
-pub(super) fn polish_in_problem(p: &MipProblem, x: &mut Vec<f64>, z: f64) -> Option<f64> {
-    use crate::types::{LinearExpr, RowSense, Sense};
-    use std::sync::atomic::Ordering;
-    if p.is_int.iter().all(|&b| b) {
-        return None;
-    }
-    let t = std::time::Instant::now();
-    let vars: Vec<VariableData> = (0..p.n)
-        .map(|j| {
-            let (lb, ub) = if p.is_int[j] { (x[j].round(), x[j].round()) } else { (p.col_lo[j], p.col_up[j]) };
-            VariableData { vtype: VarType::Continuous, lb, ub }
-        })
-        .collect();
-    let objective = Objective {
-        expr: LinearExpr { coeffs: (0..p.n).filter(|&j| p.cost[j] != 0.0).map(|j| (j, p.cost[j])).collect(), constant: p.offset },
-        sense: Sense::Minimize,
-    };
-    let mut cons = Vec::with_capacity(p.m);
-    for i in 0..p.m {
-        let expr = LinearExpr { coeffs: p.rows[i].iter().copied().collect(), constant: 0.0 };
-        let (lo, up) = (p.row_lo[i], p.row_up[i]);
+/// 範囲つきの行 `lo <= a x <= up` の並びを、LP の入口 (`solve_lp` など) の行 ([`ConstraintRow`]) に直す: `lo == up` なら等式 1 本、
+/// そうでなければ有限な側ごとに `>=`・`<=` (この順) の 2 本まで。`cap` は行の数の見込み。研磨・後処理の修復・前処理の代わりの道・
+/// 根の LP の前処理つきの解き直しの共通部分 (analysis/unify_20261126 の 1 節の 12)
+pub(crate) fn ranged_constraints<'r>(rows: impl Iterator<Item = (&'r [(usize, f64)], f64, f64)>, cap: usize) -> Vec<ConstraintRow> {
+    use crate::types::{LinearExpr, RowSense};
+    let mut cons = Vec::with_capacity(cap);
+    for (row, lo, up) in rows {
+        let expr = LinearExpr { coeffs: row.iter().copied().collect(), constant: 0.0 };
         if lo == up {
             cons.push(ConstraintRow { expr, sense: RowSense::Eq, rhs: lo });
             continue;
@@ -940,6 +924,38 @@ pub(super) fn polish_in_problem(p: &MipProblem, x: &mut Vec<f64>, z: f64) -> Opt
             cons.push(ConstraintRow { expr, sense: RowSense::Le, rhs: up });
         }
     }
+    cons
+}
+
+/// 問題 `p` の行を [`ranged_constraints`] で直したもの
+fn problem_constraints(p: &MipProblem) -> Vec<ConstraintRow> {
+    ranged_constraints((0..p.m).map(|i| (&p.rows[i][..], p.row_lo[i], p.row_up[i])), p.m)
+}
+
+/// 費用 `cost` (0 の列は除く) と定数 `constant` の最小化の目的
+pub(crate) fn min_objective(cost: &[f64], constant: f64) -> Objective {
+    use crate::types::{LinearExpr, Sense};
+    Objective { expr: LinearExpr { coeffs: (0..cost.len()).filter(|&j| cost[j] != 0.0).map(|j| (j, cost[j])).collect(), constant }, sense: Sense::Minimize }
+}
+
+/// `ENOMOTO_MIP_POLISH_STRICT=2` (試作): 暫定解 `x` (問題 `p` の空間、目的値 `z`) の整数列を固定した `p` を、B&B の LP とは別に
+/// 一から (前処理 + 単体法) 解き直す。B&B の LP はカット・境界のずらしの入った問題を許容誤差の範囲で解くので、行ごとには許容誤差以下の違反が
+/// 多くの行で積もり、目的値が本当の値より低い暫定解になる (neos-5188808-nattai: 112 行 × 9.5e-7 で 1e-4)。採り方は [`polish_solution`] の
+/// 試作と同じ (違反が増えず目的値が悪くならない、または違反が真に減る)。取り替えたら新しい目的値を返す
+pub(super) fn polish_in_problem(p: &MipProblem, x: &mut Vec<f64>, z: f64) -> Option<f64> {
+    use std::sync::atomic::Ordering;
+    if p.is_int.iter().all(|&b| b) {
+        return None;
+    }
+    let t = std::time::Instant::now();
+    let vars: Vec<VariableData> = (0..p.n)
+        .map(|j| {
+            let (lb, ub) = if p.is_int[j] { (x[j].round(), x[j].round()) } else { (p.col_lo[j], p.col_up[j]) };
+            VariableData { vtype: VarType::Continuous, lb, ub }
+        })
+        .collect();
+    let objective = min_objective(&p.cost, p.offset);
+    let cons = problem_constraints(p);
     let r = solve_lp(&vars, &objective, &cons, RootSolver::Simplex, LpOptions::default());
     INC_POLISH[0].fetch_add(1, Ordering::Relaxed);
     let mut out = None;
@@ -964,6 +980,7 @@ pub(super) fn polish_in_problem(p: &MipProblem, x: &mut Vec<f64>, z: f64) -> Opt
 
 /// `ENOMOTO_MIP_POLISH_WARM` (`ENOMOTO_MIP_POLISH_STRICT` と組で使う。analysis/nattai_20261125/。
 /// **2026-11-25 に既定にした: 値 `d`。`0`・`off` で使わない (研磨の LP を前処理つきで一から解き、期限を渡さない前の形)。**
+/// **2026-11-26 から、付けなければ [`polish_final_on`] (既定) で `e`。**
 /// 根拠は [`polish_strict_mode`] と同じ。dano3_3・dano3_5 の時間切れの回で上限を越えない (60.02 秒。期限なしでは 73〜78 秒)):
 /// 0 = 使わない、1 = 研磨の LP を B&B の LP の基底から温めて解く (返す前の研磨には期限を渡さない)、
 /// 2 (`d`) = 1 に加えて返す前の研磨にも期限を渡し、間に合わなければ漏れの見積り ([`solver::Solver::leak_estimate`]) で目的値を正す、
@@ -972,14 +989,30 @@ pub(super) fn polish_in_problem(p: &MipProblem, x: &mut Vec<f64>, z: f64) -> Opt
 /// 「未研磨」の印をつける。返す前の研磨は、木の中で研磨が済んだ暫定解なら飛ばす。
 /// 見積りの双対値と温める基底は、暫定解の連続部を出した LP ([`solver::Solver::resolve_continuous`] の整数を固定した LP、
 /// または双対値で最適と示せた今の LP) のもの
+/// `ENOMOTO_MIP_POLISH_WARM` を付けていなければ、[`polish_final_on`] (既定) で 3 (`e`)、切っていれば 2 (`d`)。
 pub(super) fn polish_warm_mode() -> u8 {
     static V: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
-    *V.get_or_init(|| match env_def!("ENOMOTO_MIP_POLISH_WARM", "d") {
-        Some(v) if v == "e" => 3,
-        Some(v) if v == "d" => 2,
-        Some(_) => 1,
-        None => 0,
+    *V.get_or_init(|| {
+        if env_str!("ENOMOTO_MIP_POLISH_WARM").is_none() && polish_final_on() {
+            return 3;
+        }
+        match env_def!("ENOMOTO_MIP_POLISH_WARM", "d") {
+            Some(v) if v == "e" => 3,
+            Some(v) if v == "d" => 2,
+            Some(_) => 1,
+            None => 0,
+        }
     })
+}
+
+/// `ENOMOTO_MIP_POLISH_FINAL` (**2026-11-26 に既定にした。`0`・`off` で前の形 `POLISH_WARM=d` に戻す**。analysis/rootpar_ph_20261126 の 5 節):
+/// 研磨は返す前の 1 回だけにする。木の中では暫定解を研磨せず、漏れの見積りを足して受け取る (`POLISH_WARM=e`)。返す前に研磨の LP を期限なしで
+/// 1 回解き (試作 `ROOTPAR_PH` の `g`)、空いたスレッドがあれば温めた単体法と内点法 + クロスオーバーの同時実行で解く (`j`)。
+/// 最後の研磨で上がった幅が刈りの余裕と W_mip (研磨の LP の双対値 × MIP の実行可能性の許容) の大きい方を越えれば最適と言わない
+/// (「最適」は MIP の実行可能性の許容の中での最適。以前の `d` は単体法の主の許容の水準)。dano3_3 (4 スレッド) で木の中の研磨 22〜33 秒が
+/// 最後の 1 回 3.3 秒になる。`ENOMOTO_MIP_POLISH_WARM` を付ければその形 (`g`・`j` は `ROOTPAR_PH` で付けたときだけ)
+pub(super) fn polish_final_on() -> bool {
+    env_def!("ENOMOTO_MIP_POLISH_FINAL", "1").is_some()
 }
 
 /// `ENOMOTO_MIP_POLISH_WARM` で、返す暫定解の目的値に足す漏れの見積り (f64 のビット)。木の求解の終わり ([`solver::Solver::finish`]) で
@@ -1088,7 +1121,7 @@ pub(super) fn polish_in_problem_warm_ext(p: &MipProblem, x: &mut Vec<f64>, z: f6
     // 解の研磨が手間の期限で 3 反復で止まり、研磨しないまま見積り (その解を出した LP の双対値がなく、今の LP の双対値から取った小さな値) で
     // 受け取って、4 スレッドの nattai が最適値より 9.4e-5 良い値を返した (analysis/nattai_20261125 の 9 節)
     let lim = lp::SolveLimits { deadline, ..Default::default() };
-    let jcap = solver::rootpar_ph('j');
+    let jcap = solver::polish_final('j');
     let mut how = "";
     let st = crate::ticks::without_budget(|| {
         if cold {
@@ -1117,7 +1150,7 @@ pub(super) fn polish_in_problem_warm_ext(p: &MipProblem, x: &mut Vec<f64>, z: f6
     let mut out = WarmPolish::NotSolved;
     if st == lp::LpStatus::Optimal {
         out = WarmPolish::Kept;
-        if jcap || solver::rootpar_ph('f') || solver::rootpar_ph('g') {
+        if jcap || solver::rootpar_ph('f') || solver::polish_final('g') {
             POLISH_TOL_LEAK.with(|c| c.set(tol_leak_bound(p, &lp)));
         }
         let mut xn = lp.col_values();
@@ -1743,6 +1776,8 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
     if outer {
         subb::reset();
         heur_subfix::reset();
+        // 試作 `ENOMOTO_MIP_OBJSHAVE`: 下界の専任が示した下界の持ち越しを戻す
+        solver::OBJSHAVE_CARRY.with(|c| c.set(f64::NEG_INFINITY));
         condrev::decide(p, params.verbose);
     }
     if outer {
@@ -3572,22 +3607,8 @@ fn repair_postsolved(p: &MipProblem, x: &[f64], params: MipParams) -> Option<Vec
     // LP の前処理つきで解く (整数列を固定すると大きく縮む。前処理なしの LP は uccase12 の再スタート 1 回目の問題 (8.8 万行) で
     // 2 秒に収まらなかった。研磨 ([`polish_solution`]) と同じ経路)
     let vars: Vec<VariableData> = (0..p.n).map(|j| VariableData { vtype: VarType::Continuous, lb: lo[j], ub: up[j] }).collect();
-    let mut cons: Vec<ConstraintRow> = Vec::with_capacity(p.m);
-    for i in 0..p.m {
-        let expr = crate::types::LinearExpr { coeffs: p.rows[i].iter().cloned().collect(), constant: 0.0 };
-        let (rl, ru) = (p.row_lo[i], p.row_up[i]);
-        if rl == ru {
-            cons.push(ConstraintRow { expr, sense: crate::types::RowSense::Eq, rhs: rl });
-        } else {
-            if rl.is_finite() {
-                cons.push(ConstraintRow { expr: expr.clone(), sense: crate::types::RowSense::Ge, rhs: rl });
-            }
-            if ru.is_finite() {
-                cons.push(ConstraintRow { expr, sense: crate::types::RowSense::Le, rhs: ru });
-            }
-        }
-    }
-    let objective = Objective { expr: crate::types::LinearExpr { coeffs: (0..p.n).filter(|&j| p.cost[j] != 0.0).map(|j| (j, p.cost[j])).collect(), constant: 0.0 }, sense: crate::types::Sense::Minimize };
+    let cons = problem_constraints(p);
+    let objective = min_objective(&p.cost, 0.0);
     let r = crate::cancel::with_deadline(deadline, || solve_lp(&vars, &objective, &cons, RootSolver::Simplex, LpOptions::default()));
     let st = r.status;
     let xn = match (&st, r.x) {
@@ -5547,21 +5568,7 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
         Some(r) => r,
         None => {
             let vars: Vec<VariableData> = (0..n).map(|j| VariableData { vtype: if p.is_int[j] { VarType::Integer } else { VarType::Continuous }, lb: col_lo[j], ub: col_up[j] }).collect();
-            let mut cons: Vec<ConstraintRow> = Vec::with_capacity(aug_rows.len());
-            for i in 0..aug_rows.len() {
-                let expr = crate::types::LinearExpr { coeffs: aug_rows[i].iter().cloned().collect(), constant: 0.0 };
-                let (lo, up) = (p_row_lo[i], p_row_up[i]);
-                if lo == up {
-                    cons.push(ConstraintRow { expr, sense: crate::types::RowSense::Eq, rhs: lo });
-                } else {
-                    if lo.is_finite() {
-                        cons.push(ConstraintRow { expr: expr.clone(), sense: crate::types::RowSense::Ge, rhs: lo });
-                    }
-                    if up.is_finite() {
-                        cons.push(ConstraintRow { expr, sense: crate::types::RowSense::Le, rhs: up });
-                    }
-                }
-            }
+            let cons = ranged_constraints((0..aug_rows.len()).map(|i| (&aug_rows[i][..], p_row_lo[i], p_row_up[i])), aug_rows.len());
             let r = crate::presolve::build_a_g(&vars, &cons);
             if fastpack_check && fast_ok {
                 let f = crate::presolve::build_a_g_from_ranged_rows(&col_lo, &col_up, &aug_rows, &p_row_lo, &p_row_up).unwrap();
@@ -8051,14 +8058,15 @@ thread_local! {
 /// 試作 `ENOMOTO_MIP_LPPROBE_TICKS` (analysis/scipsym_20261120/ 14・15 節、既定では使わない): LP による固定 ([`lp_probe`]) で固定がまだ 0 のとき、
 /// 子の LP に使った決定的な手間 (`crate::ticks`、窓で並べた写しの分も足す) が最初の LP の手間の `ENOMOTO_T_MIP_LP_PROBE_GIVEUP_TIME_MULT` (既定 1) 倍を
 /// 越えたらあきらめる (手間の既定 `ENOMOTO_MIP_PRESOLVE_WORK` のときだけ)。反復 x (行 + 列) の数えは 1 反復の重い密な問題 (cod105) で軽く出る
-/// 試作 `ENOMOTO_MIP_LPPROBE_FIX=<文字>` (analysis/lpprobe_20261126、既定では使わない): 前処理の LP プロービング ([`lp_probe`]) の直し。
+/// `ENOMOTO_MIP_LPPROBE_FIX=<文字>` (analysis/lpprobe_20261126、未設定は `d`): 前処理の LP プロービング ([`lp_probe`]) の直し。
 /// - `d` (結果を変えない): 子の LP の厳密な DSE 重みを使い回す ([`crate::simplex::slope_intercept_dual::lpprobe_dse_scope`])
 /// - `c` (結果が変わりうる): 子の LP 1 本の反復の上限 `per_lp` に、ここまでの効き目 (試した列のうち固定が出た割合) のシグモイドを掛ける。
 ///   効き目の対数オッズ (ラプラスの数え方) L = ln((固定 + 1) / (試した列 − 固定 + 1)) で 2σ(L) = 2 (固定 + 1) / (試した列 + 2) (1 で頭打ち)。
 ///   まだ何も試していなければ 1 (今と同じ)、固定のないまま列を試すほど縮む (2 列で 1/2、6 列で 1/4)。窓では窓の始めの値を使う (数えた量だけで決まる)。
 ///   P では結果を生む子 (実行不能) は上限の 0.55 倍以内で終わり、上限まで走る子は何も生まない (analysis/lpprobe_20261126 1.2 節)
+/// **未設定は `d` で既定で使う** (2026-11-26 に利用者の承認で既定化、analysis/lpprobe_20261126 5 節)。`=0`・`off` で切る。`c` は試作 (既定オフ)
 pub(crate) fn lpprobe_fix(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_LPPROBE_FIX").is_some_and(|v| v.contains(c))
+    env_def!("ENOMOTO_MIP_LPPROBE_FIX", "d").is_some_and(|v| v.contains(c))
 }
 
 /// 試作 `ENOMOTO_MIP_LPPROBE_FIX` の `c` ([`lpprobe_fix`]): 子の LP の反復の上限 `per_lp` に、試した列 `tried` のうち固定 `fixed` の効き目の
