@@ -7415,7 +7415,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 今から `secs` 秒後と、求解の期限 (`self.deadline`) の早い方。
     /// `secs` は [0, 1e6] 秒に押さえる (負・NaN は 0、無限・大きすぎる値は 1e6 秒。`Duration::from_secs_f64` が落ちないように)
     pub(super) fn deadline_in(&self, secs: f64) -> Instant {
-        let d = Instant::now() + Duration::from_secs_f64(if secs > 0.0 { secs.min(1e6) } else { 0.0 });
+        let d = Instant::now() + crate::cancel::secs(secs);
         self.deadline.map_or(d, |g| g.min(d))
     }
 

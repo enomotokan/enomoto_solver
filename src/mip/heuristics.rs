@@ -1404,7 +1404,7 @@ pub(super) fn local_search(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64
     // 試作 `ENOMOTO_MIP_TICKS` の `l` ([`super::ticks_on`]): 時間の上限 `time_cap` 秒を同じ量の手間 (ヒューリスティクスの重みで割った work) の
     // 上限にし、時間は 10 倍の安全網にする
     let tk_l = super::ticks_on('l');
-    let t_end = Instant::now() + Duration::from_secs_f64(time_cap * if tk_l { 10.0 } else { 1.0 });
+    let t_end = Instant::now() + crate::cancel::secs(time_cap * if tk_l { 10.0 } else { 1.0 });
     if n == 0 {
         return (None, None);
     }
@@ -1740,7 +1740,7 @@ fn fj_search_old(p: &MipProblem, lo: &[f64], up: &[f64], effort: u64, time_cap: 
         if n == 0 {
             return None;
         }
-        let t_end = Instant::now() + Duration::from_secs_f64(time_cap);
+        let t_end = Instant::now() + crate::cancel::secs(time_cap);
         // 試作 `ENOMOTO_MIP_TICKS` の `j` ([`crate::ticks::vclock`]): 手間で数えて止める (手間の門も見る)
         let vc = crate::ticks::vclock();
         let tk_end = crate::ticks::total() + time_cap.max(0.0) * 1e9;
