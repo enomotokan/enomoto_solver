@@ -103,7 +103,7 @@ pub(crate) struct Shared {
 
 /// 目的値 `z` が `b` より良いか (`b` が無限大なら真。`b - 1e-9 |b|` は無限大で NaN になるので分ける)
 fn better(z: f64, b: f64) -> bool {
-    !b.is_finite() || z < b - 1e-9 * b.abs().max(1.0)
+    !b.is_finite() || super::solver::better_obj(z, b, b)
 }
 
 /// 前処理の途中の解 `x` を根の問題 `q` に写す: `q` で固定された列は `q` の値にそろえ、整数列は丸める。`q` で実行可能でなければ `None`
