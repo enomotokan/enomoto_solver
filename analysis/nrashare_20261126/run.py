@@ -12,6 +12,14 @@ import run_miplib_benchmark as rb  # noqa: E402
 CFGS = {"def": {}, "c2c": dict(C2C), "c2cs": dict(C2C, ENOMOTO_MIP_NRA_SHARE="1"),
         # 親の追加: nra の採用候補 r0k23p (`p` は φ の補正) の上でも、共有なし・ありを比べる
         "c2cp": dict(C2C, ENOMOTO_MIP_NODEROWS_ADAPT="r0k23p"), "c2cps": dict(C2C, ENOMOTO_MIP_NODEROWS_ADAPT="r0k23p", ENOMOTO_MIP_NRA_SHARE="1")}
+# 親の追加 (neos-631710 の 4 スレッドの遅れの切り分け): c2c から部品を 1 つ抜いた形 "-名前"
+PARTS = {"nra": "ENOMOTO_MIP_NODEROWS_ADAPT", "enum": "ENOMOTO_MIP_ENUM_ADAPT", "heur": "ENOMOTO_MIP_HEUR_ADAPT", "fpls": "ENOMOTO_MIP_FP_STAGE3_LS",
+         "lmip": "ENOMOTO_MIP_LMIP_SCORE_TICKS", "bfrt": "ENOMOTO_MIP_NODELP_BFRT_GROUP", "tie": "ENOMOTO_MIP_CUTSEL_PROBE_TIE_FEWER",
+         "cutu": "ENOMOTO_MIP_CUTOFF_USER_TREE", "ppi": "ENOMOTO_MIP_PROOFPROP", "sbpb": "ENOMOTO_MIP_SB_PROBEBD"}
+assert set(PARTS.values()) == set(C2C), set(C2C) ^ set(PARTS.values())
+for _k, _v in PARTS.items():
+    CFGS["-" + _k] = {k: v for k, v in C2C.items() if k != _v}
+    CFGS["+" + _k] = {_v: C2C[_v]}
 OUT = Path(sys.argv[1]); probs = sys.argv[2].split(","); seeds = [int(x) for x in sys.argv[3].split(",")]; th = sys.argv[4]; tl = float(sys.argv[5]); cfgs = sys.argv[6].split(",")
 done = set()
 if OUT.exists():
