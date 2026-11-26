@@ -17389,47 +17389,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if !ok {
                 break;
             }
-            // 目的関数の行の最小活動量 (無限の項の数も)
-            let (mut minact, mut ninf) = (0.0f64, 0usize);
-            for &(j, c) in &obj {
-                let b = if c > 0.0 { d.lo[j] } else { d.up[j] };
-                if b.is_finite() {
-                    minact += c * b;
-                } else {
-                    ninf += 1;
-                }
-            }
-            if ninf > 1 {
-                break;
-            }
+            // c x_j <= u - (ほかの列の最小活動量)。連続列は丸め誤差の分だけ緩める (整数列は緩めない)
             let s0 = d.stack_len();
-            for &(j, c) in &obj {
-                let b = if c > 0.0 { d.lo[j] } else { d.up[j] };
-                let rest = if b.is_finite() {
-                    if ninf > 0 {
-                        continue;
-                    }
-                    minact - c * b
-                } else {
-                    minact
-                };
-                // c x_j <= u - rest。連続列は丸め誤差の分だけ緩める
-                let lim = (u - rest) / c;
-                let slack = if p.is_int[j] { 0.0 } else { 1e-9 * (1.0 + lim.abs()) };
-                if c > 0.0 {
-                    if lim + slack < d.up[j] && d.tighten_upper(p, j, lim + slack) {
-                        obj_tight += 1;
-                    }
-                } else if lim - slack > d.lo[j] && d.tighten_lower(p, j, lim - slack) {
-                    obj_tight += 1;
-                }
-                if d.infeasible {
+            match d.tighten_le_row_rest(p, &obj, u, false) {
+                Some(n) => obj_tight += n,
+                None => {
+                    ok = false;
                     break;
                 }
-            }
-            if d.infeasible {
-                ok = false;
-                break;
             }
             if d.stack_len() == s0 {
                 break;
@@ -24385,53 +24352,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let p = self.p;
         let (s0, e0) = (self.pool_start[k] as usize, self.pool_start[k + 1] as usize);
         let rhs = self.cut_pool[k].1;
-        let mut minact = 0.0f64;
-        let mut ninf = 0usize;
-        let mut infj = usize::MAX;
-        for t in s0..e0 {
-            let (j, c) = (self.pool_idx[t] as usize, self.pool_val[t]);
-            let b = if c > 0.0 { self.dom.lo[j] } else { self.dom.up[j] };
-            if b.is_finite() {
-                minact += c * b;
-            } else {
-                ninf += 1;
-                infj = j;
-            }
-        }
-        if ninf >= 2 {
-            return Ok(false);
-        }
-        if ninf == 0 && minact > rhs + 1e-6 * (1.0 + rhs.abs()) {
+        let (idx, val) = (&self.pool_idx[s0..e0], &self.pool_val[s0..e0]);
+        let row = idx.iter().zip(val).map(|(&j, &c)| (j as usize, c));
+        let n = match self.dom.tighten_le_row(p, row, rhs, cont_frac, false, |_| {}) {
+            super::domain::LeRowTighten::Skip => return Ok(false),
+            super::domain::LeRowTighten::Infeasible => return Err(()),
+            super::domain::LeRowTighten::Done(n) => n,
+        };
+        self.cutpool_prop_stats[2] += n as u64;
+        if self.dom.infeasible {
             return Err(());
         }
-        let gap = rhs - minact;
-        let mut changed = false;
-        for t in s0..e0 {
-            let (j, c) = (self.pool_idx[t] as usize, self.pool_val[t]);
-            if ninf == 1 && j != infj {
-                continue;
-            }
-            let (lo, up) = (self.dom.lo[j], self.dom.up[j]);
-            if ninf == 0 && c.abs() * (up - lo) <= gap + 1e-9 * (1.0 + gap.abs()) {
-                continue;
-            }
-            let tight = if c > 0.0 {
-                let v = if ninf == 0 { lo + gap / c } else { gap / c };
-                let need = if p.is_int[j] { 1e-6 * (1.0 + up.abs().min(1e6)) } else { (cont_frac * (up - lo)).max(1e-6 * (1.0 + up.abs().min(1e6))) };
-                v < up - need && self.dom.tighten_upper(p, j, v)
-            } else {
-                let v = if ninf == 0 { up + gap / c } else { gap / c };
-                let need = if p.is_int[j] { 1e-6 * (1.0 + lo.abs().min(1e6)) } else { (cont_frac * (up - lo)).max(1e-6 * (1.0 + lo.abs().min(1e6))) };
-                v > lo + need && self.dom.tighten_lower(p, j, v)
-            };
-            if tight {
-                changed = true;
-                self.cutpool_prop_stats[2] += 1;
-            }
-            if self.dom.infeasible {
-                return Err(());
-            }
-        }
+        let changed = n > 0;
         if changed && reset_age {
             // HiGHS と同じく、境界を締めたカットは使われたとして年齢を戻す
             self.pool_age[k] = 0;
@@ -24506,63 +24438,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn propagate_le_row_ex(&mut self, obj: &[(usize, f64)], u: f64, conflicts: bool, int_only: bool) -> bool {
         let p = self.p;
         for _ in 0..3 {
-            let mut minact = 0.0f64;
-            let mut ninf = 0usize;
-            let mut infj = usize::MAX;
-            for &(j, c) in obj.iter() {
-                let b = if c > 0.0 { self.dom.lo[j] } else { self.dom.up[j] };
-                if b.is_finite() {
-                    minact += c * b;
-                } else {
-                    ninf += 1;
-                    infj = j;
-                }
-            }
-            if ninf >= 2 {
-                return true;
-            }
-            if ninf == 0 && minact > u + 1e-6 * (1.0 + u.abs()) {
-                self.obj_prop_stats[0] += 1;
-                if conflicts && env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() && !self.params.submip {
-                    self.add_conflicts_multi(super::domain::ConflictStart::Proof(obj, u));
-                }
-                return false;
-            }
-            let gap = u - minact;
-            let mut changed = false;
-            let cc_pos0 = self.dom.stack_len();
-            self.dom.set_external_tag(6);
-            for &(j, c) in obj.iter() {
-                if int_only && !p.is_int[j] {
-                    continue;
-                }
-                let (lo, up) = (self.dom.lo[j], self.dom.up[j]);
-                let rest_gap = if ninf == 0 {
-                    // c x_j <= gap + c * (x_j の最小の側の境界)
-                    if c.abs() * (up - lo) <= gap + 1e-9 * (1.0 + gap.abs()) {
-                        continue;
+            let mut cc_pos0 = 0;
+            let n = match self.dom.tighten_le_row(p, obj.iter().copied(), u, 0.0, int_only, |d| {
+                cc_pos0 = d.stack_len();
+                d.set_external_tag(6);
+            }) {
+                super::domain::LeRowTighten::Skip => return true,
+                super::domain::LeRowTighten::Infeasible => {
+                    self.obj_prop_stats[0] += 1;
+                    if conflicts && env_str!("ENOMOTO_MIP_NO_EXTRA_CONFLICTS").is_none() && !self.params.submip {
+                        self.add_conflicts_multi(super::domain::ConflictStart::Proof(obj, u));
                     }
-                    gap
-                } else if j == infj {
-                    u - minact
-                } else {
-                    continue;
-                };
-                let tight = if c > 0.0 {
-                    let v = if ninf == 0 { lo + rest_gap / c } else { rest_gap / c };
-                    v < up - 1e-6 * (1.0 + up.abs().min(1e6)) && self.dom.tighten_upper(p, j, v)
-                } else {
-                    let v = if ninf == 0 { up + rest_gap / c } else { rest_gap / c };
-                    v > lo + 1e-6 * (1.0 + lo.abs().min(1e6)) && self.dom.tighten_lower(p, j, v)
-                };
-                if tight {
-                    changed = true;
-                    self.obj_prop_stats[1] += 1;
+                    return false;
                 }
-                if self.dom.infeasible {
-                    break;
-                }
-            }
+                super::domain::LeRowTighten::Done(n) => n,
+            };
+            self.obj_prop_stats[1] += n as u64;
+            let changed = n > 0;
             self.dom.set_external(false);
             if conflicts && super::cutconf::mode().is_some() && !self.params.submip {
                 super::cutconf::note_range(&self.dom, cc_pos0, &mut None, || (obj.to_vec(), u));
