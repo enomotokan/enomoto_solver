@@ -12,6 +12,9 @@ import run_miplib_benchmark as rb  # noqa: E402
 CFGS = {"def": {}, "c2c": dict(C2C), "c2cs": dict(C2C, ENOMOTO_MIP_NRA_SHARE="1"),
         # 親の追加: nra の採用候補 r0k23p (`p` は φ の補正) の上でも、共有なし・ありを比べる
         "c2cp": dict(C2C, ENOMOTO_MIP_NODEROWS_ADAPT="r0k23p"), "c2cps": dict(C2C, ENOMOTO_MIP_NODEROWS_ADAPT="r0k23p", ENOMOTO_MIP_NRA_SHARE="1")}
+# neos-631710 の直し (README 7 節): c2c の ENUM_ADAPT を 1st にした形 (`t`: FJ_P3 の前処理に時計を置く)
+CFGS["c2ct"] = dict(C2C, ENOMOTO_MIP_ENUM_ADAPT="1st")
+CFGS["c2cpt"] = dict(C2C, ENOMOTO_MIP_ENUM_ADAPT="1st", ENOMOTO_MIP_NODEROWS_ADAPT="r0k23p")
 # 親の追加 (neos-631710 の 4 スレッドの遅れの切り分け): c2c から部品を 1 つ抜いた形 "-名前"
 PARTS = {"nra": "ENOMOTO_MIP_NODEROWS_ADAPT", "enum": "ENOMOTO_MIP_ENUM_ADAPT", "heur": "ENOMOTO_MIP_HEUR_ADAPT", "fpls": "ENOMOTO_MIP_FP_STAGE3_LS",
          "lmip": "ENOMOTO_MIP_LMIP_SCORE_TICKS", "bfrt": "ENOMOTO_MIP_NODELP_BFRT_GROUP", "tie": "ENOMOTO_MIP_CUTSEL_PROBE_TIE_FEWER",
