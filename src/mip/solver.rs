@@ -4216,6 +4216,11 @@ pub(crate) fn heur1t(c: char) -> bool {
 /// 列の効き目も入るので、強分枝しない分枝 (擬似費用だけで選ぶ分枝) の選び方を狂わせる (neos859080 の 1 スレッドで、SB_PROBEBD だけで
 /// ノードが 2〜5 千から 1.5〜5.6 万に増え、子の LP に境界を渡さない診断 `SB_PROP_NO_LP`・`BT_EARLY` では既定並みに戻った)。
 /// 子の判定 (切る・ノードに置く境界) にはそのまま使う
+/// 診断 `ENOMOTO_MIP_SB_PROP_TWIN` (analysis/c2c1t_20261126 の 4 節): 伝播の境界つきで解いた強分枝の子を、境界なしでも解き直して伸びを並べて出す
+pub(crate) fn sb_prop_twin() -> bool {
+    env_str!("ENOMOTO_MIP_SB_PROP_TWIN").is_some_and(|v| v != "0")
+}
+
 pub(crate) fn sb_prop_pskip() -> bool {
     env_str!("ENOMOTO_MIP_SB_PROP_PSKIP").is_some_and(|v| v != "0")
 }
@@ -20190,6 +20195,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let mut side_bd: [std::collections::HashMap<usize, (f64, f64)>; 2] = Default::default();
             // 試作 `ENOMOTO_MIP_SB_PROP_PSKIP` ([`sb_prop_pskip`]): 子の LP を伝播で締まった境界つきで解いたか (側ごと)
             let mut prop_lp = [false; 2];
+            // 診断 `ENOMOTO_MIP_SB_PROP_TWIN` ([`sb_prop_twin`]): 子の LP に渡す前の、伝播で締まった列の境界 (ノードの値)
+            let mut prop_orig: [Vec<(usize, f64, f64)>; 2] = Default::default();
             // `ENOMOTO_MIP_SB_PROBEBD=2` (試作): 両方の子に共通の境界をノードに置いたら、その場でノードで伝播して連鎖させる
             let sb_probebd2 = sb_probebd && env_str!("ENOMOTO_MIP_SB_PROBEBD").is_some_and(|v| v == "2");
             // 試作 `ENOMOTO_MIP_PCL` の `a`: 子の LP が反復上限で途中の値になった側があるか
@@ -20409,9 +20416,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         self.dom.backtrack_to(self.p, pos);
                     } else if env_str!("ENOMOTO_MIP_SB_PROP_NO_LP").is_none() {
                         for (c, _, _) in self.dom.changes_since(pos) {
+                            if sb_prop_twin() && c != j && !prop_orig[side].iter().any(|e| e.0 == c) {
+                                let (l0, u0) = self.lp.col_bounds(c);
+                                prop_orig[side].push((c, l0, u0));
+                            }
                             self.lp.set_col_bounds(c, self.dom.lo[c], self.dom.up[c]);
                             self.sb_prop_stats[1] += 1;
-                            prop_lp[side] = true;
+                            // 分けた列 `j` 自身の境界は伝播の効き目ではないので数えない
+                            if c != j {
+                                prop_lp[side] = true;
+                            }
                         }
                     }
                 }
@@ -20603,6 +20617,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             child_rc[side] = sb_child_rc(&self.lp, j, is_up);
                         }
                         let delta = self.hnfbr_delta(j, v, is_up);
+                        // 診断 `ENOMOTO_MIP_PCLOG`: 強分枝の観測も 1 行出す (PSB ノード 深さ 列 上か 単位あたりの伸び 伝播の境界つきか 擬似費用に入れたか)
+                        if pclog_on() && !self.params.submip {
+                            eprintln!("PSB {} {} {j} {} {:.6e} {} {}", self.nodes, depth, is_up as u8, gains[side] / delta.max(1e-9), prop_lp[side] as u8, !(prop_lp[side] && sb_prop_pskip()) as u8);
+                        }
+                        // 診断 `ENOMOTO_MIP_SB_PROP_TWIN`: 同じ子を、伝播で締まった列の境界をノードの値に戻して解き直し、伸び (単位あたり) を並べて出す
+                        // (PTW ノード 深さ 列 上か 伝播つきの伸び 伝播なしの伸び 伝播なしの状態 戻した列の数)。LP は解き直しの前の状態に戻す (道筋は変わりうる)
+                        if sb_prop_twin() && prop_lp[side] && !self.params.submip {
+                            let cur = self.lp.save_state();
+                            for &(c, l0, u0) in &prop_orig[side] {
+                                self.lp.set_col_bounds(c, l0, u0);
+                            }
+                            let st2 = self.lp.solve(&self.limits_k(sb_iter_limit, 1));
+                            let g2 = if st2 == LpStatus::Optimal { (self.lp.objective() + self.p.offset - node_obj).max(0.0) } else { f64::NAN };
+                            eprintln!("PTW {} {} {j} {} {:.6e} {:.6e} {st2:?} {}", self.nodes, depth, is_up as u8, gains[side] / delta.max(1e-9), g2 / delta.max(1e-9), prop_orig[side].len());
+                            self.lp.restore_state(&cur);
+                        }
                         if prop_lp[side] && sb_prop_pskip() {
                             self.sb_prop_stats[5] += 1;
                         } else {
