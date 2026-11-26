@@ -6416,6 +6416,13 @@ pub(super) fn pool_close_on() -> bool {
     *V.get_or_init(|| env_str!("ENOMOTO_MIP_POOL_CLOSE").is_some_and(|v| v != "0"))
 }
 
+/// 試作 `ENOMOTO_MIP_ROOTPAR_PH=<文字>` (既定では使わない、analysis/rootpar_ph_20261126): 4 スレッドの根の前処理・ヒューリスティクスの段で、
+/// 空いているスレッドを使う。`r`: カット前の LP 解の RENS をカットのループの前に並列のサブ MIP として出す
+pub(super) fn rootpar_ph(c: char) -> bool {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| env_str!("ENOMOTO_MIP_ROOTPAR_PH").map_or(String::new(), |v| v.to_string())).contains(c)
+}
+
 /// プールから戻すラウンドの伸びを測るか (`POOL_CLOSE` か、`NODEROWS_ADAPT` の `p`)
 pub(super) fn pool_gain_on() -> bool {
     pool_close_on() || (nra_on() && (nra_has('p') || nra_has('g')))
@@ -11737,6 +11744,26 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
         }
+        // 試作 `ENOMOTO_MIP_ROOTPAR_PH` の `r` ([`rootpar_ph`]、analysis/rootpar_ph_20261126): 2 スレッド以上の外側の根で、根のヒューリスティクスの段で
+        // 回す「RENS (LP before cuts)」(カット前の LP 解の RENS) を、カットのループの前に並列のサブ MIP として出し、カットのループの間に空いた
+        // スレッドで解かせる。受け取りは今までどおり根のヒューリスティクスの段の待ち (`join_submips`) で行う。1 スレッドの動きは変えない
+        let mut rph_early_rens = false;
+        if rootpar_ph('r') && mip_threads() > 1 && !self.params.submip && self.snap.is_none() && self.nodes <= 1 && !self.fractional(&x_root0).is_empty() {
+            let lpbc_depth_ok = (super::heuristics::SUBMIP_DEPTH.with(|d| d.get()) as usize) < tunable!("ENOMOTO_MIP_RENS_LPBC_MAX_DEPTH", 1, usize);
+            if lpbc_depth_ok {
+                let keep = self.parallel_submips;
+                self.parallel_submips = true;
+                self.heur_label = "RENS (LP before cuts)";
+                let n0 = self.pending_submips.len();
+                let _ = self.rens(&x_root0);
+                self.heur_label = "";
+                self.parallel_submips = keep;
+                rph_early_rens = self.pending_submips.len() > n0;
+                if self.params.verbose {
+                    eprintln!("MIP: ROOTPAR_PH r: RENS (LP before cuts) started before the root cuts as a parallel sub-MIP: {rph_early_rens} ({:.2}s)", self.start.elapsed().as_secs_f64());
+                }
+            }
+        }
         // 根の切除平面
         // 主の根のカットのループの時間 (`ENOMOTO_MIP_BG_CUTS_WAIT` の待ちの上限に使う)
         let mut root_cut_secs = 0.0f64;
@@ -12549,7 +12576,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // `RENS (LP before cuts)` (深さ 2) を止める。今の既定では深さ 2 の `RENS (LP before cuts)` は 58 問で 41 本・16.4 秒、
                 // 外側に届いた解なし (analysis/submip_where_20261101.md・analysis/rens_depth3_20261101.md)
                 let lpbc_depth_ok = (super::heuristics::SUBMIP_DEPTH.with(|d| d.get()) as usize) < tunable!("ENOMOTO_MIP_RENS_LPBC_MAX_DEPTH", 1, usize);
-                if self.incumbent.is_none() && self.ref_sol.is_none() && lpbc_depth_ok && !self.fractional(&x_root0).is_empty() {
+                // `ROOTPAR_PH` の `r`: カットのループの前に出していれば、ここでは回さない
+                if self.incumbent.is_none() && self.ref_sol.is_none() && lpbc_depth_ok && !self.fractional(&x_root0).is_empty() && !rph_early_rens {
                     heur!("RENS (LP before cuts)", self.rens(&x_root0));
                 }
                 // `ENOMOTO_MIP_SUBMIP_LIGHT_HEUR`: サブ MIP の根では Feasibility Pump とダイビングを使わない。30n20b8 の根の RENS の
