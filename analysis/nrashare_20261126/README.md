@@ -156,6 +156,12 @@ c2c と c2c+t を同じビルドで比べた。基準は c2c):
 - `t` は時計の数え違いの直しで、効くのは主でないスレッドの前処理で ENUM_ADAPT が回るときだけ。P では中立、4 スレッドの neos-631710・30n20b8 の害を減らす。
   方針 (中立なら入れる) に沿えば、c2c に入れてよい。
 
+**見張りの形に広げた後の確かめ** (親の依頼、`fuzz.sh enumt2 ENOMOTO_MIP_ENUM_ADAPT=1st` → `fuzz_enumt2.out`、558a012f2 のビルド):
+- fuzz 7 本は誤答 0: tiny 0/400・0/400、vs HiGHS 0/300、objint 0/1000・0/1000、slack 0/1000・0/1000。
+- cargo test は 424 通過・**1 失敗**: `mip::alns_cp::tests::adaptive_moves_like_cpsat` (src/mip/alns_cp.rs 244 行の `(c.value - 0.5).abs() < 0.1`)。
+  - この失敗は `t` と関係ない。`ENOMOTO_MIP_ENUM_ADAPT` をつけずにこのテストだけ回しても失敗する。
+  - テストはほかのセッションの a6beb833d (試作 `ENOMOTO_MIP_ALNS`) で足されたもの。ほかの 424 本は通過。
+
 ## 5. 再現
 
 ```
