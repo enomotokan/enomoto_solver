@@ -276,3 +276,13 @@
   - 分担表: `UNIFY_SET=2 python plan.py 4 shards2.json`。
   - 回し方: `python analysis/unify_20261126/run.py K analysis/unify_20261126/shards2.json analysis/unify_20261126/res2_sK.jsonl`。
   - 集計: `UNIFY_SET=2 python analysis/unify_20261126/summ.py 'analysis/unify_20261126/res2_s*.jsonl'`。
+
+### 5.1 TwoStageLp の尺度をかけた写し `scaled_copy` (1 節の 11、HJZ2 の了承のうえ)
+
+- mip_lp.rs の `attach_tw`・`ipm_scale`・`solve_scaled` が同じ 7 行で写しを作っていたので、`TwoStageLp::scaled_copy(rs, cs)` にまとめた。
+  - 写しの中身: 係数 × rs_i cs_j、行の範囲 × rs_i、列の範囲 ÷ cs_j、費用 × cs_j。
+- `ipm_scale` が手書きしていた係数の絶対値の最小・最大は、`coef_range` と共通の `coef_minmax` に出した (係数がないときの (∞, 0) も同じ)。
+- 動き: 演算は同じで、ビット単位で同じ。
+- 確かめ: check_default 全部一致。cargo test は 424 通過・1 失敗。
+  - 失敗は、取り込んだ別の試作 `mip::alns_cp::tests::adaptive_moves_like_cpsat` (a6beb833d、ENOMOTO_MIP_ALNS) の `assert!((c.value - 0.5).abs() < 0.1)`。
+  - mip_lp.rs とは関わらない。親に伝えた。
