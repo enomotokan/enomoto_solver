@@ -5277,7 +5277,35 @@ fn clqprb_shadow_locks(p: &MipProblem, params: MipParams, pre_submip: bool, lp_p
     found.filter(|_| ok)
 }
 
+/// 試作 `ENOMOTO_MIP_ENUM_ADAPT` の `t` (analysis/nrashare_20261126 7・8 節): 前処理を回すスレッドに ENUM_ADAPT の時計 (`ENUM_T0`、主のスレッドの
+/// 求解の始めに置く) がなければ、この前処理の始めを時計にし、見張りを捨てるときに元に戻す ([`presolve_mip`] の入口で作る。入れ子の呼び出しは時計が
+/// あるので何もしない)。時計がないと経過は無限大で「c = 0 で常に続ける」になり、主でないスレッドの前処理 (FJ のスレッドの FJ_P3、PRECHAIN・TPRE・
+/// 並列のサブ MIP など) で列挙とプロービングの繰り返し・かけ直しが止まらなかった (neos-631710 の 4 スレッドの FJ_P3 で 10.1 秒)
+struct EnumClockGuard(Option<Option<(usize, f64, f64)>>);
+
+impl EnumClockGuard {
+    fn new() -> Self {
+        let on = enum_adapt_on() && env_str!("ENOMOTO_MIP_ENUM_ADAPT").is_some_and(|v| v.contains('t')) && ENUM_T0.with(|c| c.get()).is_none();
+        if !on {
+            return EnumClockGuard(None);
+        }
+        let prev = ENUM_STEP_LAST.with(|c| c.replace(None));
+        ENUM_T0.with(|c| c.set(Some(std::time::Instant::now())));
+        EnumClockGuard(Some(prev))
+    }
+}
+
+impl Drop for EnumClockGuard {
+    fn drop(&mut self) {
+        if let Some(prev) = self.0 {
+            ENUM_T0.with(|c| c.set(None));
+            ENUM_STEP_LAST.with(|c| c.set(prev));
+        }
+    }
+}
+
 fn presolve_mip(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs: Option<f64>) -> Option<Presolved> {
+    let _enum_clock = EnumClockGuard::new();
     // 試作 `ENOMOTO_MIP_INTSING` の `h` (既定はオフ、[`crate::presolve::colsingleton::INTSING_HOLD`]): 最上段の呼び出しの間は INTSING を保留し、
     // 支配される 0-1 列の固定の後のかけ直しで消す。入れ子の呼び出し (かけ直し) は状態をそのまま受け継ぐ
     use crate::presolve::colsingleton::{intsing_domfirst, intsing_order, INTSING_HELD, INTSING_HOLD};
@@ -10165,20 +10193,7 @@ fn fj_p3_problem_inner(pc: &MipProblem) -> Option<(MipProblem, Vec<crate::presol
         eprint!("MIP:   FJ_P3 ");
     }
     crate::set_fj_p3_force(true);
-    // 試作 `ENOMOTO_MIP_ENUM_ADAPT` の `t` (analysis/nrashare_20261126 7 節): このスレッドに ENUM_ADAPT の時計 (`ENUM_T0`、主のスレッドの求解の始めに置く) が
-    // なければ、この前処理の始めを時計にする (前処理の後は元に戻す)。時計がないと経過は無限大で「c = 0 で常に続ける」になり、FJ のスレッドの FJ_P3 の前処理で
-    // 列挙とプロービングの繰り返し・かけ直しが止まらず、期限を過ぎて FJ・Local-MIP が回らなかった (neos-631710 の 4 スレッド、10.1 秒)
-    let enum_clock = enum_adapt_on() && env_str!("ENOMOTO_MIP_ENUM_ADAPT").is_some_and(|v| v.contains('t')) && ENUM_T0.with(|c| c.get()).is_none();
-    let step_prev = ENUM_STEP_LAST.with(|c| c.get());
-    if enum_clock {
-        ENUM_T0.with(|c| c.set(Some(std::time::Instant::now())));
-        ENUM_STEP_LAST.with(|c| c.set(None));
-    }
     let r = presolve_mip(pc, false, false, None);
-    if enum_clock {
-        ENUM_T0.with(|c| c.set(None));
-        ENUM_STEP_LAST.with(|c| c.set(step_prev));
-    }
     crate::set_fj_p3_force(false);
     if pt {
         pretime::report(pc.m, pc.n, pc.nnz, 0);
