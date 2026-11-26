@@ -612,7 +612,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             Some(x) => x,
             None => (0..p.n).map(|j| if p.is_int[j] { xlp[j].round().clamp(self.dom.lo[j], self.dom.up[j]) } else { xlp[j] }).collect(),
         };
-        let tol = |b: f64| 1e-6 * (1.0 + b.abs());
+        // `ENOMOTO_MIP_UNIFY_FIX` の `r`: `is_feasible` と同じ許容誤差 (前は `1e-6 (1 + |b|)` で、|b| の大きい行の違反を見落とし、
+        // 補助 MIP を試さずに `try_incumbent` で落ちていた)
+        let fix_r = super::solver::unify_fix('r');
+        let tol = |b: f64| if fix_r { FEASTOL + 1e-9 * b.abs() } else { 1e-6 * (1.0 + b.abs()) };
         let act: Vec<f64> = p.rows.iter().map(|r| r.iter().map(|&(j, a)| a * x0[j]).sum()).collect();
         let violated: Vec<bool> = (0..p.m).map(|i| act[i] < p.row_lo[i] - tol(p.row_lo[i]) || act[i] > p.row_up[i] + tol(p.row_up[i])).collect();
         let nviol = violated.iter().filter(|&&v| v).count();
