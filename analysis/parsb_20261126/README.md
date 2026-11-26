@@ -103,4 +103,20 @@ h80x6320d 220 回・roll3000 368 回・mc11 300 回・eil33-2 298 回 (既定)�
 - 版: **ed02a8cc8** で `pip install -e .` (UNIFY_FIX の既定化・行の伝播のまとめ・PARIDLE=h などを含む)。check_default は既定・`PARSB=1` とも 6 問一致。
 - 分担表 shards2.json (shards.json の写し、348 回)、`python run.py 0 shards2.json res2_s0.jsonl`、集計 `python summ.py res2_s0.jsonl` → summ2.txt。
 
-(結果は下に追記)
+結果 (348 行、crash・取得失敗 0、食い違い 0):
+
+| 試作 | 回 | 比 | 95% 区間 | 解けた数 既定 → 試作 | 全種 1.25 倍超の遅れ | 効いた (< 0.8) | 害 (> 1.25) | 目安 |
+|---|---:|---:|---|---|---|---|---|---|
+| sb (`PARSB=1`) | 174 | 0.994 | [0.979, 1.010] | 138 → 140 | なし | — | noswot 1.26 | **候補** |
+
+- 問題単位の比: neos-911970 0.85・h80x6320d 0.86・neos5 0.87・pk1 0.93・qiu 0.93・eil33-2 0.94・mc11 0.95 … 1 を超える側は nw04 1.10・timtab1 1.11・
+  physiciansched6-2 1.22・noswot 1.26。noswot は全種そろった遅れではなく、5 節の計測では 0.78 (同じく 4 スレッドで揺れの大きい問題)。道筋の揺れと見る。
+- 2 回の計測 (版の違う) とも区間の上端 <= 1.05、解けた数は減らない、仕組みの遅れなし、食い違い 0 で、採用の目安を満たす。
+
+## 7. 既定化 (2026-11-26、利用者の承認)
+
+`ENOMOTO_MIP_PARSB` を `env_def!(.., "1")` にした (src/mip/solver.rs `parsb_flags`)。環境変数なしで有効 (2 スレッド以上のとき)、`=0`・`=off` で前の形。
+- 確かめ (既定、環境変数なし。70010bfd6 以降を取り込んだ 728aa0f1a のソース):
+  - check_default: 新しい基準 (egj の既定化の後、mik-250-20-75-4 6277 ノード) と 6 問とも一致 (1 スレッドでは働かない)。
+  - fuzz 7 本 (既定・4 スレッド、`analysis/paridle_20261126/fuzz.sh parsbdef4 ENOMOTO_MIP_THREADS=4`): どれも誤答 0
+    (fuzz_tiny 0/400・fuzz_highs 0/300・fuzz_objint 0/1000・fuzz_slack 0・fuzz_tiny2 0/400・fuzz_objint2 0/1000・fuzz_slack2 0)。cargo test 425 通過・失敗 0。
