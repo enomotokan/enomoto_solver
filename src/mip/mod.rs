@@ -447,7 +447,7 @@ pub(crate) fn record_incumbent(z: f64) {
         if s.first_sol.is_none() {
             s.first_sol = Some((t, z));
         }
-        if z < s.best_z - 1e-9 * z.abs().max(1.0) {
+        if solver::better_obj(z, s.best_z, z) {
             s.best_z = z;
             s.last_sol = Some(t);
         }
@@ -1007,6 +1007,32 @@ pub(super) fn polish_in_problem_warm(p: &MipProblem, x: &mut Vec<f64>, z: f64, b
     polish_in_problem_warm_ext(p, x, z, basis, deadline, false)
 }
 
+thread_local! {
+    /// 試作 `ROOTPAR_PH` の `f`・`g` (README 5.7 節): このスレッドで最後に解けた研磨の LP で、許容の中で実行可能な点が持ちうる漏れの最大
+    /// W = Σ_行 |y_i| ε_i + Σ_連続列 |d_j| ε_j (ε = 1e-9 max(1, |境界|)、単体法の主の許容と同じ)。研磨して返す解 (`d`) もこの大きさまでの漏れを含みうる
+    pub(super) static POLISH_TOL_LEAK: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+}
+
+/// 研磨の LP の双対値から [`POLISH_TOL_LEAK`] の W を計算する
+fn tol_leak_bound(p: &MipProblem, lp: &crate::simplex::mip_lp::TwoStageLp) -> f64 {
+    let eps = |a: f64, b: f64| {
+        let m = [a, b].iter().filter(|v| v.is_finite()).fold(0.0f64, |m, v| m.max(v.abs()));
+        1e-9 * m.max(1.0)
+    };
+    let y = lp.row_duals();
+    let d = lp.reduced_costs();
+    let mut w = 0.0;
+    for i in 0..p.m.min(y.len()) {
+        w += y[i].abs() * eps(p.row_lo[i], p.row_up[i]);
+    }
+    for j in 0..p.n.min(d.len()) {
+        if !p.is_int[j] {
+            w += d[j].abs() * eps(p.col_lo[j], p.col_up[j]);
+        }
+    }
+    w
+}
+
 /// 研磨の LP の反復の上限 (試作 `ROOTPAR_PH` の `j`): `ENOMOTO_T_MIP_G5SEQ_C` (0.5) × (行 + 列)。1 スレッドの基底のない求解の
 /// 二段解法 → 内点法 + クロスオーバーの切り替え (`G5SEQ`) と同じ物差し
 pub(super) fn polish_iter_cap(rows: usize, cols: usize) -> u64 {
@@ -1015,7 +1041,8 @@ pub(super) fn polish_iter_cap(rows: usize, cols: usize) -> u64 {
 
 /// [`polish_in_problem_warm`] の本体。`cold` なら基底を使わず、基底のない求解の既存の入口 (`solve_cold_entry`: 空いたスレッドがあれば同時実行、
 /// なければ二段解法 → 内点法 + クロスオーバー) で解く。試作 `ROOTPAR_PH` の `j` ([`solver::rootpar_ph`]) では、温めた単体法に反復の上限
-/// [`polish_iter_cap`] を付け、上限に当たれば基底を捨てて同じ入口で解き直す (基底が当てにならない扱い)
+/// [`polish_iter_cap`] を付け、上限に当たれば基底を捨てて同じ入口で解き直す (基底が当てにならない扱い)。このスレッドに同時実行のスレッドが
+/// 2 本以上あれば、上限を付けずに温めた単体法と内点法 + クロスオーバーを同時に解く (`solve_race_warm`)
 pub(super) fn polish_in_problem_warm_ext(p: &MipProblem, x: &mut Vec<f64>, z: f64, basis: Option<&lp::Basis>, deadline: Option<std::time::Instant>, cold: bool) -> WarmPolish {
     use std::sync::atomic::Ordering;
     if p.is_int.iter().all(|&b| b) {
@@ -1062,6 +1089,11 @@ pub(super) fn polish_in_problem_warm_ext(p: &MipProblem, x: &mut Vec<f64>, z: f6
         if cold {
             how = " (cold entry)";
             lp.solve_cold_entry(&lim)
+        } else if jcap && basis.is_some() && crate::simplex::mip_lp::cold_race_threads() >= 2 && crate::cancel::current().is_none() {
+            // 空いたスレッドがあれば (外側の根・求解の終わりの主のスレッド)、温めた単体法と内点法 + クロスオーバーを最初から同時に解く
+            // (既存の `solve_race_warm`。上限まで温めた側だけで待つ分がない。dano3_3 の最後の研磨で、上限まで 8 秒 + 同時実行 7.5 秒だった)
+            how = " (warm race)";
+            lp.solve_race_warm(&lim, crate::simplex::mip_lp::cold_race_threads())
         } else if jcap && basis.is_some() {
             let cap = polish_iter_cap(p.m, p.n);
             let st = lp.solve(&lp::SolveLimits { iteration_limit: cap, ..lim });
@@ -1080,6 +1112,9 @@ pub(super) fn polish_in_problem_warm_ext(p: &MipProblem, x: &mut Vec<f64>, z: f6
     let mut out = WarmPolish::NotSolved;
     if st == lp::LpStatus::Optimal {
         out = WarmPolish::Kept;
+        if jcap || solver::rootpar_ph('f') || solver::rootpar_ph('g') {
+            POLISH_TOL_LEAK.with(|c| c.set(tol_leak_bound(p, &lp)));
+        }
         let mut xn = lp.col_values();
         for j in 0..p.n {
             if p.is_int[j] {
@@ -1309,7 +1344,7 @@ fn solve_permrace(p: &MipProblem, params: MipParams) -> solver::MipResult {
         (Some(b), Some(_)) => {
             let z = b.objective.unwrap();
             let sb = shared.best();
-            if sb < z - 1e-9 * z.abs().max(1.0) {
+            if solver::better_obj(sb, z, z) {
                 eprintln!("MIP: WARNING: PERMRACE: the shared best value {sb:.10e} is better than the best returned solution {z:.10e}; not reporting optimality");
                 return solver::MipResult { status: MipStatus::NotSolved, x: b.x.clone(), objective: Some(z), best_bound: tree_bound.min(z), nodes, lp_iterations };
             }
@@ -1422,7 +1457,7 @@ fn solve_portfolio(p: &MipProblem, params: MipParams) -> solver::MipResult {
             let z = b.objective.unwrap();
             // 共有の最良値の解がどのスレッドの結果にもない (届かなかった) なら、この解を最適とは言えない
             let sb = shared.best();
-            if sb < z - 1e-9 * z.abs().max(1.0) && env_str!("ENOMOTO_MIP_NO_FINAL_SHARED_CHECK").is_none() {
+            if solver::better_obj(sb, z, z) && env_str!("ENOMOTO_MIP_NO_FINAL_SHARED_CHECK").is_none() {
                 eprintln!("MIP: WARNING: the shared best value {sb:.10e} is better than the best returned solution {z:.10e}; not reporting optimality");
                 return solver::MipResult { status: MipStatus::NotSolved, x: b.x.clone(), objective: Some(z), best_bound: sb, nodes, lp_iterations };
             }

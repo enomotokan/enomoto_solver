@@ -4205,7 +4205,7 @@ pub(super) fn fj_lmip_mix(p: &MipProblem, lo: &[f64], up: &[f64], cap: f64, seed
         };
         if let Some(x) = got {
             let z = p.objective(&x);
-            if best.as_ref().is_none_or(|(bz, _)| z < *bz - 1e-9 * bz.abs().max(1.0)) {
+            if best.as_ref().is_none_or(|(bz, _)| super::solver::better_obj(z, *bz, *bz)) {
                 let who = if use_lm { 2 } else { 1 };
                 leader = who;
                 wins[(who - 1) as usize] += 1;
