@@ -257,7 +257,7 @@ fuzz_tiny 1/400・fuzz_tiny2 5/400・fuzz_objint 7/1000・fuzz_objint2 2/1000 (f
 
 ### 5.10 10teams の 4 スレッドの分かれ目 (親の依頼)
 
-- 4 スレッド 60 秒を d・egj 各 19 回 (種 1〜3、`res_10teams_rep.jsonl`、ログ `polcmp/log_10teams_*`): 中央値はほぼ同じ (d 7.1 秒・egj 5.0 秒) だが、
+- 4 スレッド 60 秒を d・egj 各 19 回 (種 1〜3、`res_10teams_rep.jsonl`、ログ `polcmp/log_10teams_*`): 中央値はほぼ同じ (d 6.9 秒・egj 5.0 秒) だが、
   20 秒を越えた回が d 2/19・egj 6/19 (TL は egj 3)、ずらし幾何平均 (ずらし 10 秒) d 8.1・egj 13.5 秒。片側 Fisher p = 0.12 で、偏りとまでは言えない。
 - 速い回と遅い回の分かれ目は、d・egj どちらも「根のヒューリスティクス (主に root reduced cost のサブ MIP) が 924 (最適) を出すか」。
   出せば 3 秒前後で閉じ、出さなければ木で 924 を探す (d 6.6〜24.5 秒、egj 2.9〜55 秒 または TL)。P のログ (種 3) で見えた「d は根の LP face で 924」は、その回の道筋で、
