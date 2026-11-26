@@ -18,6 +18,17 @@ pub(crate) fn on() -> bool {
     env_str!("ENOMOTO_MIP_ALNS").is_some_and(|v| v != "0")
 }
 
+/// `b` (budget): 1 スレッドの木の大近傍探索の割合を、ALNS-CP の効き目のシグモイドで決める ([`super::solver::Solver::alns_budget_frac`])
+pub(crate) fn budget_on() -> bool {
+    on() && env_str!("ENOMOTO_MIP_ALNS").is_some_and(|v| v.contains('b'))
+}
+
+/// 1 回の呼び出しの手間の期限を `ENOMOTO_T_MIP_LNS_CALL_MIN` ずつに分けて近傍を続ける ([`super::solver::Solver::alns`])。
+/// 既定 (`ENOMOTO_MIP_ALNS=1`) は分ける。値に `w` (whole) を含めば以前の 1 回 1 本
+pub(crate) fn split_on() -> bool {
+    !env_str!("ENOMOTO_MIP_ALNS").is_some_and(|v| v.contains('w'))
+}
+
 /// CP-SAT の `AdaptiveParameterValue`
 #[derive(Clone, Copy)]
 pub(crate) struct Adaptive {
