@@ -10072,7 +10072,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if !matches!(root_kind, Some(3) | Some(4)) || env_str!("ENOMOTO_MIP_ROOTLP_PRESOLVE").is_none_or(|v| v == "0") || self.lp.has_warm_basis() {
             return None;
         }
-        use crate::types::{ConstraintRow, LinearExpr, Objective, RowSense, Sense, VarType, VariableData};
+        use crate::types::{VarType, VariableData};
         let t0 = Instant::now();
         let n = self.p.n;
         let vars: Vec<VariableData> = (0..n)
@@ -10082,22 +10082,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             })
             .collect();
         let cost = self.lp.costs();
-        let obj = Objective { expr: LinearExpr { coeffs: (0..n).filter(|&j| cost[j] != 0.0).map(|j| (j, cost[j])).collect(), constant: 0.0 }, sense: Sense::Minimize };
-        let mut cons: Vec<ConstraintRow> = Vec::with_capacity(self.lp.num_rows());
-        for i in 0..self.lp.num_rows() {
+        let obj = super::min_objective(&cost, 0.0);
+        // 行の範囲 lo = up = ±∞ はない (LP の行の範囲は lo <= up で、両側とも無限なら等式にならない) ので、ほかと同じ形で直してよい
+        let nr = self.lp.num_rows();
+        let cons = super::ranged_constraints((0..nr).map(|i| {
             let (lo, up) = self.lp.row_bounds(i);
-            let expr = || LinearExpr { coeffs: self.lp.row_ref(i).iter().map(|&(j, a)| (j, a)).collect(), constant: 0.0 };
-            if lo.is_finite() && up.is_finite() && lo == up {
-                cons.push(ConstraintRow { expr: expr(), sense: RowSense::Eq, rhs: lo });
-                continue;
-            }
-            if lo.is_finite() {
-                cons.push(ConstraintRow { expr: expr(), sense: RowSense::Ge, rhs: lo });
-            }
-            if up.is_finite() {
-                cons.push(ConstraintRow { expr: expr(), sense: RowSense::Le, rhs: up });
-            }
-        }
+            (self.lp.row_ref(i), lo, up)
+        }), nr);
         let t_build = t0.elapsed().as_secs_f64();
         let r = crate::cancel::with_deadline(self.deadline, || crate::simplex::solve_lp_dual_with(&vars, &obj, &cons, crate::types::LpOptions::default()));
         let t_lp = t0.elapsed().as_secs_f64() - t_build;
