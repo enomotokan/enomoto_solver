@@ -3175,7 +3175,8 @@ pub(crate) fn feas_fj_lmip_early_from(prob: &MipProblem, threads: usize, cap: f6
     // 見なかった版では、根の後のやり直し ([`solver`] の robust の `g`、実行可能性問題は残りの 0.5 = cap 155 秒) の安全網が 1550 秒になり、
     // 手間の数えが実時間の約 5 分の 1 だった fhnw-binpack4-4 の 1 スレッドが時間の上限 600 秒を越えて 900 秒で kill された
     // (analysis/hang_20261117/README.md)。`ENOMOTO_MIP_FEAS_EARLY_NO_DEADLINE` で見ない (直す前と同じ、切り分け用)
-    let tk_f = ticks_on('f') && threads == 1;
+    // 試作 `ENOMOTO_MIP_PAR4` の `f` ([`solver::par4`]): 2 本以上でも、1 本ごとに同じ手間の期限を置く (時間は 10 倍の安全網)
+    let tk_f = ticks_on('f') && (threads == 1 || solver::par4('f'));
     let t_end = if tk_f {
         let safe = t0 + Duration::from_secs_f64(10.0 * cap.max(0.0));
         match deadline {
@@ -3285,6 +3286,8 @@ pub(crate) fn feas_fj_lmip_early_from(prob: &MipProblem, threads: usize, cap: f6
                         );
                     }
                 } else if t < n_fj {
+                    // `PAR4` の `f`: このスレッドの手間の期限 (1 本のときと同じ上限、連鎖の手も数える)
+                    let _tk_all = tk_f.then(|| crate::ticks::budget_guard(cap.max(0.0) * 1e9));
                     let mut k = 0u64;
                     while !over() {
                         if fj_once(k) {
@@ -3292,7 +3295,12 @@ pub(crate) fn feas_fj_lmip_early_from(prob: &MipProblem, threads: usize, cap: f6
                         }
                         k += 1;
                     }
-                } else if let Some(mut lm) = lm_new() {
+                } else if let Some(mut lm) = {
+                    // `PAR4` の `f`: Local-MIP のスレッドも手間の期限で止める (連鎖の手の手間も数える)
+                    lm_new()
+                } {
+                    let _tk_all = tk_f.then(|| crate::ticks::budget_guard(cap.max(0.0) * 1e9));
+                    let _tk_chain = (tk_f && env_str!("ENOMOTO_MIP_FEAS_EARLY_NO_CHAIN_TICKS").is_none()).then(localmip::count_chain_guard);
                     // Local-MIP は中でやり直し (restart) をするので、上限まで 1 本を回し続ける
                     // 試作 `ENOMOTO_MIP_ROBUST` のやり直し (`salt != 0`) では `slice` ごとに見つけたかを見る。1 本で回し続けると、
                     // 途中で実行可能解を見つけても上限まで改善を続けてから返す (blend2 の 4 スレッド: 見つけたのに 6 秒使い切る)
