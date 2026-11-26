@@ -641,6 +641,12 @@ fn scale_factors(n: usize, rows: &[Vec<(usize, f64)>]) -> (Vec<f64>, Vec<f64>) {
 /// 試作 `ENOMOTO_SIMPLEX_SCALE` の条件 `ENOMOTO_T_SIMPLEX_SCALE_MIN_RANGE` (既定 0 = いつも): 係数の絶対値の最大 / 最小。
 /// 根の LP の 9 問では、尺度の調整が効いたのは 4e4 以上 (uccase12・snp-02-004-104・uccase9)、悪くしたのは 4.2e3 (supportcase42)・1.2e3 (sing326)
 fn coef_range(rows: &[Vec<(usize, f64)>]) -> f64 {
+    let (mn, mx) = coef_minmax(rows);
+    if mx > 0.0 { mx / mn } else { 1.0 }
+}
+
+/// 係数の絶対値の (最小, 最大)。0 の係数は数えない。係数がなければ (∞, 0)
+fn coef_minmax(rows: &[Vec<(usize, f64)>]) -> (f64, f64) {
     let (mut mn, mut mx) = (f64::INFINITY, 0.0f64);
     for r in rows {
         for &(_, v) in r {
@@ -651,7 +657,7 @@ fn coef_range(rows: &[Vec<(usize, f64)>]) -> f64 {
             }
         }
     }
-    if mx > 0.0 { mx / mn } else { 1.0 }
+    (mn, mx)
 }
 
 fn shift_of(lo: f64, up: f64) -> f64 {
@@ -691,13 +697,7 @@ impl TwoStageLp {
         if rs.iter().chain(&cs).all(|&v| v == 1.0) {
             return;
         }
-        let rows: Vec<Vec<(usize, f64)>> = self.rows.iter().enumerate().map(|(i, r)| r.iter().map(|&(j, v)| (j, v * rs[i] * cs[j])).collect()).collect();
-        let row_lo: Vec<f64> = (0..rs.len()).map(|i| self.row_lo[i] * rs[i]).collect();
-        let row_up: Vec<f64> = (0..rs.len()).map(|i| self.row_up[i] * rs[i]).collect();
-        let lo: Vec<f64> = (0..self.n).map(|j| self.lo[j] / cs[j]).collect();
-        let up: Vec<f64> = (0..self.n).map(|j| self.up[j] / cs[j]).collect();
-        let cost: Vec<f64> = (0..self.n).map(|j| self.cost[j] * cs[j]).collect();
-        let tw = TwoStageLp::new_raw(&lo, &up, &cost, &rows, &row_lo, &row_up);
+        let tw = self.scaled_copy(&rs, &cs);
         if env_str!("ENOMOTO_MIP_LPSCALE_LOG").is_some() {
             eprintln!("LPSCALE: scaled twin for {} rows x {} cols (range {range:.3e} -> {:.3e})", self.rows.len(), self.n, coef_range(&tw.rows));
         }
@@ -2159,6 +2159,18 @@ impl TwoStageLp {
         (!hi_inf && yb > zhi + tol) || (!lo_inf && yb < zlo - tol)
     }
 
+    /// 行の尺度 `rs`・列の尺度 `cs` ([`scale_factors`]) をかけた写し: 係数 `a_ij rs_i cs_j`、行の範囲 `× rs_i`、列の範囲 `/ cs_j`、
+    /// 費用 `× cs_j`。[`Self::attach_tw`]・[`Self::ipm_scale`]・[`Self::solve_scaled`] の共通部分 (analysis/unify_20261126 の 1 節の 11)
+    fn scaled_copy(&self, rs: &[f64], cs: &[f64]) -> TwoStageLp {
+        let rows: Vec<Vec<(usize, f64)>> = self.rows.iter().enumerate().map(|(i, r)| r.iter().map(|&(j, v)| (j, v * rs[i] * cs[j])).collect()).collect();
+        let row_lo: Vec<f64> = (0..rs.len()).map(|i| self.row_lo[i] * rs[i]).collect();
+        let row_up: Vec<f64> = (0..rs.len()).map(|i| self.row_up[i] * rs[i]).collect();
+        let lo: Vec<f64> = (0..self.n).map(|j| self.lo[j] / cs[j]).collect();
+        let up: Vec<f64> = (0..self.n).map(|j| self.up[j] / cs[j]).collect();
+        let cost: Vec<f64> = (0..self.n).map(|j| self.cost[j] * cs[j]).collect();
+        TwoStageLp::new_raw(&lo, &up, &cost, &rows, &row_lo, &row_up)
+    }
+
     /// 試作 `ENOMOTO_XO_MIP_SCALE` の写し ([`IpmScale`])。環境変数がなければ `None`。
     fn ipm_scale(&self) -> Option<Arc<IpmScale>> {
         if !env_str!("ENOMOTO_XO_MIP_SCALE").is_some_and(|v| v != "0") {
@@ -2166,27 +2178,12 @@ impl TwoStageLp {
         }
         // 係数の幅 (最大 / 最小の絶対値) が `ENOMOTO_T_XO_MIP_SCALE_MIN_RANGE` (既定 1e5) 未満なら使わない (opm2-z10-s4 (幅 4.1e3) は
         // 尺度をそろえた写しで基底の選択が 600 秒戻らなかった。momentum1 は幅 7.9e9、satellites2-40 は 6.6e5)
-        let (mut amin, mut amax) = (f64::INFINITY, 0.0f64);
-        for r in &self.rows {
-            for &(_, v) in r {
-                let a = v.abs();
-                if a > 0.0 {
-                    amin = amin.min(a);
-                    amax = amax.max(a);
-                }
-            }
-        }
+        let (amin, amax) = coef_minmax(&self.rows);
         if !(amax / amin >= tunable!("ENOMOTO_T_XO_MIP_SCALE_MIN_RANGE", 1e5f64, f64)) {
             return None;
         }
         let (rs, cs) = scale_factors(self.n, &self.rows);
-        let rows: Vec<Vec<(usize, f64)>> = self.rows.iter().enumerate().map(|(i, r)| r.iter().map(|&(j, v)| (j, v * rs[i] * cs[j])).collect()).collect();
-        let row_lo: Vec<f64> = (0..rs.len()).map(|i| self.row_lo[i] * rs[i]).collect();
-        let row_up: Vec<f64> = (0..rs.len()).map(|i| self.row_up[i] * rs[i]).collect();
-        let lo: Vec<f64> = (0..self.n).map(|j| self.lo[j] / cs[j]).collect();
-        let up: Vec<f64> = (0..self.n).map(|j| self.up[j] / cs[j]).collect();
-        let cost: Vec<f64> = (0..self.n).map(|j| self.cost[j] * cs[j]).collect();
-        let sc = TwoStageLp::new_raw(&lo, &up, &cost, &rows, &row_lo, &row_up);
+        let sc = self.scaled_copy(&rs, &cs);
         let no_hint = amax / amin >= tunable!("ENOMOTO_T_XO_MIP_SCALE_NOHINT_RANGE", 1e8f64, f64);
         Some(Arc::new(IpmScale { std: sc.std, no_hint, rs, cs, sc_shift: sc.shift, shift: self.shift.clone() }))
     }
@@ -2229,13 +2226,7 @@ impl TwoStageLp {
     fn solve_scaled(&mut self, lim: &SolveLimits) -> LpStatus {
         let t0 = std::time::Instant::now();
         let (rs, cs) = scale_factors(self.n, &self.rows);
-        let rows: Vec<Vec<(usize, f64)>> = self.rows.iter().enumerate().map(|(i, r)| r.iter().map(|&(j, v)| (j, v * rs[i] * cs[j])).collect()).collect();
-        let row_lo: Vec<f64> = (0..rs.len()).map(|i| self.row_lo[i] * rs[i]).collect();
-        let row_up: Vec<f64> = (0..rs.len()).map(|i| self.row_up[i] * rs[i]).collect();
-        let lo: Vec<f64> = (0..self.n).map(|j| self.lo[j] / cs[j]).collect();
-        let up: Vec<f64> = (0..self.n).map(|j| self.up[j] / cs[j]).collect();
-        let cost: Vec<f64> = (0..self.n).map(|j| self.cost[j] * cs[j]).collect();
-        let mut sc = TwoStageLp::new_raw(&lo, &up, &cost, &rows, &row_lo, &row_up);
+        let mut sc = self.scaled_copy(&rs, &cs);
         // 基底があれば (`ENOMOTO_MIP_ROOTLP_SCALE` の warm start) 写しに渡す。基底と非基底の置き場所は尺度によらない。
         // 解 `x` は写しの尺度に直す (`x' = x / c`)。DSE 重みは尺度による (元の LP の重みは写しでは使わない)
         let warm = matches!(&self.basis, Some(b) if b.len() == self.rows.len());
