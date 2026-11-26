@@ -268,3 +268,12 @@ fuzz_tiny 1/400・fuzz_tiny2 5/400・fuzz_objint 7/1000・fuzz_objint2 2/1000 (f
 - **1 スレッド 300 秒 (決定的、`res_10teams_t1.jsonl`)**: 種 1・2・3 とも d と egj でノード数まで同じ (22808・0・24693、時間 165.9 / 165.3・5.0 / 5.1・173.0 / 174.2)。
   egj は木の道筋を変えない。
 - 結論: 仕組みによる差は見つからない。4 スレッドの差は時間の揺れの範囲 (p = 0.12) と見る。直しの案は出さない。
+
+### 5.11 既定化 (2026-11-26、利用者の判断)
+
+- `ENOMOTO_MIP_POLISH_FINAL` (既定 `1`、`=0`・`off` で前の形 `d`) = `POLISH_WARM=e` + `ROOTPAR_PH=gj` (309092db8)。`POLISH_WARM` を付ければその形
+  (`g`・`j` は `ROOTPAR_PH` で付けたときだけ)。`ROOTPAR_PH` のほかの文字 (r・b・w・i・f) は既定オフのまま。
+- check_default: mik-250-20-75-4 のノード数 5856 → 6277 (目的値は同じ、2 回解いて同じ)。ほかの 5 問は同じ。基準を書き直した
+  (`POLISH_FINAL=0` で前の基準と全部一致)。先端 8d45e35b5 でも新しい基準と全部一致。
+- fuzz (既定、`fuzz_dflt.out`): 7 本 + fuzz_bigact 2 本とも誤答 0・not_solved 0、cargo test 425 通過。
+- docs/improvement_history.md に記録 (5.9 節の下書き + 定義の変更 + 確かめ)。
