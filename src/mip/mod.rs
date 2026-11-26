@@ -3175,7 +3175,7 @@ pub(crate) fn feas_fj_lmip_early_from(prob: &MipProblem, threads: usize, cap: f6
     // 見なかった版では、根の後のやり直し ([`solver`] の robust の `g`、実行可能性問題は残りの 0.5 = cap 155 秒) の安全網が 1550 秒になり、
     // 手間の数えが実時間の約 5 分の 1 だった fhnw-binpack4-4 の 1 スレッドが時間の上限 600 秒を越えて 900 秒で kill された
     // (analysis/hang_20261117/README.md)。`ENOMOTO_MIP_FEAS_EARLY_NO_DEADLINE` で見ない (直す前と同じ、切り分け用)
-    // 試作 `ENOMOTO_MIP_PAR4` の `f` ([`solver::par4`]): 2 本以上でも、1 本ごとに同じ手間の期限を置く (時間は 10 倍の安全網)
+    // `ENOMOTO_MIP_PAR4` の `f` (既定、[`solver::par4`]): 2 本以上でも、1 本ごとに同じ手間の期限を置く (時間は 10 倍の安全網)
     let tk_f = ticks_on('f') && (threads == 1 || solver::par4('f'));
     let t_end = if tk_f {
         let safe = t0 + Duration::from_secs_f64(10.0 * cap.max(0.0));
@@ -10173,7 +10173,20 @@ fn fj_p3_problem_inner(pc: &MipProblem) -> Option<(MipProblem, Vec<crate::presol
         eprint!("MIP:   FJ_P3 ");
     }
     crate::set_fj_p3_force(true);
+    // 試作 `ENOMOTO_MIP_ENUM_ADAPT` の `t` (analysis/nrashare_20261126 7 節): このスレッドに ENUM_ADAPT の時計 (`ENUM_T0`、主のスレッドの求解の始めに置く) が
+    // なければ、この前処理の始めを時計にする (前処理の後は元に戻す)。時計がないと経過は無限大で「c = 0 で常に続ける」になり、FJ のスレッドの FJ_P3 の前処理で
+    // 列挙とプロービングの繰り返し・かけ直しが止まらず、期限を過ぎて FJ・Local-MIP が回らなかった (neos-631710 の 4 スレッド、10.1 秒)
+    let enum_clock = enum_adapt_on() && env_str!("ENOMOTO_MIP_ENUM_ADAPT").is_some_and(|v| v.contains('t')) && ENUM_T0.with(|c| c.get()).is_none();
+    let step_prev = ENUM_STEP_LAST.with(|c| c.get());
+    if enum_clock {
+        ENUM_T0.with(|c| c.set(Some(std::time::Instant::now())));
+        ENUM_STEP_LAST.with(|c| c.set(None));
+    }
     let r = presolve_mip(pc, false, false, None);
+    if enum_clock {
+        ENUM_T0.with(|c| c.set(None));
+        ENUM_STEP_LAST.with(|c| c.set(step_prev));
+    }
     crate::set_fj_p3_force(false);
     if pt {
         pretime::report(pc.m, pc.n, pc.nnz, 0);
