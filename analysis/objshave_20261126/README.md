@@ -137,6 +137,8 @@
     下界の専任の役に回す。
     - 判定は主だけが行う。木の中の再スタートの判定 (`tree_restart_due`) と同じ区間の取り方にした。全体のノード数が
       `ENOMOTO_T_MIP_TREE_RESTART_FIRST` (1000) を超えてから、`ENOMOTO_T_MIP_TREE_RESTART_EVERY` (100) × スレッド数のノードごとに判定する。
+      - この 1000 ノードと 100 × スレッド数は新しく決めた値ではない。木の中の再スタートの判定 (`ENOMOTO_MIP_TREE_RESTART`、HiGHS の
+        `HighsMipSolver::run` の木のループの判定を写したもの) の既存の tunable をそのまま借りた (`× スレッド数` は同じ判定の `ENOMOTO_MIP_TREE_RESTART_PAR` の `w`)。
     - 木の下界の伸び (下界の上がり幅 ÷ ノード数) を、直近の区間 r_recent と木に入ってから全体 r_hist で比べる。
     - 役に回す確率は ln(r_hist / r_recent) のシグモイド = r_hist / (r_hist + r_recent)。新しい閾値は無い。同じ伸びなら 1/2、止まれば 1、伸び始めれば 0 に近づく。
     - 直前の試しで証明が当たっていれば続ける。乱数は種と判定の回数から決める (時間でなく手間で決める)。
