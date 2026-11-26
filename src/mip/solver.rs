@@ -762,6 +762,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// ALNS の腕ごとの報酬の合計と試した回数。
     pub(super) alns_reward: [f64; 6],
     pub(super) alns_count: [u32; 6],
+    /// 試作 `ENOMOTO_MIP_ALNS` の `b` ([`super::alns_cp::budget_on`]): 測り始め (暫定解があって初めて予算を決めた時) の (主ギャップ, 手間, 大近傍探索の手間) と、
+    /// その後に ALNS-CP が出した相対改善の合計
+    pub(super) alns_bud0: Option<(f64, f64, f64)>,
+    pub(super) alns_lns_gain: f64,
     /// `ENOMOTO_MIP_SUBB_DIV` (試作): 近傍の多様化の状態 ([`super::subb::DivState`])
     pub(super) subb: super::subb::DivState,
     /// `ENOMOTO_MIP_MEMBQ_LNSGROW` (試作、analysis/membq_path_20261105.md): ALNS の腕ごとの、サブ MIP の時間の上限の倍率。
@@ -5969,6 +5973,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         improve_turn: 0,
         alns_reward: [0.0; 6],
         alns_count: [0; 6],
+        alns_bud0: None,
+        alns_lns_gain: 0.0,
         subb: Default::default(),
         lns_grow: [1.0; 6],
         submip_nosol_timeout: false,
@@ -16077,6 +16083,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let frac = if stalled { frac.max(tunable!("ENOMOTO_T_MIP_ROBUST_LNSFREQ_TIME", 0.1, f64)) } else { frac };
                     // 試作 `ENOMOTO_MIP_HEUR1T` の `l` ([`heur1t`]): 1 スレッドの外側の木では、時間の割合を 4 スレッドのヒューリスティクス役の
                     // 割合 (`ENOMOTO_T_MIP_HEUR_ROLE_FRAC`、[`heur_role_count`]) まで上げる (暫定解があるときだけ。役も暫定解があるときだけ就く)
+                    // 試作 `ENOMOTO_MIP_ALNS` の `b` ([`super::alns_cp::budget_on`]): 1 スレッドの木で、割合を ALNS-CP の効き目のシグモイドで決める
+                    let frac = if super::alns_cp::budget_on() && !self.params.submip && self.pool.is_none() && self.params.threads <= 1 && self.incumbent.is_some() {
+                        self.alns_budget_frac()
+                    } else {
+                        frac
+                    };
                     let frac = if heur1t('l') && !self.params.submip && self.pool.is_none() && self.params.threads <= 1 && self.incumbent.is_some() {
                         frac.max(tunable!("ENOMOTO_T_MIP_HEUR_ROLE_FRAC", 0.25, f64))
                     } else if heur_adapt() && !self.params.submip && self.pool.is_none() && self.params.threads <= 1 && self.incumbent.is_some() {
@@ -27598,6 +27610,28 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 試作 `ENOMOTO_MIP_HEUR_ADAPT` ([`heur_adapt`]) の f_t (1 スレッドの外側の木、64 ノードおきに測り直す)。`cur` は今のノード
+    /// 試作 `ENOMOTO_MIP_ALNS` の `b`: 1 スレッドの木の大近傍探索の割合 = `LNS_TIME_MIN` + (`HEUR_ROLE_FRAC` − `LNS_TIME_MIN`) × σ(ln(r_lns / r_tree))
+    /// = 下限 + 幅 × r_lns / (r_lns + r_tree)。新しい閾値はなく、両端は今の木の大近傍探索の下限 (0.02) と 4 スレッドのヒューリスティクス役の割合 (0.25)。
+    /// - r_tree: 測り始めからの主ギャップ (暫定解 − 下界) / max(|暫定解|, 1) の減り (ALNS-CP の改善の分を除く) ÷ 木の手間 (大近傍探索の手間を除く)
+    /// - r_lns: ALNS-CP の相対改善の合計 ÷ 大近傍探索の手間。r_tree と同じ速さの仮の 1 回 (手間 `LNS_CALL_MIN`) を足しておく
+    ///   (呼ぶ前は σ(0) = 0.5 で真ん中から始め、効かなければ下がる)
+    /// どちらも 0 なら真ん中
+    pub(super) fn alns_budget_frac(&mut self) -> f64 {
+        let lo = tunable!("ENOMOTO_T_MIP_LNS_TIME_MIN", 0.02, f64);
+        let hi = tunable!("ENOMOTO_T_MIP_HEUR_ROLE_FRAC", 0.25, f64).max(lo);
+        let Some(z) = self.incumbent.as_ref().map(|(z, _)| *z) else { return lo };
+        let gap = ((z - self.global_lower_bound()) / z.abs().max(1.0)).max(0.0);
+        let tk = crate::ticks::total();
+        let (g0, t0, l0) = *self.alns_bud0.get_or_insert((gap, tk, self.lns_ticks));
+        let piece = tunable!("ENOMOTO_T_MIP_LNS_CALL_MIN", 0.3, f64) * 1e9;
+        let lns_tk = (self.lns_ticks - l0).max(0.0);
+        let tree_tk = (tk - t0 - lns_tk).max(piece);
+        let r_tree = ((g0 - gap) - self.alns_lns_gain).max(0.0) / tree_tk;
+        let r_lns = (self.alns_lns_gain + r_tree * piece) / (lns_tk + piece);
+        let share = if r_lns + r_tree > 0.0 { r_lns / (r_lns + r_tree) } else { 0.5 };
+        lo + (hi - lo) * share
+    }
+
     fn adapt_tree_f(&mut self, cur: Option<&OpenNode>) -> f64 {
         if self.nodes < self.heur_adapt_ft.0 + 64 && self.heur_adapt_ft.0 > 0 {
             return self.heur_adapt_ft.1;
