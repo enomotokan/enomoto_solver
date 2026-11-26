@@ -1,0 +1,34 @@
+"""c2c と c2c + NRA_SHARE の比べ: python analysis/nrashare_20261126/run.py OUT.jsonl 問題[,問題...] 種[,種...] スレッド 秒 設定[,設定...]
+設定: c2c (analysis/combo2_20261125/cfg.py の C2C)・c2cs (c2c + ENOMOTO_MIP_NRA_SHARE=1)・def。1 本ずつ順に解く (4 スレッドは 4 コアを使う)。
+同じ (問題, 設定, スレッド, 種) の行があれば飛ばす。止めても同じコマンドで続きから回る。"""
+import json, os, subprocess, sys, time
+from pathlib import Path
+D = Path(__file__).resolve().parent
+WT = D.parents[1]
+sys.path.insert(0, str(WT / "analysis" / "combo2_20261125"))
+sys.path.insert(0, str(WT / "scripts"))
+from cfg import C2C  # noqa: E402
+import run_miplib_benchmark as rb  # noqa: E402
+CFGS = {"def": {}, "c2c": dict(C2C), "c2cs": dict(C2C, ENOMOTO_MIP_NRA_SHARE="1")}
+OUT = Path(sys.argv[1]); probs = sys.argv[2].split(","); seeds = [int(x) for x in sys.argv[3].split(",")]; th = sys.argv[4]; tl = float(sys.argv[5]); cfgs = sys.argv[6].split(",")
+done = set()
+if OUT.exists():
+    for l in OUT.read_text().splitlines():
+        r = json.loads(l)
+        if r["result"].get("status") not in ("crash",):
+            done.add((r["problem"], r["cfg"], r["threads"], r["seed"]))
+for seed in seeds:
+    for p in probs:
+        mps = rb.fetch(p, WT / ".miplib_cache")
+        for c in cfgs:
+            if (p, c, th, seed) in done: continue
+            env = {k: v for k, v in os.environ.items() if not k.startswith("ENOMOTO_")}
+            env.update(CFGS[c]); env["ENOMOTO_MIP_THREADS"] = th; env["ENOMOTO_T_MIP_SEED"] = str(seed)
+            t0 = time.time()
+            pr = subprocess.run([sys.executable, str(WT / "scripts/run_miplib_benchmark.py"), "--worker-ours", str(mps), "--time-limit", str(tl), "--threads", th],
+                                cwd=WT, env=env, capture_output=True, text=True, timeout=tl + 900)
+            try: res = json.loads([l for l in pr.stdout.splitlines() if l.startswith("{")][-1])
+            except Exception: res = {"status": "crash", "rc": pr.returncode, "err": pr.stderr[-1500:]}  # noqa: BLE001
+            with open(OUT, "a") as f:
+                f.write(json.dumps({"problem": p, "cfg": c, "threads": th, "seed": seed, "tl": tl, "result": res, "wall": round(time.time() - t0, 1)}) + "\n")
+            print(p, c, th, seed, res.get("status"), res.get("time"), res.get("nodes"), res.get("objective"), flush=True)
