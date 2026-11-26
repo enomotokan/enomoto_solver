@@ -1,6 +1,6 @@
 """上界の弱い問題で、暫定解の時間ごとの推移 (primal integral) を比べる: python pint.py スレッド数 並べる数 [設定 ...]。
 問題 PROBS × 設定 (cfg.py) × 種 SEEDS を時間の上限 TL 秒で解き (ENOMOTO_MIP_LOG=1)、`MIP: new incumbent Z at node N (T s) [出どころ]` の行から
-暫定解の推移を取り、pint_t<スレッド>.jsonl に足す (済んだ組は飛ばす)。
+暫定解の推移を取り、pint_t<スレッド>.jsonl に足す (済んだ組は飛ばす。近傍の状態をスレッドごとに持った初めの版の結果は pint_v1_t*.jsonl)。
 primal integral (Berthold): 主のギャップ γ(t) = |z(t) − z*| / max(|z(t)|, |z*|) (解がない間は 1、z* は miplib2017-v31.solu の値) を
 [0, TL] で積分し、TL で割ったもの (0〜1、小さいほど良い)。ログは logs/ (コミットしない)。"""
 import json, os, re, subprocess, sys

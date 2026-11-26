@@ -27,11 +27,14 @@ pub(crate) struct Adaptive {
 
 impl Default for Adaptive {
     fn default() -> Self {
-        Adaptive { value: 0.5, changes: 0 }
+        Adaptive::new()
     }
 }
 
 impl Adaptive {
+    pub const fn new() -> Self {
+        Adaptive { value: 0.5, changes: 0 }
+    }
     fn factor(&mut self) -> f64 {
         self.changes += 1;
         1.0 + 1.0 / ((self.changes + 1) as f64).sqrt()
@@ -48,8 +51,36 @@ impl Adaptive {
 
 pub(crate) const NAMES: [&str; 3] = ["rins", "random", "graph"];
 
-/// 近傍ごとの状態 (スレッドごとの `Solver` に持つ)
-#[derive(Default, Clone)]
+/// 共有の状態 (プロセスに 1 つ。求解の始めに [`reset`] で初めに戻す)
+static STATE: std::sync::Mutex<AlnsCp> = std::sync::Mutex::new(AlnsCp::new());
+
+/// 次に使う近傍 (CP-SAT の UCB1)
+pub(crate) fn pick() -> usize {
+    state().pick()
+}
+
+/// 全スレッドの合計を 1 行で出す (`ENOMOTO_MIP_LOG`、外側の求解の終わり)
+pub(crate) fn summary() {
+    let s = state().clone();
+    eprintln!(
+        "ALNS-CP summary: calls {:?} solved {:?} improved {:?} d [{:.3}, {:.3}, {:.3}] avg gain [{:.2e}, {:.2e}, {:.2e}]",
+        s.calls, s.solved, s.improved, s.d[0].value, s.d[1].value, s.d[2].value, s.avg[0], s.avg[1], s.avg[2]
+    );
+}
+
+/// 外側の求解の始めに呼ぶ (サブ MIP の中では呼ばない)
+pub(crate) fn reset() {
+    if let Ok(mut s) = STATE.lock() {
+        *s = AlnsCp::new();
+    }
+}
+
+fn state() -> std::sync::MutexGuard<'static, AlnsCp> {
+    STATE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// 近傍ごとの状態。CP-SAT と同じく、外側の求解の全スレッド・再スタートの後の求解で 1 つを共有する ([`STATE`])
+#[derive(Clone)]
 pub(crate) struct AlnsCp {
     pub d: [Adaptive; 3],
     pub calls: [u64; 3],
@@ -59,6 +90,9 @@ pub(crate) struct AlnsCp {
 }
 
 impl AlnsCp {
+    pub const fn new() -> Self {
+        AlnsCp { d: [Adaptive::new(); 3], calls: [0; 3], avg: [0.0; 3], solved: [0; 3], improved: [0; 3] }
+    }
     /// CP-SAT の `GetUCBScore`
     pub fn ucb(&self, k: usize, total: u64) -> f64 {
         if self.calls[k] <= 10 {
@@ -167,7 +201,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if free.is_empty() {
             return false;
         }
-        let d = self.alns_cp.d[k].value;
+        let d = state().d[k].value;
         let target = ((d * free.len() as f64).ceil() as usize).clamp(1, free.len());
         let relax = self.alns_cp_relax(k, &free, target, x, &inc);
         let mut keep = vec![false; p.n];
@@ -192,7 +226,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let z1 = self.incumbent.as_ref().map_or(z0, |(z, _)| *z);
         let Some((st, acc)) = r else { return false };
         let solved = matches!(st, MipStatus::Optimal | MipStatus::Infeasible);
-        let s = &mut self.alns_cp;
+        let mut s = state();
         if solved {
             s.d[k].increase();
             s.solved[k] += 1;
@@ -204,10 +238,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             s.improved[k] += 1;
         }
         s.add_gain(k, gain);
+        let s = s.clone();
         if self.params.verbose {
-            let s = &self.alns_cp;
             eprintln!(
-                "MIP:   ALNS-CP {} d {d:.3} -> {:.3} relaxed {}/{} {st:?} improved {acc} z {z0:.6e} -> {z1:.6e} dtick {dt:.3} ({:.2}s) calls {:?} solved {:?} improved {:?}",
+                "MIP:   ALNS-CP tid {} {} d {d:.3} -> {:.3} relaxed {}/{} {st:?} improved {acc} z {z0:.6e} -> {z1:.6e} dtick {dt:.3} ({:.2}s) calls {:?} solved {:?} improved {:?}",
+                self.pool_tid,
                 NAMES[k],
                 s.d[k].value,
                 relax.len(),
@@ -236,12 +271,31 @@ mod tests {
         let mut b = Adaptive::default();
         b.decrease();
         assert!((b.value - (0.5 / f).max(1.0 - 0.5 * f)).abs() < 1e-12);
-        // 交互なら 0.5 の近くに留まる
+        // 上げ下げは d と 1 − d で対称 (成功と失敗を入れ替えた列を 1 − d から始めると、いつも 1 − d の位置にいる)。この対称性のために、
+        // 成功率が 50% になる d で釣り合う (d = 0.5 に戻るのではない: 係数が回ごとに小さくなるので、成功・失敗を交互に与えると
+        // 初めの向きの側 (Increase からなら 0.6 付近) に落ち着く)
         let mut c = Adaptive::default();
-        for i in 0..200 {
-            if i % 2 == 0 { c.increase() } else { c.decrease() }
+        let mut m = Adaptive::default();
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        for i in 0..300 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            if x % 2 == 0 {
+                c.increase();
+                m.decrease();
+            } else {
+                c.decrease();
+                m.increase();
+            }
+            assert!((c.value + m.value - 1.0).abs() < 1e-9, "step {i}: {} + {} != 1", c.value, m.value);
+            assert!((0.0..=1.0).contains(&c.value));
         }
-        assert!((c.value - 0.5).abs() < 0.1);
+        let mut a = Adaptive::default();
+        for i in 0..200 {
+            if i % 2 == 0 { a.increase() } else { a.decrease() }
+        }
+        assert!(a.value > 0.5 && a.value < 0.75, "alternating from Increase settles above 0.5: {}", a.value);
         // 値は [0, 1] から出ない
         let mut e = Adaptive::default();
         for _ in 0..100 {
