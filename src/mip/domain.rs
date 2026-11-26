@@ -208,6 +208,17 @@ pub(crate) static GA_RESET: [std::sync::atomic::AtomicU64; 6] = [const { std::sy
 /// (= 大域的な固定だが、プールに入れるだけで大域的な境界には置かない), 長さ 1 のうち取り込み (ほかのスレッドから) のもの]
 pub(crate) static GA_CONF: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
 
+/// [`Domain::tighten_le_row`] の結果
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LeRowTighten {
+    /// 最小活動度の無限の項が 2 つ以上で、何もしなかった
+    Skip,
+    /// 最小活動度が右辺を越えた (行が満たせない)
+    Infeasible,
+    /// 締めた列の数 (締めて空になったら `infeasible` が立つ)
+    Done(usize),
+}
+
 impl Domain {
     /// これまでに伝播で走査した行の長さの合計 (スレッドごと。ヒューリスティクスの手間の上限に使う)。
     pub fn debug_work(&self) -> u64 {
@@ -1059,6 +1070,117 @@ impl Domain {
     /// 段は分枝の決定だけで区切る。
     pub fn set_external(&mut self, on: bool) {
         self.cur_reason = if on { -2 } else { -1 };
+    }
+
+    /// 1 本の行 `sum c_j x_j <= u` の最小活動度で境界を 1 回締める (カットの貯めの伝播 `cutpool_prop_cut` と、目的の行・被約費用の行の
+    /// 伝播 `propagate_le_row_ex` の共通部分)。
+    /// - 最小活動度 (`c > 0` なら下限、`c < 0` なら上限を使う) の無限の項が 2 つ以上なら [`LeRowTighten::Skip`]。
+    ///   無限の項がなく、最小活動度が `u + 1e-6 (1 + |u|)` を越えれば [`LeRowTighten::Infeasible`]。
+    /// - 無限の項が 1 つならその列だけ、なければ幅 (の係数倍) が余り `gap = u - 最小活動度` を越える列を締める。
+    ///   締める量が `1e-6 (1 + min(|境界|, 1e6))` 以下なら締めない。連続列は `cont_frac > 0` なら、さらに幅の `cont_frac` 倍より
+    ///   多く縮むときだけ締める。`int_only` なら整数列だけ締める。
+    /// - `before` は、締め始める前に 1 回だけ呼ぶ (変更の出どころの印を置くなど。`Skip`・`Infeasible` では呼ばない)。
+    /// - 締めた数を [`LeRowTighten::Done`] で返す。締めて空になったら、そこで止まる (`self.infeasible` が立つ)。
+    pub fn tighten_le_row(
+        &mut self,
+        p: &MipProblem,
+        row: impl Iterator<Item = (usize, f64)> + Clone,
+        u: f64,
+        cont_frac: f64,
+        int_only: bool,
+        before: impl FnOnce(&mut Self),
+    ) -> LeRowTighten {
+        let mut minact = 0.0f64;
+        let mut ninf = 0usize;
+        let mut infj = usize::MAX;
+        for (j, c) in row.clone() {
+            let b = if c > 0.0 { self.lo[j] } else { self.up[j] };
+            if b.is_finite() {
+                minact += c * b;
+            } else {
+                ninf += 1;
+                infj = j;
+            }
+        }
+        if ninf >= 2 {
+            return LeRowTighten::Skip;
+        }
+        if ninf == 0 && minact > u + 1e-6 * (1.0 + u.abs()) {
+            return LeRowTighten::Infeasible;
+        }
+        before(self);
+        let gap = u - minact;
+        let mut n = 0usize;
+        for (j, c) in row {
+            if (ninf == 1 && j != infj) || (int_only && !p.is_int[j]) {
+                continue;
+            }
+            let (lo, up) = (self.lo[j], self.up[j]);
+            if ninf == 0 && c.abs() * (up - lo) <= gap + 1e-9 * (1.0 + gap.abs()) {
+                continue;
+            }
+            // 締める量の下限: 整数列 (と `cont_frac` が 0 の連続列) は 1e-6 (1 + min(|境界|, 1e6))
+            let need = |b: f64| {
+                let base = 1e-6 * (1.0 + b.abs().min(1e6));
+                if cont_frac > 0.0 && !p.is_int[j] { (cont_frac * (up - lo)).max(base) } else { base }
+            };
+            let tight = if c > 0.0 {
+                let v = if ninf == 0 { lo + gap / c } else { gap / c };
+                v < up - need(up) && self.tighten_upper(p, j, v)
+            } else {
+                let v = if ninf == 0 { up + gap / c } else { gap / c };
+                v > lo + need(lo) && self.tighten_lower(p, j, v)
+            };
+            n += tight as usize;
+            if self.infeasible {
+                break;
+            }
+        }
+        LeRowTighten::Done(n)
+    }
+
+    /// 1 本の行 `sum c_j x_j <= u` (定数項を除いた打ち切り値の目的の行) で、各列を「ほかの列の最小活動量 `rest` から
+    /// `c_j x_j <= u - rest`」で 1 回締める (`Solver::global_obj_prop_ex` と FIXMORE の `obj_row_pass` の共通部分)。
+    /// 最小活動量の無限の項が 2 つ以上なら何もしない (`Some(0)`)。連続列は丸め誤差の分 `1e-9 (1 + |lim|)` だけ緩める。
+    /// `int_slack` なら整数列も同じだけ緩める (整数列は `tighten_*` が許容誤差を足して切り捨てる)。締めた数を返し、矛盾なら None
+    pub fn tighten_le_row_rest(&mut self, p: &MipProblem, row: &[(usize, f64)], u: f64, int_slack: bool) -> Option<usize> {
+        let (mut minact, mut ninf) = (0.0f64, 0usize);
+        for &(j, c) in row {
+            let b = if c > 0.0 { self.lo[j] } else { self.up[j] };
+            if b.is_finite() {
+                minact += c * b;
+            } else {
+                ninf += 1;
+            }
+        }
+        if ninf > 1 {
+            return Some(0);
+        }
+        let mut n = 0usize;
+        for &(j, c) in row {
+            let b = if c > 0.0 { self.lo[j] } else { self.up[j] };
+            let rest = if b.is_finite() {
+                if ninf > 0 {
+                    continue;
+                }
+                minact - c * b
+            } else {
+                minact
+            };
+            let lim = (u - rest) / c;
+            let slack = if p.is_int[j] && !int_slack { 0.0 } else { 1e-9 * (1.0 + lim.abs()) };
+            if c > 0.0 {
+                if lim + slack < self.up[j] && self.tighten_upper(p, j, lim + slack) {
+                    n += 1;
+                }
+            } else if lim - slack > self.lo[j] && self.tighten_lower(p, j, lim - slack) {
+                n += 1;
+            }
+            if self.infeasible {
+                return None;
+            }
+        }
+        Some(n)
     }
 
     /// 診断用: 外から来た変更の出どころを理由の値で区別する (`-2 - tag`。衝突解析は `< 0` / `== -1` しか見ないので動作は同じ)。
