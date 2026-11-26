@@ -1404,7 +1404,7 @@ pub(super) fn local_search(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64
     // 試作 `ENOMOTO_MIP_TICKS` の `l` ([`super::ticks_on`]): 時間の上限 `time_cap` 秒を同じ量の手間 (ヒューリスティクスの重みで割った work) の
     // 上限にし、時間は 10 倍の安全網にする
     let tk_l = super::ticks_on('l');
-    let t_end = Instant::now() + Duration::from_secs_f64(time_cap * if tk_l { 10.0 } else { 1.0 });
+    let t_end = Instant::now() + crate::cancel::secs(time_cap * if tk_l { 10.0 } else { 1.0 });
     if n == 0 {
         return (None, None);
     }
@@ -1412,8 +1412,12 @@ pub(super) fn local_search(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64
     let mut obj_bound = f64::INFINITY;
     let row_lo = |i: usize| if i < m { p.row_lo[i] } else { f64::NEG_INFINITY };
     let row_up = |i: usize, ob: f64| if i < m { p.row_up[i] } else { ob };
+    let fix_f = super::solver::unify_fix('f');
     let viol = |i: usize, a: f64, ob: f64| -> f64 {
         let (rl, ru) = (row_lo(i), row_up(i, ob));
+        if fix_f {
+            return viol_narrow(a, rl, ru);
+        }
         let tol = FEASTOL * (1.0 + a.abs().min(1e6));
         if a > ru + tol {
             a - ru
@@ -1740,7 +1744,7 @@ fn fj_search_old(p: &MipProblem, lo: &[f64], up: &[f64], effort: u64, time_cap: 
         if n == 0 {
             return None;
         }
-        let t_end = Instant::now() + Duration::from_secs_f64(time_cap);
+        let t_end = Instant::now() + crate::cancel::secs(time_cap);
         // 試作 `ENOMOTO_MIP_TICKS` の `j` ([`crate::ticks::vclock`]): 手間で数えて止める (手間の門も見る)
         let vc = crate::ticks::vclock();
         let tk_end = crate::ticks::total() + time_cap.max(0.0) * 1e9;
@@ -1756,7 +1760,11 @@ fn fj_search_old(p: &MipProblem, lo: &[f64], up: &[f64], effort: u64, time_cap: 
             .collect();
         let mut act: Vec<f64> = (0..m).map(|i| p.rows[i].iter().map(|&(j, a)| a * x[j]).sum()).collect();
         let mut w = vec![1.0f64; m];
+        let fix_f = super::solver::unify_fix('f');
         let viol = |i: usize, a: f64| -> f64 {
+            if fix_f {
+                return viol_narrow(a, p.row_lo[i], p.row_up[i]);
+            }
             let tol = FEASTOL * (1.0 + a.abs().min(1e6));
             if a > p.row_up[i] + tol {
                 a - p.row_up[i]
@@ -4316,4 +4324,17 @@ thread_local! {
     static RINS_DROP: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
     /// `ENOMOTO_MIP_ROBUST_LNSFREQ` (試作): Mutation の固定の割合 (スレッドごと。最初は `ENOMOTO_T_MIP_MUTATION_RATE`)
     static ROBUST_MUT_RATE: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+}
+
+/// 行 `lo <= a <= up` の違反量。許容誤差は [`super::problem::MipProblem::is_feasible`] (`1e-6 + 1e-9 |b|`) より少し狭い
+/// `0.5e-6 + 1e-10 |b|` (Local-MIP の `viol_at` と同じ。違反 0 とした点が `is_feasible` で落ちないように)。`ENOMOTO_MIP_UNIFY_FIX` の `f`
+#[inline]
+fn viol_narrow(a: f64, lo: f64, up: f64) -> f64 {
+    if a > up + 0.5 * FEASTOL + 1e-10 * up.abs() {
+        a - up
+    } else if a < lo - 0.5 * FEASTOL - 1e-10 * lo.abs() {
+        lo - a
+    } else {
+        0.0
+    }
 }

@@ -1,0 +1,27 @@
+PRESOLVE_SIZE n_vars_in=13873 n_rows_in=3202 n_vars_out=12256 n_rows_out=2893
+PROF_PHASES_EXT wall=18252.960ms iters=52305 (349.0us/iter) accounted=97.5% of wall refactor_count=186 (verify=0 try_update=0 bump=0 drift=24 d_drift=0 illcond=0 max_updates=0 infeas_check=0 clock=162) max_update_streak=466
+  dse_ftran(unfused)=0.0us/iter chuzc1_heap=0.4us/iter
+  avg_bfrt_flips/iter=1.124 avg_infeasible_pool/iter=1037.2
+  pivot_order_reuse: attempts=15 accepted=2 (13.3%) attempt_time=38.955ms row_repicks=3384 fail(singular=0 fill=13) backoff_skips=174 nnz_reuse_avg=4984 nnz_full_avg=30503
+  lu_dense_switch: count=0 rows=0
+  density_gate_ftrans=56851 final_expected_density col_aq=0.784 bfrt=0.385
+  btran_l scatter=18773 gather=33846
+  pivot_search steps=532312 search_limit_hits=185221 (34.8%) candidates=16303921 (avg 30.63/step) scan=630.826ms
+  col_max_abs rescan_entries=14889020 pivot_threshold=0.25 (escalations=0)
+  m_exit(q_was_m)=0 harris_window_m_miss=0 m_enter_via_flip=0
+  degenerate_pivots=16802 (32.1% of iters) avg_harris_window_size=2.423
+  pool_grew=22947 (43.9%) pool_shrank=27182 (52.0%) pool_same=2175 (4.2%)
+  dse_rel_err: checked=0 <1%=0.0% <10%=0.0% <100%=0.0% >=100%=0.0%
+  btran(rho_p)         2146.442ms   11.8% of wall  41.037us/iter
+  price                2812.400ms   15.4% of wall  53.769us/iter
+  chuzr                 266.686ms    1.5% of wall  5.099us/iter
+  chuzc1               1961.708ms   10.7% of wall  37.505us/iter
+  bfrt                  670.829ms    3.7% of wall  12.825us/iter
+  ftran                4793.687ms   26.3% of wall  91.649us/iter
+  xb_update            1766.290ms    9.7% of wall  33.769us/iter
+  dse_update            199.720ms    1.1% of wall  3.818us/iter
+  dual_update           496.367ms    2.7% of wall  9.490us/iter
+  ft_update             733.063ms    4.0% of wall  14.015us/iter
+  refactor             1956.475ms   10.7% of wall  37.405us/iter
+PROF_HANDOFF run_phase=3.209ms ok=true
+{"who": "ours", "lp": "dano3_3_fix", "status": "optimal", "obj": 576.3446330306436, "time": 18.30402058300001}

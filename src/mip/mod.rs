@@ -854,13 +854,15 @@ fn exact_sum(it: impl Iterator<Item = f64>) -> f64 {
 
 /// 元の問題での点 `x` の境界・行の違反の最大値 (行の活動量は誤差補償つきの和)。
 fn max_violation(p: &MipProblem, x: &[f64]) -> f64 {
+    // NaN の違反は無限とする (`f64::max` は NaN を捨てるので、そのままでは NaN を含む点の違反が 0 になり、研磨の採否で通ってしまう)
+    let upd = |v: f64, d: f64| if d.is_nan() { f64::INFINITY } else { v.max(d) };
     let mut v = 0.0f64;
     for j in 0..p.n {
-        v = v.max(p.col_lo[j] - x[j]).max(x[j] - p.col_up[j]);
+        v = upd(upd(v, p.col_lo[j] - x[j]), x[j] - p.col_up[j]);
     }
     for (i, row) in p.rows.iter().enumerate() {
         let a = exact_sum(row.iter().map(|&(j, c)| c * x[j]));
-        v = v.max(p.row_lo[i] - a).max(a - p.row_up[i]);
+        v = upd(upd(v, p.row_lo[i] - a), a - p.row_up[i]);
     }
     v
 }
@@ -3901,7 +3903,8 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
                 if !bound.is_finite() || !lo.is_finite() || inf > 0 {
                     continue;
                 }
-                ub = ub.min((bound - (v - a * lo * k)) / a + 1e-9);
+                // `ENOMOTO_MIP_UNIFY_FIX` の `m`: 丸めの余裕を `merge_twin_classes` (`FZ2_FIX` の `m`) と同じ 1e-6 にする
+                ub = ub.min((bound - (v - a * lo * k)) / a + if solver::unify_fix('m') { 1e-6 } else { 1e-9 });
             }
             ub.floor()
         };
