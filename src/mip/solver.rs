@@ -1163,6 +1163,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// `ENOMOTO_MIP_POLISH_WARM`: 研磨で値を確かめた暫定解のうち最良のもの (目的値は整数を固定した LP の値)。返す暫定解の値が確かでない
     /// ([`WarmMark::Unknown`]、または印がない) まま時間切れになったとき、こちらを返す (analysis/nattai_20261125 の 10 節)
     warm_verified: Option<(f64, Vec<f64>)>,
+    /// 試作 `ENOMOTO_MIP_ROOTPAR_PH` の `b` ([`Solver::rph_join_polish`]): 根で別スレッドで回している研磨 (結果, 研磨した解) と、研磨にかけた解・見積りを足す前の目的値
+    rph_bg: Option<(std::thread::JoinHandle<(super::WarmPolish, Vec<f64>)>, Vec<f64>, f64)>,
     /// 診断用 `ENOMOTO_MIP_GAP4_RSS`: 生きている `Solver` の数に数えたか (サブ MIP か)。[`GAP4_LIVE`]
     gap4_live: Option<bool>,
     /// `ENOMOTO_MIP_GAP4` の `k`: 最後の locks の固定率と、根の並列の locks のサブ MIP が実行不能だったか ([`Self::locks_retry`])
@@ -5951,6 +5953,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         warm_rc: None,
         warm_mark: None,
         warm_verified: None,
+        rph_bg: None,
         gap4_live: gap4_sub,
         gap4_locks: (0.0, false),
         mem2_keep: (true, true),
@@ -6419,7 +6422,8 @@ pub(super) fn pool_close_on() -> bool {
 
 /// 試作 `ENOMOTO_MIP_ROOTPAR_PH=<文字>` (既定では使わない、analysis/rootpar_ph_20261126): 4 スレッドの根の前処理・ヒューリスティクスの段で、
 /// 空いているスレッドを使う。`r`: カット前の LP 解の RENS をカットのループの前に並列のサブ MIP として出す。
-/// `w`: 暫定解を受け取るときの研磨の LP に、整数を固定した LP と同じ時間の上限を付ける (1 スレッドの道筋も変わる)
+/// `w`: 暫定解を受け取るときの研磨の LP に、整数を固定した LP と同じ時間の上限を付ける (1 スレッドの道筋も変わる)。
+/// `b`: 2 スレッド以上の外側の根では、研磨を別スレッドで回し、見積りの印で先に受け取って、根のヒューリスティクスの終わりと求解の終わりで待って受け取る
 pub(super) fn rootpar_ph(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     V.get_or_init(|| env_str!("ENOMOTO_MIP_ROOTPAR_PH").map_or(String::new(), |v| v.to_string())).contains(c)
@@ -8199,7 +8203,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         // (返すときに確かめた解に戻す道・期限なしで解く道を通す確かめ用。analysis/nattai_20261125 の 10 節)
                         let diag_u = env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('u'));
                         let rel = rel && !diag_u;
+                        // 試作 `ROOTPAR_PH` の `b` ([`rootpar_ph`]): 2 スレッド以上の外側の根では、研磨を別スレッドで始めて、ここでは解かない扱い
+                        // (見積りを足して印をつける) で受け取る。根のヒューリスティクスの終わりと求解の終わりで待って受け取る ([`Self::rph_join_polish`])
+                        let rph_b = rootpar_ph('b') && mip_threads() > 1 && !self.params.submip && self.snap.is_none() && self.nodes <= 1 && self.rph_bg.is_none() && warm == 2 && !diag_u;
                         let r = if warm == 3 || diag_u {
+                            super::WarmPolish::NotSolved
+                        } else if rph_b {
+                            let pc = MipProblem::clone(self.p);
+                            let (xc, zc, bc, dl) = (x.clone(), z, rb.clone().or_else(|| Some(self.lp.basis())), self.deadline);
+                            let h = std::thread::spawn(move || {
+                                let mut xx = xc;
+                                let r = super::polish_in_problem_warm(&pc, &mut xx, zc, bc.as_ref(), dl);
+                                (r, xx)
+                            });
+                            if self.params.verbose {
+                                eprintln!("MIP: ROOTPAR_PH b: polishing the incumbent {z:.10e} in the background ({:.2}s)", self.start.elapsed().as_secs_f64());
+                            }
+                            self.rph_bg = Some((h, x.clone(), z));
                             super::WarmPolish::NotSolved
                         } else {
                             let b = if env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('n')) { Some(self.lp.basis()) } else { rb.or_else(|| Some(self.lp.basis())) };
@@ -12891,6 +12911,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     heur!("sub-MIP Local-MIP", self.subheur_local_mip());
                 }
                 self.rootcap_end = self.rootcap_until.take();
+                // 試作 `ROOTPAR_PH` の `b`: 別スレッドの研磨をここで待って受け取る
+                self.rph_join_polish();
                 if self.params.verbose {
                     eprintln!("MIP: after root heuristics: incumbent {:?} ({:.2}s)", self.incumbent.as_ref().map(|(z, _)| *z), self.start.elapsed().as_secs_f64());
                     // 診断用 (`ENOMOTO_MIP_SUBMIP_VERBOSE`): 根のヒューリスティクスの時間を、どの求解の根か (道筋、`M` は外側) をつけて出す
@@ -29375,7 +29397,32 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
+    /// 試作 `ENOMOTO_MIP_ROOTPAR_PH` の `b`: 別スレッドで回している研磨を待って受け取る。研磨できたら (取り替えた・そのままで確かめた) 確かめた解に控え、
+    /// 今の暫定解がその解のままなら、目的値を研磨した値に、印を `Polished` にする (見積りで足した分を外す)。研磨できなければ見積りの印のまま
+    fn rph_join_polish(&mut self) {
+        let Some((h, x0, z0)) = self.rph_bg.take() else { return };
+        let Ok((r, xn)) = h.join() else { return };
+        let zn = match r {
+            super::WarmPolish::Replaced(zn) => Some(zn),
+            super::WarmPolish::Kept => Some(z0),
+            super::WarmPolish::NotSolved => None,
+        };
+        if self.params.verbose {
+            eprintln!("MIP: ROOTPAR_PH b: background polish done: {:?} ({:.2}s)", zn, self.start.elapsed().as_secs_f64());
+        }
+        let Some(zn) = zn else { return };
+        let xv = if matches!(r, super::WarmPolish::Replaced(_)) { xn } else { x0.clone() };
+        if self.warm_verified.as_ref().is_none_or(|(zv, _)| zn < *zv) {
+            self.warm_verified = Some((zn, xv.clone()));
+        }
+        if self.incumbent.as_ref().is_some_and(|(_, xi)| *xi == x0) {
+            self.incumbent = Some((zn, xv.clone()));
+            self.warm_mark = Some((xv, WarmMark::Polished));
+        }
+    }
+
     fn finish(&mut self, status: MipStatus, best_bound: f64) -> MipResult {
+        self.rph_join_polish();
         self.subcap_drain_deferred("finish");
         if tubr_on() && !self.params.submip && matches!(self.tubr_mask, Some(Some(_))) {
             eprintln!(
