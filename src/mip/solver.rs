@@ -13725,6 +13725,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // START_NODES 個たまってから始めてすぐ渡す
             let late = env_str!("ENOMOTO_MIP_TREE_LATE_SPAWN").is_some();
             let spawn_at = if late { tunable!("ENOMOTO_T_MIP_TREE_START_NODES", 8usize, usize) } else { tunable!("ENOMOTO_T_MIP_TREE_SPAWN_NODES", 2usize, usize) };
+            // 試作 `ENOMOTO_MIP_PARIDLE` の `e` (analysis/paridle_20261126): 木の最初のノード (根) を処理する前に従を始める。根の強分枝の間
+            // (4 スレッドの木の段のスレッド秒の 4.2%) に、従の写しの準備とヒューリスティクス役を進める。ノードは根を分枝してから渡す
+            let spawn_at = if paridle('e') && !late { 1 } else { spawn_at };
             if parallel_tree && self.pool.is_none() && self.queue.len() + plunge.is_some() as usize >= spawn_at {
                 self.start_workers(&mut plunge);
                 if !late {
@@ -13733,6 +13736,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if self.pool_hold.is_some_and(|t| Instant::now() >= t || self.queue.len() >= tunable!("ENOMOTO_T_MIP_TREE_START_NODES", 8usize, usize)) {
                 self.pool_hold = None;
+            }
+            // 試作 `ENOMOTO_MIP_PARIDLE` の `h` (analysis/paridle_20261126): 準備を終えて共有の待ち行列で待っている従がいれば
+            // (下の渡す判定と同じ `idle > len`)、控え (`TREE_HOLD_SECS`・`TREE_START_NODES`) を終えて渡す。控えは従の準備を主の探索と
+            // 並行させるためのもので、従の準備は短く (多くは 0.2 秒以下)、準備を終えた従の最初の待ちが木の段のスレッド秒の 3.5%
+            if paridle('h') && self.pool_hold.is_some() && self.queue.len() >= 2 {
+                if let Some(pool) = &self.pool {
+                    use std::sync::atomic::Ordering;
+                    if pool.idle.load(Ordering::Relaxed) > pool.len.load(Ordering::Relaxed) {
+                        self.pool_hold = None;
+                    }
+                }
             }
             // racing ramp-up: 競争の終わり (主が決める) と、負けたスレッドの木を捨てる
             if self.pool.is_some() && !self.race_done && self.race_step(&mut plunge) {
@@ -30221,6 +30235,17 @@ pub(crate) fn objprop_redo(c: char) -> bool {
 /// (`ENOMOTO_MIP_SB_PROP`・`SB_PROBEBD`) で、`ENOMOTO_MIP_OBJ_PROP` が切でも目的の行を伝播する
 fn sb_objprop() -> bool {
     env_str!("ENOMOTO_MIP_SB_OBJPROP").is_some()
+}
+
+/// 試作 `ENOMOTO_MIP_PARIDLE` (analysis/paridle_20261126、既定では使わない): 4 スレッドの木の始まりの遊びを減らす。値の文字で部品を選ぶ。
+/// `e` 木の最初のノードの前に従を始める、`h` 準備を終えて待っている従がいれば主の控えを終える。
+fn paridle(c: char) -> bool {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| match env_str!("ENOMOTO_MIP_PARIDLE") {
+        Some(v) if v != "0" && v != "off" => v.to_string(),
+        _ => String::new(),
+    })
+    .contains(c)
 }
 
 /// `ENOMOTO_MIP_OBJ_PROP_INT`: 目的の行の伝播 ([`Solver::propagate_objective_with`]、ノード・根の打ち切り値つきプロービングなど) で
