@@ -1769,6 +1769,18 @@ impl TwoStageLp {
         self.solve_once(lim)
     }
 
+    /// 試作 `ENOMOTO_MIP_ROOTPAR_PH` の `j` (研磨の LP の重い場合、analysis/rootpar_ph_20261126): 基底のない求解の既存の入口を、
+    /// 大きさの判定 (`G5SEQ_SIZE`) によらず使う。このスレッドの [`set_cold_race_threads`] が 2 以上なら同時実行 ([`Self::solve_race`])、
+    /// そうでなければ二段解法 (反復の上限つき) → 内点法 + クロスオーバー ([`Self::solve_seq_ipm`])
+    pub(crate) fn solve_cold_entry(&mut self, lim: &SolveLimits) -> LpStatus {
+        self.basis = None;
+        let k = COLD_RACE_THREADS.with(|c| c.get());
+        if k >= 2 && crate::cancel::current().is_none() {
+            return self.solve_race(lim, k);
+        }
+        self.solve_seq_ipm(lim)
+    }
+
     /// `ENOMOTO_MIP_G5SEQ` (既定、1 スレッドの基底のない大きい求解): 二段解法を反復の上限
     /// L = `ENOMOTO_T_MIP_G5SEQ_C` (既定 0.5) x (行 + 列) で解き、L 以内に結論が出なければ同じスレッドで内点法 + クロスオーバーを解いて
     /// その頂点を採る (TIMEDEP の `r` を 1 スレッドで順に回す形)。頂点が得られなければ二段解法を続ける。
