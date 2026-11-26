@@ -1,0 +1,315 @@
+== 1. 問題ごとの表 (数は秒、TL = 600 秒の時間切れ、i = 実行不能を示して終わり、— = 結果なし)
+当方: combo2 第 2 段 (c8e468e25、種 1)。SCIP 10.0.2 は逐次、HiGHS 1.15.1 は 4 スレッド (どちらも 600 秒・種 1)。分類 a・b・c は 2 節。
+
+| 問題 | 集合 | 既定 t1 | 既定 t4 | c2c t1 | c2c t4 | SCIP (t1) | HiGHS (t4) | 分類 |
+|---|---|---:|---:|---:|---:|---:|---:|---|
+| 30n20b8 | M | TL | 116 | 489 | 201 | 230 | TL | a1 |
+| 50v-10 | M | TL | TL | TL | TL | TL | TL |  |
+| CMS750_4 | M | TL | 80 | TL | 131 | 81 | TL | a1 |
+| academictimetablesmall | M | TL | TL | TL | TL | TL | TL |  |
+| air05 | M | 68 | 25 | 74 | 26 | 51 | 50 |  |
+| app1-1 | M | 10 | 11 | 23 | 10 | 8 | 35 |  |
+| app1-2 | M | TL | TL | TL | TL | TL | TL |  |
+| assign1-5-8 | M | TL | TL | TL | TL | TL | TL |  |
+| atlanta-ip | M | TL | TL | TL | TL | TL | TL |  |
+| b1c1s1 | M | TL | TL | TL | TL | TL | TL |  |
+| bab2 | rest | TL | TL | TL | TL | — | — |  |
+| bab6 | rest | TL | TL | TL | TL | — | — |  |
+| beasleyC3 | M | 48 | 21 | 69 | 14 | 28 | 31 |  |
+| binkar10_1 | M | 14 | 4 | 12 | 4 | 26 | 36 |  |
+| blp-ar98 | M | TL | TL | TL | TL | TL | TL |  |
+| blp-ic98 | M | TL | TL | TL | TL | TL | TL |  |
+| bnatt400 | M | TL | 200 | 597 | 152 | 142 | TL | a1 |
+| bnatt500 | M | TL | TL | TL | TL | TL | TL |  |
+| bppc4-08 | M | TL | TL | TL | TL | TL | TL |  |
+| brazil3 | M | TL | TL | TL | TL | TL | TL |  |
+| buildingenergy | rest | TL | TL | TL | TL | — | — |  |
+| cbs-cta | M | 5 | 5 | 5 | 4 | 43 | 90 |  |
+| chromaticindex1024-7 | M | TL | TL | TL | 578 | TL | TL | c |
+| chromaticindex512-7 | M | 243 | 140 | 356 | 172 | TL | TL | c |
+| cmflsp50-24-8-8 | M | TL | TL | TL | TL | TL | TL |  |
+| co-100 | rest | TL | TL | TL | TL | — | — |  |
+| cod105 | M | 34 | 27 | 34 | 26 | 45 | 132 |  |
+| comp07-2idx | M | TL | TL | TL | 146 | TL | TL | c |
+| comp21-2idx | M | TL | TL | TL | TL | TL | TL |  |
+| cost266-UUE | M | TL | TL | TL | TL | TL | TL |  |
+| cryptanalysiskb128n5obj14 | M | TL | TL | TL | TL | TL | TL |  |
+| cryptanalysiskb128n5obj16 | M | TL | TL | TL | TL | TL | TL |  |
+| csched007 | M | TL | TL | TL | TL | TL | TL |  |
+| csched008 | M | TL | TL | TL | TL | TL | 243 | a4 |
+| cvs16r128-89 | M | TL | TL | TL | TL | TL | TL |  |
+| dano3_3 | M | 183 | 194 | 187 | 198 | 97 | 96 |  |
+| dano3_5 | M | TL | 600 | TL | 596 | 285 | 467 | a1 |
+| decomp2 | M | 0 | 0 | 0 | 0 | 6 | 24 |  |
+| drayage-100-23 | M | 0 | 0 | 0 | 0 | 10 | 1 |  |
+| drayage-25-23 | M | 1 | 1 | 1 | 1 | 14 | 2 |  |
+| dws008-01 | M | TL | TL | TL | TL | TL | TL |  |
+| eil33-2 | M | 51 | 20 | 35 | 20 | 88 | 95 |  |
+| eilA101-2 | rest | TL | TL | TL | TL | — | — |  |
+| enlight_hard | M | 0 | 0 | 0 | 0 | 0 | 18 |  |
+| ex10 | rest | TL | 189 | TL | 183 | — | — |  |
+| ex9 | rest | TL | TL | 116 | 95 | — | — |  |
+| exp-1-500-5-5 | M | 6 | 6 | 5 | 6 | 3 | 4 |  |
+| fast0507 | M | 487 | 283 | 298 | 270 | 351 | TL |  |
+| fastxgemm-n2r6s0t2 | M | 356 | 40 | 230 | 95 | TL | 575 |  |
+| fhnw-binpack4-4 | M | 82i | 75i | 24i | 66i | 12i | TL | b1 |
+| fhnw-binpack4-48 | M | 0 | 0 | 0 | 0 | TL | TL | c |
+| fiball | M | TL | 55 | 359 | 51 | TL | 112 |  |
+| gen-ip002 | M | TL | TL | TL | TL | TL | TL |  |
+| gen-ip054 | M | TL | 288 | TL | 193 | TL | TL | c |
+| germanrr | M | TL | TL | TL | TL | TL | crash |  |
+| gfd-schedulen180f7d50m30k18 | rest | TL | TL | TL | TL | — | — |  |
+| glass-sc | M | TL | TL | TL | TL | TL | TL |  |
+| glass4 | M | TL | TL | TL | TL | TL | TL |  |
+| gmu-35-40 | M | TL | 274 | TL | TL | TL | TL | c |
+| gmu-35-50 | M | TL | TL | TL | TL | TL | TL |  |
+| graph20-20-1rand | M | 10 | 5 | 8 | 5 | 5 | TL |  |
+| graphdraw-domain | M | TL | 399 | TL | 314 | TL | TL | c |
+| h80x6320d | M | 48 | 26 | 66 | 28 | 190 | 22 |  |
+| highschool1-aigio | rest | TL | TL | TL | TL | — | — |  |
+| hypothyroid-k1 | M | 1 | 1 | 1 | 1 | 16 | 15 |  |
+| ic97_potential | M | TL | TL | TL | TL | TL | TL |  |
+| icir97_tension | M | TL | TL | TL | TL | TL | TL |  |
+| irish-electricity | rest | TL | TL | TL | TL | — | — |  |
+| irp | M | 39 | 16 | 41 | 16 | 16 | 28 |  |
+| istanbul-no-cutoff | M | TL | 234 | 528 | 264 | 111 | TL | a1 |
+| k1mushroom | rest | TL | TL | TL | TL | — | — |  |
+| lectsched-5-obj | M | TL | TL | TL | TL | TL | TL |  |
+| leo1 | M | TL | TL | TL | TL | TL | TL |  |
+| leo2 | M | TL | TL | TL | TL | TL | TL |  |
+| lotsize | M | TL | TL | TL | TL | TL | TL |  |
+| mad | M | TL | TL | TL | TL | TL | TL |  |
+| map10 | rest | TL | TL | TL | TL | — | — |  |
+| map16715-04 | rest | TL | TL | TL | TL | — | — |  |
+| markshare2 | M | TL | TL | TL | TL | TL | TL |  |
+| markshare_4_0 | M | 8 | 3 | 9 | 3 | 76 | 285 |  |
+| mas74 | M | 305 | 101 | 446 | 68 | TL | TL | c |
+| mas76 | M | 28 | 10 | 36 | 9 | 93 | 128 |  |
+| mc11 | M | 58 | 21 | 68 | 22 | 25 | 58 |  |
+| mcsched | M | TL | 153 | TL | 220 | 280 | 554 | a1 |
+| mik-250-20-75-4 | M | 14 | 4 | 14 | 4 | 28 | 16 |  |
+| milo-v12-6-r2-40-1 | M | TL | TL | TL | TL | TL | TL |  |
+| momentum1 | M | TL | TL | TL | TL | TL | TL |  |
+| mushroom-best | M | 282 | 156 | 542 | 327 | TL | 295 |  |
+| mzzv11 | M | 541 | 201 | 373 | 214 | 273 | 149 |  |
+| mzzv42z | M | 84 | 64 | 69 | 68 | 175 | 91 |  |
+| n2seq36q | M | 486 | 28 | 112 | 28 | 263 | 109 |  |
+| n3div36 | M | TL | TL | TL | TL | TL | TL |  |
+| n5-3 | M | 59 | 22 | 52 | 23 | 42 | 46 |  |
+| neos-1122047 | M | 3 | 2 | 3 | 3 | 4 | 5 |  |
+| neos-1171448 | M | 54 | 23 | 153 | 27 | 12 | 239 | b1 |
+| neos-1171737 | M | TL | TL | 539 | TL | TL | TL | c |
+| neos-1354092 | M | TL | TL | 574 | TL | TL | TL | c |
+| neos-1445765 | M | 32 | 24 | 41 | 19 | 45 | 96 |  |
+| neos-1456979 | M | 573 | 170 | 369 | 204 | TL | 555 |  |
+| neos-1582420 | M | 49 | 48 | 48 | 28 | 45 | 51 |  |
+| neos-2075418-temuka | rest | TL | TL | TL | TL | — | — |  |
+| neos-2657525-crna | M | TL | TL | TL | TL | TL | TL |  |
+| neos-2746589-doon | M | TL | TL | TL | TL | TL | TL |  |
+| neos-2978193-inde | M | 57 | 20 | 55 | 26 | TL | 36 |  |
+| neos-2987310-joes | rest | 17 | 14 | 22 | 16 | — | — |  |
+| neos-3004026-krka | M | 1 | 0 | 1 | 0 | TL | 437 |  |
+| neos-3024952-loue | M | TL | TL | TL | TL | TL | TL |  |
+| neos-3046615-murg | M | TL | TL | TL | TL | TL | TL |  |
+| neos-3083819-nubu | M | 4 | 2 | 4 | 2 | 17 | 18 |  |
+| neos-3216931-puriri | M | TL | TL | TL | TL | TL | TL |  |
+| neos-3381206-awhea | M | 2 | 4 | 2 | 4 | 1 | 7 |  |
+| neos-3402294-bobin | rest | TL | 338 | TL | 184 | — | — |  |
+| neos-3402454-bohle | rest | killed | crash | TL | crash | — | — |  |
+| neos-3555904-turama | rest | TL | TL | TL | TL | — | — |  |
+| neos-3627168-kasai | M | 112 | 57 | 370 | 105 | TL | 115 |  |
+| neos-3656078-kumeu | M | TL | TL | TL | TL | TL | TL |  |
+| neos-3754480-nidda | M | TL | TL | TL | TL | TL | TL |  |
+| neos-3988577-wolgan | M | TL | TL | TL | TL | TL | TL |  |
+| neos-4300652-rahue | M | TL | TL | TL | TL | TL | TL |  |
+| neos-4338804-snowy | M | TL | TL | TL | TL | TL | TL |  |
+| neos-4387871-tavua | M | TL | TL | TL | TL | TL | TL |  |
+| neos-4413714-turia | rest | TL | TL | TL | TL | — | — |  |
+| neos-4532248-waihi | rest | TL | TL | TL | TL | — | — |  |
+| neos-4647030-tutaki | rest | TL | TL | TL | TL | — | — |  |
+| neos-4722843-widden | M | 61 | 47 | 53 | 58 | TL | 170 |  |
+| neos-4738912-atrato | M | TL | 93 | 367 | 109 | TL | TL | c |
+| neos-4763324-toguru | M | TL | TL | TL | TL | TL | TL |  |
+| neos-4954672-berkel | M | TL | TL | TL | TL | TL | TL |  |
+| neos-5049753-cuanza | rest | TL | TL | TL | TL | — | — |  |
+| neos-5052403-cygnet | rest | TL | TL | TL | TL | — | — |  |
+| neos-5093327-huahum | rest | TL | TL | TL | TL | — | — |  |
+| neos-5104907-jarama | rest | TL | TL | TL | TL | — | — |  |
+| neos-5107597-kakapo | M | TL | TL | TL | TL | TL | TL |  |
+| neos-5114902-kasavu | rest | TL | TL | TL | TL | — | — |  |
+| neos-5188808-nattai | M | TL | TL | TL | TL | TL | TL |  |
+| neos-5195221-niemur | M | TL | TL | TL | TL | TL | TL |  |
+| neos-631710 | rest | 140 | 31 | 108 | 63 | — | — |  |
+| neos-662469 | M | TL | 467 | TL | TL | TL | TL | c |
+| neos-787933 | M | 0 | 0 | 0 | 0 | 2 | TL |  |
+| neos-827175 | M | 6 | 6 | 7 | 6 | 16 | 4 |  |
+| neos-848589 | rest | TL | TL | TL | TL | — | — |  |
+| neos-860300 | M | 29 | 20 | 28 | 18 | 25 | 15 |  |
+| neos-873061 | M | TL | TL | TL | TL | TL | 334 | a4 |
+| neos-911970 | M | 28 | 15 | 20 | 32 | 38 | 28 |  |
+| neos-933966 | M | 172 | 101 | 293 | TL | TL | 404 |  |
+| neos-950242 | M | 4 | 6 | 5 | 12 | 164 | 29 |  |
+| neos-957323 | M | 11 | 4 | 13 | 4 | 143 | 89 |  |
+| neos-960392 | M | 2 | 2 | 3 | 2 | TL | 18 |  |
+| neos17 | M | 5 | 4 | 5 | 5 | 11 | 8 |  |
+| neos5 | M | 175 | 30 | 120 | 27 | TL | 124 |  |
+| neos8 | M | 6 | 5 | 6 | 5 | 2 | 4 |  |
+| neos859080 | M | 3i | 8i | 10i | 9i | 2i | 2i | b4 |
+| net12 | M | TL | TL | TL | TL | TL | 401 | a4 |
+| netdiversion | rest | TL | TL | 354 | 549 | — | — |  |
+| nexp-150-20-8-5 | M | TL | TL | TL | TL | TL | TL |  |
+| ns1116954 | M | 10 | 3 | 9 | 4 | TL | 2 |  |
+| ns1208400 | M | 91 | 35 | 57 | 35 | 158 | 91 |  |
+| ns1644855 | rest | TL | TL | TL | TL | — | — |  |
+| ns1760995 | rest | TL | TL | TL | TL | — | — |  |
+| ns1830653 | M | 487 | 91 | 285 | 82 | 202 | 273 |  |
+| ns1952667 | M | TL | TL | TL | TL | TL | TL |  |
+| nu25-pr12 | M | 2 | 4 | 2 | 3 | 5 | 6 |  |
+| nursesched-medium-hint03 | rest | TL | TL | TL | TL | — | — |  |
+| nursesched-sprint02 | M | 42 | 27 | 47 | 28 | 34 | 24 |  |
+| nw04 | rest | 44 | 45 | 43 | 52 | — | — |  |
+| opm2-z10-s4 | M | TL | TL | TL | TL | TL | TL |  |
+| p200x1188c | M | 2 | 3 | 2 | 2 | 9 | 1 |  |
+| peg-solitaire-a3 | M | TL | TL | TL | TL | TL | TL |  |
+| pg | M | 17 | 9 | 17 | 9 | 36 | 5 |  |
+| pg5_34 | M | 512 | 127 | 555 | 211 | TL | 368 |  |
+| physiciansched3-3 | rest | TL | TL | TL | TL | — | — |  |
+| physiciansched6-2 | M | 35 | 35 | 35 | 45 | 74 | 13 |  |
+| piperout-08 | M | 24 | 15 | 19 | 17 | 46 | 52 |  |
+| piperout-27 | M | 20 | 13 | 30 | 19 | 36 | 59 |  |
+| pk1 | M | 53 | 27 | 67 | 27 | 135 | 413 |  |
+| proteindesign121hz512p9 | rest | TL | TL | TL | TL | — | — |  |
+| proteindesign122trx11p8 | rest | TL | TL | TL | TL | — | — |  |
+| qap10 | M | 50 | 31 | 55 | 30 | 58 | 176 |  |
+| radiationm18-12-05 | M | TL | TL | TL | TL | TL | TL |  |
+| radiationm40-10-02 | M | TL | TL | TL | TL | TL | TL |  |
+| rail01 | M | TL | TL | TL | TL | TL | TL |  |
+| rail02 | rest | TL | crash | TL | crash | — | — |  |
+| rail507 | M | 503 | 279 | TL | 272 | 222 | TL |  |
+| ran14x18-disj-8 | M | TL | 396 | TL | TL | TL | TL | c |
+| rd-rplusc-21 | rest | TL | TL | TL | TL | — | — |  |
+| reblock115 | M | TL | TL | TL | TL | TL | TL |  |
+| rmatr100-p10 | M | 55 | 23 | 60 | 23 | 155 | 115 |  |
+| rmatr200-p5 | M | TL | TL | TL | TL | TL | TL |  |
+| rocI-4-11 | M | TL | 221 | 222 | 67 | 207 | TL | a1 |
+| rocII-5-11 | M | TL | TL | TL | TL | TL | TL |  |
+| rococoB10-011000 | M | TL | TL | TL | TL | TL | TL |  |
+| rococoC10-001000 | M | 504 | 140 | 352 | 189 | TL | 288 |  |
+| roi2alpha3n4 | rest | 558 | 260 | TL | 328 | — | — |  |
+| roi5alpha10n8 | rest | TL | TL | TL | TL | — | — |  |
+| roll3000 | M | 75 | 36 | 68 | 33 | 47 | 50 |  |
+| s100 | rest | TL | TL | TL | TL | — | — |  |
+| s250r10 | rest | TL | TL | TL | TL | — | — |  |
+| satellites2-40 | M | TL | TL | TL | TL | TL | 594 | a4 |
+| satellites2-60-fs | M | TL | TL | TL | TL | TL | 391 | a4 |
+| savsched1 | rest | TL | TL | TL | TL | — | — |  |
+| sct2 | M | TL | TL | TL | TL | TL | 516 | a4 |
+| seymour | M | TL | TL | TL | TL | TL | TL |  |
+| seymour1 | M | 179 | 120 | 172 | 136 | 68 | 168 |  |
+| sing326 | M | TL | TL | TL | TL | TL | TL |  |
+| sing44 | M | TL | TL | TL | TL | TL | TL |  |
+| snp-02-004-104 | M | TL | TL | TL | TL | TL | TL |  |
+| sorrell3 | M | TL | TL | TL | TL | TL | TL |  |
+| sp150x300d | M | 0 | 0 | 0 | 0 | 1 | 0 |  |
+| sp97ar | M | TL | TL | TL | TL | TL | TL |  |
+| sp98ar | M | TL | TL | TL | TL | TL | TL |  |
+| splice1k1 | rest | TL | TL | TL | TL | — | — |  |
+| square41 | rest | TL | TL | TL | TL | — | — |  |
+| square47 | rest | TL | TL | TL | TL | — | — |  |
+| supportcase10 | rest | TL | TL | TL | TL | — | — |  |
+| supportcase12 | rest | TL | TL | TL | TL | — | — |  |
+| supportcase18 | M | TL | TL | TL | TL | TL | TL |  |
+| supportcase19 | rest | TL | TL | TL | TL | — | — |  |
+| supportcase22 | rest | TL | TL | TL | TL | — | — |  |
+| supportcase26 | M | TL | 396 | TL | 321 | TL | TL | c |
+| supportcase33 | M | TL | 76 | 446 | 112 | TL | 143 |  |
+| supportcase40 | M | TL | TL | TL | 514 | TL | TL | c |
+| supportcase42 | M | TL | TL | TL | TL | TL | TL |  |
+| supportcase6 | rest | 326 | 258 | 255 | 262 | — | — |  |
+| supportcase7 | rest | 342 | 295 | 394 | 268 | — | — |  |
+| swath1 | M | 52 | 19 | 39 | 18 | 12 | 22 | b1 |
+| swath3 | M | 154 | 92 | 99 | 91 | 306 | 129 |  |
+| tbfp-network | M | TL | 208 | TL | 577 | 560 | 273 | a1 |
+| thor50dday | M | TL | TL | TL | TL | TL | TL |  |
+| timtab1 | M | 60 | 26 | 87 | 23 | 87 | 77 |  |
+| tr12-30 | M | TL | 199 | TL | 198 | TL | 385 |  |
+| traininstance2 | M | TL | TL | TL | TL | TL | TL |  |
+| traininstance6 | M | TL | 348 | TL | 124 | TL | 552 |  |
+| trento1 | M | TL | TL | TL | TL | TL | TL |  |
+| triptim1 | rest | TL | TL | TL | TL | — | — |  |
+| uccase12 | M | TL | TL | TL | TL | TL | 534 | a4 |
+| uccase9 | M | TL | TL | TL | TL | TL | TL |  |
+| uct-subprob | M | TL | TL | TL | TL | TL | TL |  |
+| unitcal_7 | M | 364 | 275 | 575 | 302 | 495 | 186 |  |
+| var-smallemery-m6j6 | rest | TL | TL | TL | TL | — | — |  |
+| wachplan | M | TL | 474 | TL | 262 | TL | TL | c |
+
+== 解けた数と SGM (Mittelmann 186 問、shift 10、時間切れは 600 秒)
+  def_t1 : 解けた  78  SGM  206.1 秒
+  def_t4 : 解けた  98  SGM  151.8 秒
+  c2c_t1 : 解けた  86  SGM  203.3 秒
+  c2c_t4 : 解けた  97  SGM  155.8 秒
+  scip   : 解けた  70  SGM  243.2 秒
+  highs  : 解けた  84  SGM  240.1 秒
+  相手の良い方 (SCIP・HiGHS の速い方): 解けた 94  SGM 196.2 秒
+
+(a) 15 問、(b) 4 問、(c) 16 問
+
+== 2. (a)・(b) の一覧 (公平な対: SCIP 逐次 ↔ 当方 t1、HiGHS 4 スレッド ↔ 当方 t4)
+SGM の効き = その問題で当方の時間を相手の時間まで縮めたとき、186 問の SGM (shift 10) が何倍になるか。時間切れは 600 秒で数えるので、解けない問題の効きは控えめ (下限)。
+
+| 問題 | 分類 | 既定 t1 | 既定 t4 | c2c t1 | c2c t4 | SCIP | HiGHS | 効き t1 (対 SCIP) | 効き t4 (対 HiGHS) | 大きさ | MIPLIB の札 |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
+| 30n20b8 | a1 | TL | 116 | 489 | 201 | 230 | TL | 0.9950 | 1.0000 | 18380列 (b18318 i62 c0) 576行 | precedence set_partitioning general_linear |
+| CMS750_4 | a1 | TL | 80 | TL | 131 | 81 | TL | 0.9898 | 1.0000 | 11697列 (b7196 i0 c4501) 16381行 | precedence invariant_knapsack |
+| bnatt400 | a1 | TL | 200 | 597 | 152 | 142 | TL | 0.9925 | 1.0000 | 3600列 (b3600 i0 c0) 5614行 | precedence set_covering invariant_knapsack binpacking knapsack |
+| csched008 | a4 | TL | TL | TL | TL | TL | 243 | 1.0000 | 0.9953 | 1536列 (b1284 i0 c252) 351行 | aggregations variable_bound set_partitioning general_linear |
+| dano3_5 | a1 | TL | 600 | TL | 596 | 285 | 467 | 0.9961 | 0.9987 | 13873列 (b115 i0 c13758) 3202行 | variable_bound cardinality |
+| istanbul-no-cutoff | a1 | TL | 234 | 528 | 264 | 111 | TL | 0.9913 | 1.0000 | 5282列 (b30 i0 c5252) 20346行 | aggregations variable_bound knapsack |
+| mcsched | a1 | TL | 153 | TL | 220 | 280 | 554 | 0.9960 | 1.0000 | 1747列 (b1745 i0 c2) 2107行 | aggregations precedence variable_bound set_partitioning set_packing invariant_knapsack general_linear |
+| neos-873061 | a4 | TL | TL | TL | TL | TL | 334 | 1.0000 | 0.9969 | 175288列 (b87644 i0 c87644) 93360行 | precedence variable_bound |
+| net12 | a4 | TL | TL | TL | TL | TL | 401 | 1.0000 | 0.9979 | 14115列 (b1603 i0 c12512) 14021行 | precedence set_packing cardinality invariant_knapsack |
+| rocI-4-11 | a1 | TL | 221 | 222 | 67 | 207 | TL | 0.9945 | 1.0000 | 6839列 (b5192 i1016 c631) 10883行 | aggregations precedence variable_bound set_partitioning general_linear |
+| satellites2-40 | a4 | TL | TL | TL | TL | TL | 594 | 1.0000 | 0.9999 | 35378列 (b34324 i0 c1054) 20916行 | aggregations precedence variable_bound set_partitioning set_packing cardinality invariant_knapsack knapsack |
+| satellites2-60-fs | a4 | TL | TL | TL | TL | TL | 391 | 1.0000 | 0.9977 | 35378列 (b34324 i0 c1054) 16516行 | aggregations precedence variable_bound set_partitioning set_packing cardinality knapsack |
+| sct2 | a4 | TL | TL | TL | TL | TL | 516 | 1.0000 | 0.9992 | 5885列 (b2872 i0 c3013) 2151行 | precedence invariant_knapsack knapsack general_linear |
+| tbfp-network | a1 | TL | 208 | TL | 577 | 560 | 273 | 0.9996 | 1.0000 | 72747列 (b72747 i0 c0) 2436行 | set_partitioning cardinality |
+| uccase12 | a4 | TL | TL | TL | TL | TL | 534 | 1.0000 | 0.9994 | 62529列 (b9072 i0 c53457) 121161行 | aggregations precedence variable_bound |
+| fhnw-binpack4-4 | b1 | 82i | 75i | 24i | 66i | 12i | TL | 0.9924 | 1.0000 | 520列 (b481 i0 c39) 620行 | precedence variable_bound invariant_knapsack |
+| neos-1171448 | b1 | 54 | 23 | 153 | 27 | 12 | 239 | 0.9942 | 1.0000 | 4914列 (b2457 i0 c2457) 13206行 | variable_bound invariant_knapsack |
+| neos859080 | b4 | 3i | 8i | 10i | 9i | 2i | 2i | 0.9995 | 0.9977 | 160列 (b80 i80 c0) 164行 | variable_bound general_linear |
+| swath1 | b1 | 52 | 19 | 39 | 18 | 12 | 22 | 0.9943 | 1.0000 | 6805列 (b2306 i0 c4499) 884行 |  |
+
+全部を相手の時間まで縮めたときの SGM の比: t1 0.937、t4 0.983
+
+== (c) 当方だけ解ける問題 (参考、Mittelmann で SCIP・HiGHS とも 600 秒で解けない)
+
+| 問題 | 既定 t1 | 既定 t4 | c2c t1 | c2c t4 | MIPLIB の札 |
+|---|---:|---:|---:|---:|---|
+| chromaticindex1024-7 | TL | TL | TL | 578 | set_partitioning set_packing |
+| chromaticindex512-7 | 243 | 140 | 356 | 172 | set_partitioning set_packing |
+| comp07-2idx | TL | TL | TL | 146 | precedence variable_bound set_packing cardinality invariant_knapsack general_linear |
+| fhnw-binpack4-48 | 0 | 0 | 0 | 0 | precedence variable_bound invariant_knapsack |
+| gen-ip054 | TL | 288 | TL | 193 | variable_bound general_linear |
+| gmu-35-40 | TL | 274 | TL | TL | variable_bound set_packing |
+| graphdraw-domain | TL | 399 | TL | 314 | variable_bound set_partitioning invariant_knapsack general_linear |
+| mas74 | 305 | 101 | 446 | 68 | invariant_knapsack |
+| neos-1171737 | TL | TL | 539 | TL | variable_bound set_packing |
+| neos-1354092 | TL | TL | 574 | TL | variable_bound set_partitioning general_linear |
+| neos-4738912-atrato | TL | 93 | 367 | 109 | precedence variable_bound set_partitioning set_packing knapsack integer_knapsack general_linear |
+| neos-662469 | TL | 467 | TL | TL | variable_bound set_packing set_covering binpacking knapsack integer_knapsack general_linear |
+| ran14x18-disj-8 | TL | 396 | TL | TL | variable_bound set_covering |
+| supportcase26 | TL | 396 | TL | 321 | precedence |
+| supportcase40 | TL | TL | TL | 514 | precedence variable_bound set_packing |
+| wachplan | TL | 474 | TL | 262 | variable_bound set_partitioning set_packing set_covering invariant_knapsack general_linear |
+
+== 参考: 両方解けて 2〜3 倍遅い問題 (公平な対)
+
+  dano3_3 def_t4 194 秒 / highs 96 秒 (比 2.02) variable_bound cardinality
+  irp def_t1 39 秒 / scip 16 秒 (比 2.40) set_partitioning
+  mc11 def_t1 58 秒 / scip 25 秒 (比 2.31) variable_bound
+  neos8 def_t1 6 秒 / scip 2 秒 (比 2.34) precedence set_packing cardinality invariant_knapsack binpacking general_linear
+  ns1830653 def_t1 487 秒 / scip 202 秒 (比 2.40) variable_bound set_partitioning set_packing cardinality invariant_knapsack knapsack
+  physiciansched6-2 def_t4 35 秒 / highs 13 秒 (比 2.61) precedence variable_bound set_packing set_covering invariant_knapsack binpacking knapsack
+  rail507 def_t1 503 秒 / scip 222 秒 (比 2.26) variable_bound set_covering invariant_knapsack
+  seymour1 def_t1 179 秒 / scip 68 秒 (比 2.62) variable_bound set_covering
