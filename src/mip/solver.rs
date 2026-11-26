@@ -30050,7 +30050,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 研磨で上げた目的値の幅 (共有の最良値は研磨の前の値のままなので、最後の守りではこの幅を引いて比べる)
         let mut warm_raise = 0.0;
         // 試作 `ROOTPAR_PH` の `f`: 最後の研磨の前の値 (木で刈りに使った、見積りを足した値) と、研磨で上がった幅
-        let mut rph_f_raise: Option<(f64, f64)> = None;
+        let mut rph_f_raise: Option<(f64, f64, f64)> = None;
         if super::polish_strict() && super::polish_warm_mode() > 0 && !self.params.submip && self.snap.is_none() {
             let warm = super::polish_warm_mode();
             let mut leak = 0.0;
@@ -30059,6 +30059,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 通らなかった解)
                 let mark = self.warm_mark.as_ref().filter(|(xm, _)| *xm == x).map(|(_, m)| *m);
                 let z0 = z;
+                super::POLISH_TOL_LEAK.with(|c| c.set(0.0));
                 let r = if mark == Some(WarmMark::Polished) {
                     super::WarmPolish::Kept
                 } else if warm == 3 && !rootpar_ph('f') && !rootpar_ph('g') {
@@ -30152,7 +30153,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 warm_raise = (z - z0).max(0.0);
                 if warm == 3 && (rootpar_ph('f') || rootpar_ph('g')) {
-                    rph_f_raise = Some((z0, z - z0));
+                    rph_f_raise = Some((z0, z - z0, super::POLISH_TOL_LEAK.with(|c| c.get())));
                 }
                 self.incumbent = Some((z, x));
             }
@@ -30685,9 +30686,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 試作 `ROOTPAR_PH` の `f`: 木は見積りを足した値 z0 で刈った。刈った枝に z0 − (刈りの許容差) より良い解はないので、全体の下界は z0 の側で
         // 抑えられる。最後の研磨で値が z0 より上がった (見積りが足りなかった) とき、返す値 z と z0 の差が既存の許容 (abs_gap、rel_gap × |z|) の中なら
         // 最適のまま返す。越えたら最適とは言えないので、下界を z0 に下げ、最適でない印 (`NotSolved`、共有の最良値の守りと同じ) で返す
+        // 目的値の格子 (`obj_step`・`obj_lat`) があれば、刈りの上限 ([`prune_limit_of`]) が z0 と z で同じ (同じ格子の目) なら、刈った枝は z でも
+        // 刈られるので最適のまま (fuzz_objint で、許容の中の違反の分 4.5e-7 上がって最適と言わなくなっていた。README 5.7 節)
+        let same_limit = |z0: f64, z: f64| {
+            let lim = |v: f64| prune_limit_of(Some(v), f64::INFINITY, self.obj_step, self.obj_lat, self.p.offset, self.params.rel_gap, self.params.abs_gap, f64::INFINITY);
+            lim(z) <= lim(z0)
+        };
         let (status, best_bound) = match (status, rph_f_raise) {
-            (MipStatus::Optimal, Some((z0, dz))) if dz > self.params.abs_gap.max(self.params.rel_gap * (z0 + dz).abs()).max(1e-9 * z0.abs().max(1.0)) => {
-                eprintln!("MIP: ROOTPAR_PH f: the final polish raised the objective by {dz:.3e} beyond the gap tolerance; not reporting optimality (bound {z0:.10e})");
+            // 許容: 刈りの余裕 (abs_gap・rel_gap・1e-9 |z0|) と、研磨の LP の双対値での「許容の中で実行可能な点の漏れの最大」W
+            // (`d` の返す研磨した解もこの大きさまでの漏れを含みうる。d と同じ許容の水準。README 5.7 節) の大きい方
+            (MipStatus::Optimal, Some((z0, dz, w))) if dz > self.params.abs_gap.max(self.params.rel_gap * (z0 + dz).abs()).max(1e-9 * z0.abs().max(1.0)).max(w) && !same_limit(z0, z0 + dz) => {
+                eprintln!("MIP: ROOTPAR_PH f: the final polish raised the objective by {dz:.3e} beyond the gap tolerance and the tolerance leak bound {w:.3e}; not reporting optimality (bound {z0:.10e})");
                 (MipStatus::NotSolved, best_bound.min(z0))
             }
             (s, _) => (s, best_bound),
