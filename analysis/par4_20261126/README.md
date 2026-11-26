@@ -134,3 +134,18 @@ c2c の効き目 (c2c / 既定) の幾何平均は 1T 0.957、4T 1.028。4 ス�
   - `m` は写しを持たない主が、木の中 (ノード > 0) で、共有の仕組み `pool` があるときだけ。
   - `r` は写しから始める従だけ。
   - 1 スレッドでは道筋が変わらない作り。1 スレッドの確かめは 6 節。
+
+## 6. 誤答の確かめと 1 スレッドの道筋 (2026-11-26)
+
+- fuzz 7 本と cargo test を、`ENOMOTO_MIP_PAR4=fmr`・`ENOMOTO_MIP_THREADS=4` で回した (`fuzz_fmr.out`)。
+  - 誤答 0: fuzz_tiny 0/400・0/400、fuzz_highs 0/300、fuzz_objint 0/1000・0/1000、fuzz_slack は mismatches 0 (1000・1000 回)。
+  - cargo test は 424 通過・0 失敗。
+- 1 スレッド・種 1・60 秒で、既定と `PAR4=fmr` を 6 問で比べた (air03・neos8・qnet1・mik-250-20-75-4・markshare_4_0・misc07)。
+  - 状態・ノード数・目的値はどれも同じ (例: misc07 4330 ノード、markshare_4_0 272319 ノード)。
+  - `m`・`r` は木を分け合うときだけ働き、`f` は 1 本のときの形を変えない作りで、そのとおりだった。
+
+## 7. `f` の計測: 目的が 0 の問題 (240 問の中の 6 問、4 スレッド、600 秒、res_f.jsonl)
+
+240 問のうち目的が全部 0 の問題は、cryptanalysiskb128n5obj14・obj16、fhnw-binpack4-4、fhnw-binpack4-48、neos-3004026-krka、ns1116954 の 6 問 (highspy で読んで確かめた)。
+- 既定と `PAR4=f` を、種 1〜3 で回す。cryptanalysis の 2 問は時間がかかるので、種 1 だけ。
+- 分担表は shards_f.json。
