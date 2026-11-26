@@ -140,3 +140,35 @@
   - 試作 `ENOMOTO_MIP_ROOTCAP` の `p`・`q` (e3fd57dc3、既定では切) の道で、コメントに「止まった LP の基底 (行の状態・DSE 重みつき) を捨てずに根の LP に渡す (根の LP はここから続きを解く)」とある。
   - DSE を渡すのは意図的。`ROOT_BASIS_SAVED` は別の試作 (`ROOT_BASIS_FIX`) の置き場で、この道には関わらない。
   - 写し違いではないので、直さない。
+
+## 4. 写し違いの直し `ENOMOTO_MIP_UNIFY_FIX` (既定オフ、P で測る)
+
+親の指示で、動きが変わる直しは正しい側にそろえる形で切り替えにし、まとめて 1 つの P で測る。文字ごとに入れ、`1` は全部。
+
+| 文字 | 2 節 | 直し |
+|---|---|---|
+| `f` | 1 | `local_search`・`fj_search_old` の違反の許容誤差を `0.5e-6 + 1e-10\|b\|` (Local-MIP の `viol_at` と同じで、`is_feasible` より少し狭い) にする |
+| `r` | 2 | Repair の「違反なし」の判定を `is_feasible` と同じ `1e-6 + 1e-9\|b\|` にする |
+| `s` | 5 | FIXMORE の `obj_row_pass` で整数列に丸めの余裕を足さない (`global_obj_prop_ex` と同じ。FIXMORE は既定では使わないので P では効かない) |
+| `m` | 6 | 対称な列の併合の `sum_ub` の余裕を 1e-6 にする (`merge_twin_classes` の `FZ2_FIX` の `m` と同じ) |
+| `l` | 8 | LMBOOST の Local-MIP に、元の問題がないとき大域の境界を渡す |
+| `t` | 4 | `try_lp_solution` の固定 LP を `with_fixed_int_lp` で解く (元の費用、反復は累計に入れない、連続列はノードの境界) |
+
+- 既定オフのときの確かめ: cargo test 424 通過、check_default 全部一致。
+- P: 58 問 × 種 1〜3 × (def_t1・def_t4・uf_t1・uf_t4)、60 秒、696 回。台本は analysis/polishp_20261125 の写し (cfg.py だけ差し替え)。
+  - 分担表: `python plan.py 4 shards.json` (4 分担、各 1.6 時間の見積り)。
+  - 回し方: `python analysis/unify_20261126/run.py K` → res_sK.jsonl。
+  - 集計: `python analysis/unify_20261126/summ.py`。
+
+### 4.1 fuzz (`ENOMOTO_MIP_UNIFY_FIX=1`、`FUZZ_VENV=/usr/local bash analysis/unify_20261126/fuzz.sh uf ENOMOTO_MIP_UNIFY_FIX=1` → fuzz_uf.out)
+
+- 7 本は誤答 0。
+  - fuzz_tiny 0/400・0/400
+  - fuzz_highs 0/300
+  - fuzz_objint 0/1000・0/1000
+  - fuzz_slack は mismatches 0 (1000・1000 回)
+- cargo test は 424 通過。
+- 新しく足した fuzz_bigact.py: 活動度の大きい行 (係数に 10^2〜10^4 を掛け、|act| が 1e3〜1e6) の小さな MIP で、HiGHS との突き合わせと、返した点の実行可能性 (`1e-6 + 1e-9|b|`) を見る。
+  - 2 節の 1 (旧 FJ の緩い許容誤差) の誤答の芽を見るためのもの。
+  - 結果は 0/300・0/300。
+  - seed 88 は、こちらが -15350.21 で HiGHS が -15310.65 だった。こちらの点は厳密に実行可能 (違反 0) で、HiGHS はギャップ 1e-12 でも同じ値なので、HiGHS の取りこぼし。既定でも直しでも同じ値。判定は「HiGHS より良く、点が実行可能なら印字だけ」にした。
