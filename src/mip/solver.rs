@@ -1132,6 +1132,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     find_thread: Option<std::thread::JoinHandle<MipResult>>,
     find_out: Option<std::sync::Arc<std::sync::Mutex<Vec<Vec<f64>>>>>,
     find_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// 試作 `ENOMOTO_MIP_OBJSHAVE` の下界の専任スレッド ([`Solver::spawn_objshave`])
+    shave: Option<ObjShave>,
     /// RENS の固定率の記録 (成功したときの固定率の合計と回数、サブ MIP が実行不能だったときの合計と回数)。
     pub(super) rens_succ: (f64, u32),
     pub(super) rens_infeas: (f64, u32),
@@ -4394,6 +4396,131 @@ impl TriggerEval {
 /// 主の暫定解が質の悪い FJ の解でなくなったら止める ([`Solver::poll_find_thread`])。40 問 + 16 問 (4 スレッド・60 秒、同じコンテナで
 /// 既定と続けて測る対を順番を入れ替えて 2 組): 40 問は解けた数 25/25 -> 25/25・SGM 18.53/20.41 -> 18.16/20.59 秒・不一致 0、
 /// 16 問は主ギャップの和 2.87/2.87 -> 2.41/2.41 (neos-950242 が 2 組とも 19 -> 6)
+/// 試作 `ENOMOTO_MIP_OBJSHAVE` (既定では使わない。`0`・`off` も使わない): 下界の専任スレッド ([`Solver::spawn_objshave`])
+pub(super) fn objshave_on() -> bool {
+    env_str!("ENOMOTO_MIP_OBJSHAVE").is_some_and(|v| v != "0" && v != "off")
+}
+
+/// 下界の専任スレッドとの受け渡し。`lb` は示した「この値未満の解はない」(f64 のビット)、`stats` は (試し, 実行不能, 時間切れ, 解あり)。
+/// 捨てるときは止める合図だけ立てる (写しの求解はノードの区切りで止まる。待たない)
+pub(super) struct ObjShave {
+    lb: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    stats: std::sync::Arc<[std::sync::atomic::AtomicU64; 4]>,
+    #[allow(dead_code)]
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ObjShave {
+    fn summary(&self) -> String {
+        let s: Vec<u64> = self.stats.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
+        format!("tries {} infeasible {} time limit {} solution {} lower bound {:.10e}", s[0], s[1], s[2], s[3], f64::from_bits(self.lb.load(std::sync::atomic::Ordering::Acquire)))
+    }
+}
+
+impl Drop for ObjShave {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// 下界の専任スレッドの本体 (試作 `ENOMOTO_MIP_OBJSHAVE`)。目的値は `off + m * step` (m は整数) にしか乗らない。
+/// 下界 L (自分が示した値・主の知らせた下界・始めの下界の最大) を格子に切り上げた点を `off + m0 * step` として、打ち切り値
+/// C = off + (m0 + k − 1/2) step で写しを解く。実行不能なら「C 未満の解はない」ので、格子の上では下界は off + (m0 + k) step。
+/// k (δ = k step) は CP-SAT の難しさの更新と同じく、成功 (実行不能を示した) で 2 倍、時間切れで半分 (1 のときは 1 回の時間を 2 倍) にする。
+/// 解が見つかった (C 未満の解がある) ときも半分にする。C は写しの `valid_below` (写しの大域の固定が成り立つ範囲) と、
+/// 共有の最良値より下の格子の点までに抑える。示した値は `Infeasible` で終わった求解からだけ取る (時間切れ・止めた求解の下界は使わない)
+#[allow(clippy::too_many_arguments)]
+fn objshave_loop(
+    snap: &std::sync::Arc<TreeSnapshot>,
+    params: MipParams,
+    step: f64,
+    off: f64,
+    l0: f64,
+    deadline: Instant,
+    budget0: f64,
+    shared: &Portfolio,
+    lb: &std::sync::atomic::AtomicU64,
+    stop: &std::sync::atomic::AtomicBool,
+    stats: &[std::sync::atomic::AtomicU64; 4],
+    verbose: bool,
+    t0: Instant,
+) {
+    use std::sync::atomic::Ordering;
+    let mut k = 1.0f64;
+    let mut budget = budget0.max(1e-3);
+    let mut proven = f64::NEG_INFINITY;
+    while !stop.load(Ordering::Relaxed) {
+        let left = deadline.saturating_duration_since(Instant::now()).as_secs_f64();
+        if left <= 0.0 {
+            break;
+        }
+        let l = proven.max(shared.lb()).max(l0);
+        let m0 = ((l - off) / step - 1e-9).ceil();
+        // C = off + (m0 + kk − 1/2) step <= lim となる最大の kk
+        let lim = snap.valid_below.min(shared.best());
+        let kmax = if lim.is_finite() { ((lim - off) / step + 0.5 - 1e-9).floor() - m0 } else { f64::INFINITY };
+        if kmax < 1.0 {
+            // 間隙は閉じている (主が閉じる) か、写しの固定が成り立つ範囲を越えた: 待つ
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+        let kk = k.min(kmax);
+        let c = off + (m0 + kk - 0.5) * step;
+        let t = budget.min(left);
+        let ts = Instant::now();
+        let r = solve_snapshot(snap.clone(), MipParams { time_limit: t, cutoff: c, ..params });
+        stats[0].fetch_add(1, Ordering::Relaxed);
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        // 探索を終えた (実行不能、または C 未満の解なしで最適) なら「C 未満の解はない」(打ち切り値以上の解はヒューリスティクスが打ち切り値に
+        // 関係なく見つけたもので、刈りの上限は C のまま。二分探索の `bisection_worker` と同じ扱い)。C 未満の解を見つけたときは証明にしない
+        let complete = r.status == MipStatus::Infeasible || (r.status == MipStatus::Optimal && r.objective.is_none_or(|z| z >= c));
+        let what = match r.status {
+            _ if complete => {
+                stats[1].fetch_add(1, Ordering::Relaxed);
+                let v = off + (m0 + kk) * step;
+                if v > proven {
+                    proven = v;
+                    let mut cur = lb.load(Ordering::Relaxed);
+                    while v > f64::from_bits(cur) {
+                        match lb.compare_exchange_weak(cur, v.to_bits(), Ordering::AcqRel, Ordering::Relaxed) {
+                            Ok(_) => break,
+                            Err(x) => cur = x,
+                        }
+                    }
+                }
+                k = kk * 2.0;
+                "infeasible"
+            }
+            _ if r.objective.is_some_and(|z| z < c) => {
+                stats[3].fetch_add(1, Ordering::Relaxed);
+                k = (kk * 0.5).floor().max(1.0);
+                "solution"
+            }
+            _ => {
+                stats[2].fetch_add(1, Ordering::Relaxed);
+                if kk > 1.0 {
+                    k = (kk * 0.5).floor().max(1.0);
+                } else {
+                    budget *= 2.0;
+                }
+                "no result"
+            }
+        };
+        if verbose {
+            eprintln!(
+                "MIP: OBJSHAVE: L {l:.10e} cutoff {c:.10e} (k {kk}) -> {:?} {what} ({:.2}s of {t:.1}s, nodes {}); proven {proven:.10e}, next k {k} budget {budget:.1}s ({:.2}s)",
+                r.status,
+                ts.elapsed().as_secs_f64(),
+                r.nodes,
+                t0.elapsed().as_secs_f64()
+            );
+        }
+    }
+}
+
 pub(super) fn find_thread_on() -> bool {
     env_str!("ENOMOTO_MIP_NO_FIND_THREAD").is_none()
 }
@@ -5136,12 +5263,19 @@ pub fn solve(p: &MipProblem, params: MipParams) -> MipResult {
     if !params.submip {
         let _ = super::heuristics::frag_t0();
     }
+    // 試作 `ENOMOTO_MIP_ALNS`: 外側の求解の始め (再スタートの後の求解は除く) で、全スレッドで共有する近傍の状態を初めに戻す
+    if !params.submip && params.restarts == 0 {
+        super::alns_cp::reset();
+    }
     // ヒューリスティクスのサブ MIP は小さいことが多いので、基底のない求解も二段解法だけで解く (同時実行しない)
     let prev_race = params.submip.then(|| crate::simplex::mip_lp::set_cold_race_threads(1));
     // LP の実装は傾き・切片二段解法
     let run = || solve_with::<crate::simplex::mip_lp::TwoStageLp>(p, params, None, None);
     // サブ MIP の経過は利用者向けのログに出さない
     let r = if params.submip { crate::log::suspend(run) } else { run() };
+    if !params.submip && params.restarts == 0 && super::alns_cp::on() && env_str!("ENOMOTO_MIP_LOG").is_some() {
+        super::alns_cp::summary();
+    }
     super::wc_mark("tree (or the rest of the solve)", params.submip);
     if let Some(k) = prev_race {
         crate::simplex::mip_lp::set_cold_race_threads(k);
@@ -6009,6 +6143,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         find_thread: None,
         find_out: None,
         find_stop: None,
+        shave: None,
         rens_succ: (0.0, 0),
         rens_infeas: (0.0, 0),
         node_iters: 0,
@@ -14212,6 +14347,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     Some(true) => break,
                     Some(false) => return self.finish_limit(MipStatus::TimeLimit, None),
                     None => continue,
+                }
+            }
+            // 試作 `ENOMOTO_MIP_OBJSHAVE`: 下界の専任スレッドが示した「この値未満の解はない」を受け取る (二分探索と同じ `bisect_lb` に入れる)
+            if let Some(sh) = &self.shave {
+                let v = f64::from_bits(sh.lb.load(std::sync::atomic::Ordering::Acquire));
+                if v > self.bisect_lb {
+                    if self.params.verbose {
+                        eprintln!("MIP: OBJSHAVE: lower bound {v:.10e} received ({:.2}s, nodes {})", self.start.elapsed().as_secs_f64(), self.nodes);
+                    }
+                    self.bisect_lb = v;
                 }
             }
             // 目的値の二分探索で、暫定解より良い解がないことを証明した (下界が打ち切り値に届いた)
@@ -28043,11 +28188,68 @@ impl<'a, L: MipLp> Solver<'a, L> {
         snap
     }
 
+    /// 試作 `ENOMOTO_MIP_OBJSHAVE` を使うなら、目的値の刻み (目的のある列がみな整数で係数が刻みの整数倍のとき) を返す。
+    /// 木を分け合う主 (写し・サブ MIP・見張りの求解でない、2 スレッド以上) だけ
+    fn objshave_step(&self) -> Option<f64> {
+        if !objshave_on() || self.snap.is_some() || self.params.submip || self.watch.is_some() || self.shave.is_some() || self.params.threads < 2 {
+            return None;
+        }
+        self.p.objective_step().filter(|&s| s > 0.0 && s.is_finite())
+    }
+
+    /// 試作 `ENOMOTO_MIP_OBJSHAVE` (既定では使わない。analysis/objshave_20261126): 下界の専任スレッドを始める。CP-SAT の objective shaving と
+    /// 同じく「目的値 <= 今の下界 + δ」の解があるかを、根の写し ([`TreeSnapshot`]、主と何も共有しない独立の求解) を打ち切り値で解いて調べ、
+    /// 実行不能なら下界を上げる ([`objshave_loop`])。示した値は `ObjShave::lb` で主に渡し、主は `bisect_lb` に入れる (閉じる判定と時間切れの
+    /// 報告の下界は二分探索と同じ処理)。写しの求解の中で打ち切り値から導いたカット・衝突・固定は、その求解の中だけに残り、主には戻らない
+    fn spawn_objshave(&mut self, shared: std::sync::Arc<Portfolio>, step: f64, l0: f64) {
+        if !l0.is_finite() {
+            return;
+        }
+        // 写しから解く求解は根の代わりに写しのノードだけを探索する (ノードが無ければ待ち行列が空で、すぐ「実行不能」で終わる)。
+        // 主のノードを取ると主の札・潜りの積み荷を変えるので、ノードなしで作り、変更なしの根のノード 1 つ (写しの大域の境界の全体)
+        // を入れる。写しの大域の境界は `valid_below` 未満の解を全部含むので、打ち切り値 C <= `valid_below` でこのノードを探索し終えれば
+        // 「C 未満の解はない」
+        let snap = self.make_snapshot(&Portfolio::new(), &mut None, false);
+        let Ok(mut snap) = std::sync::Arc::try_unwrap(snap) else {
+            return;
+        };
+        snap.nodes = vec![SnapNode { changes: Vec::new(), lower_bound: l0, estimate: l0, depth: 0, branch: None, cut_basis: None, basis: None, dse: None, mem: 0, pbasis: None, changes_p: None, basis_p: None, cwm: None, inh: None }];
+        let snap = std::sync::Arc::new(snap);
+        let remaining = self.secs_left();
+        // 1 回の試しの時間の最初の値は、解探索のスレッドと同じ配分 (残り時間の `ENOMOTO_T_MIP_FIND_THREAD_FRAC` 倍、`_MAX` 秒まで)
+        let budget0 = (tunable!("ENOMOTO_T_MIP_FIND_THREAD_FRAC", 0.3, f64) * remaining).min(tunable!("ENOMOTO_T_MIP_FIND_THREAD_MAX", 20.0, f64));
+        let deadline = Instant::now() + Duration::from_secs_f64(if remaining.is_finite() { remaining.max(0.0) } else { 1e9 });
+        // 相対ギャップは 0 にする (暫定解 z が C の少し上にあると、ギャップの分だけ C より下で刈り、「C 未満の解はない」が崩れうる)
+        let params = MipParams { node_limit: u64::MAX, verbose: false, threads: 1, rel_gap: 0.0, abs_gap: 1e-9, ..self.params };
+        let lb = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(f64::NEG_INFINITY.to_bits()));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stats = std::sync::Arc::new([const { std::sync::atomic::AtomicU64::new(0) }; 4]);
+        let verbose = self.params.verbose;
+        let off = self.p.offset;
+        let t0 = self.start;
+        if verbose {
+            eprintln!("MIP: OBJSHAVE: started (step {step}, lower bound {l0:.10e}, first budget {budget0:.1}s, valid below {:.10e}, {:.2}s)", snap.valid_below, self.start.elapsed().as_secs_f64());
+        }
+        let (lb2, stop2, stats2) = (lb.clone(), stop.clone(), stats.clone());
+        let h = std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(move || {
+                // 写しの求解はノードの区切りで止める合図を見る ([`Solver::time_up`])。LP の途中の打ち切り (`with_halt`) は使わない
+                FIND_STOP.with(|o| *o.borrow_mut() = Some(stop2.clone()));
+                objshave_loop(&snap, params, step, off, l0, deadline, budget0, &shared, &lb2, &stop2, &stats2, verbose, t0);
+            })
+            .expect("failed to spawn the objective shaving thread");
+        self.shave = Some(ObjShave { lb, stop, stats, handle: Some(h) });
+    }
+
     /// 木を分け合う従のスレッドを始める (根の処理を終えて木の探索に入るところで、主が呼ぶ)。従は根の後の写し (ノードなし)
     /// から始め、共有の待ち行列からノードを取る。見つけた解は主に渡す。
     fn start_workers(&mut self, plunge: &mut Option<OpenNode>) {
         // `ENOMOTO_MIP_THREAD_BUDGET`: 解探索のスレッドが生きている間は、木のスレッドを 1 本減らす
         let tt = if thread_budget_on() && self.find_out.is_some() && self.params.threads > 2 { self.params.threads - 1 } else { self.params.threads };
+        // 試作 `ENOMOTO_MIP_OBJSHAVE`: 下界の専任スレッドの分だけ木のスレッドを 1 本減らす (目的が整数の刻みを取る問題だけ)
+        let shave_step = self.objshave_step();
+        let tt = if shave_step.is_some() && tt >= 2 { tt - 1 } else { tt };
         let n = tt - 1;
         // 以後は木の探索が全てのスレッドを使うので、このスレッドの基底のない求解は同時実行にしない
         crate::simplex::mip_lp::set_cold_race_threads(1);
@@ -28075,6 +28277,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if self.params.verbose && pool.heur_k > 0 {
             eprintln!("MIP: {} of {} tree threads take the heuristic role once a solution exists", pool.heur_k, self.params.threads);
+        }
+        if let Some(step) = shave_step {
+            let l0 = self.global_lower_bound().min(plunge.as_ref().map_or(f64::INFINITY, |n| n.lower_bound));
+            self.spawn_objshave(shared.clone(), step, l0);
         }
         self.tprof.workers_s = self.start.elapsed().as_secs_f64();
         if prof_tree_par() {
@@ -29911,6 +30117,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     fn finish(&mut self, status: MipStatus, best_bound: f64) -> MipResult {
+        // 試作 `ENOMOTO_MIP_OBJSHAVE`: 下界の専任スレッドを止める (待たない)
+        if let Some(sh) = self.shave.take() {
+            self.bisect_lb = self.bisect_lb.max(f64::from_bits(sh.lb.load(std::sync::atomic::Ordering::Acquire)));
+            if self.params.verbose {
+                eprintln!("MIP: OBJSHAVE: {} (bisect_lb {:.10e})", sh.summary(), self.bisect_lb);
+            }
+        }
         self.rph_join_polish();
         self.subcap_drain_deferred("finish");
         if tubr_on() && !self.params.submip && matches!(self.tubr_mask, Some(Some(_))) {
@@ -30025,11 +30238,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 下界を失い、根の下界が分かっているのに -inf を返していた (mzzv42z・physiciansched6-2 の 4 スレッド・60 秒。
         // analysis/bound_inf_20261021.md)。暫定解があればその値で上から抑える (根の下界が暫定解の値をわずかに越えうる)
         // 上限で終わるときの下界 (暫定解で抑える前。下の上限で終わるときの判定に使う)
-        let raw_bound = best_bound.min(wlb).max(self.root_lb).max(self.root_cut_lb);
+        // 目的値の二分探索・試作 `ENOMOTO_MIP_OBJSHAVE` が示した「`bisect_lb` 未満の解はない」も問題全体の下界として正しいので、従の下界で下げない
+        // (試作を使わなければ `bisect_lb` は -inf で変わらない)
+        let raw_bound = best_bound.min(wlb).max(self.root_lb).max(self.root_cut_lb).max(self.bisect_lb);
         let best_bound = if matches!(status, MipStatus::Optimal | MipStatus::Infeasible) {
             best_bound
         } else {
-            best_bound.min(wlb).max(self.root_lb).min(self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z))
+            best_bound.min(wlb).max(self.root_lb).max(self.bisect_lb).min(self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z))
         };
         if let Some(pool) = self.pool.clone() {
             if self.unresolved && self.snap.is_some() {
