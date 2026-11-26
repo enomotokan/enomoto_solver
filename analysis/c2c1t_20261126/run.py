@@ -28,6 +28,9 @@ C2CP = dict(C2C, ENOMOTO_MIP_NODEROWS_ADAPT="r0k23p")
 for _k, _v in PARTS.items():
     CFGS["p-" + _k] = {k: v for k, v in C2CP.items() if k != _v}
     CFGS["p+" + _k] = {_v: C2CP[_v]}
+# 直しの試作 (README 3 節): c2cp + 強分枝の子の伝播の伸びを擬似費用に入れない (`ENOMOTO_MIP_SB_PROP_PSKIP`)
+CFGS["c2cpk"] = dict(C2CP, ENOMOTO_MIP_SB_PROP_PSKIP="1")
+CFGS["p+sbpbk"] = {"ENOMOTO_MIP_SB_PROBEBD": "1", "ENOMOTO_MIP_SB_PROP_PSKIP": "1"}
 OUT = Path(sys.argv[1]); probs = sys.argv[2].split(","); seeds = [int(x) for x in sys.argv[3].split(",")]; th = sys.argv[4]; tl = float(sys.argv[5]); cfgs = sys.argv[6].split(",")
 done = set()
 if OUT.exists():

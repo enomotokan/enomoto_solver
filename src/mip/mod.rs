@@ -33,6 +33,7 @@ pub(crate) mod localmip;
 pub(crate) mod fjsub;
 mod heuristics;
 mod subb;
+mod alns_cp;
 pub(crate) mod sympre;
 mod sympre0;
 pub(crate) mod heur_subfix;
@@ -1007,6 +1008,36 @@ pub(super) fn polish_in_problem_warm(p: &MipProblem, x: &mut Vec<f64>, z: f64, b
     polish_in_problem_warm_ext(p, x, z, basis, deadline, false)
 }
 
+thread_local! {
+    /// 試作 `ROOTPAR_PH` の `f`・`g` (README 5.7 節): このスレッドで最後に解けた研磨の LP の双対値で測った、許容の中で実行可能な点が持ちうる漏れの最大
+    /// W(ε) = Σ_行 |y_i| ε(b_i) + Σ_連続列 |d_j| ε(境界)。(W_lp, W_mip) の 2 つ: W_lp は ε = 1e-9 max(1, |b|) (単体法の主の許容。研磨した解 = `d` の水準)、
+    /// W_mip は ε = 1e-6 + 1e-9 |b| (MIP の実行可能性の許容 [`domain::FEASTOL`]、`is_feasible` と同じ。木が暫定解を受け取る水準)
+    pub(super) static POLISH_TOL_LEAK: std::cell::Cell<(f64, f64)> = const { std::cell::Cell::new((0.0, 0.0)) };
+}
+
+/// 研磨の LP の双対値から [`POLISH_TOL_LEAK`] の (W_lp, W_mip) を計算する
+fn tol_leak_bound(p: &MipProblem, lp: &crate::simplex::mip_lp::TwoStageLp) -> (f64, f64) {
+    let b = |a: f64, c: f64| [a, c].iter().filter(|v| v.is_finite()).fold(0.0f64, |m, v| m.max(v.abs()));
+    let e_lp = |bb: f64| 1e-9 * bb.max(1.0);
+    let e_mip = |bb: f64| domain::FEASTOL + 1e-9 * bb;
+    let y = lp.row_duals();
+    let d = lp.reduced_costs();
+    let (mut w1, mut w2) = (0.0, 0.0);
+    for i in 0..p.m.min(y.len()) {
+        let bb = b(p.row_lo[i], p.row_up[i]);
+        w1 += y[i].abs() * e_lp(bb);
+        w2 += y[i].abs() * e_mip(bb);
+    }
+    for j in 0..p.n.min(d.len()) {
+        if !p.is_int[j] {
+            let bb = b(p.col_lo[j], p.col_up[j]);
+            w1 += d[j].abs() * e_lp(bb);
+            w2 += d[j].abs() * e_mip(bb);
+        }
+    }
+    (w1, w2)
+}
+
 /// 研磨の LP の反復の上限 (試作 `ROOTPAR_PH` の `j`): `ENOMOTO_T_MIP_G5SEQ_C` (0.5) × (行 + 列)。1 スレッドの基底のない求解の
 /// 二段解法 → 内点法 + クロスオーバーの切り替え (`G5SEQ`) と同じ物差し
 pub(super) fn polish_iter_cap(rows: usize, cols: usize) -> u64 {
@@ -1015,7 +1046,8 @@ pub(super) fn polish_iter_cap(rows: usize, cols: usize) -> u64 {
 
 /// [`polish_in_problem_warm`] の本体。`cold` なら基底を使わず、基底のない求解の既存の入口 (`solve_cold_entry`: 空いたスレッドがあれば同時実行、
 /// なければ二段解法 → 内点法 + クロスオーバー) で解く。試作 `ROOTPAR_PH` の `j` ([`solver::rootpar_ph`]) では、温めた単体法に反復の上限
-/// [`polish_iter_cap`] を付け、上限に当たれば基底を捨てて同じ入口で解き直す (基底が当てにならない扱い)
+/// [`polish_iter_cap`] を付け、上限に当たれば基底を捨てて同じ入口で解き直す (基底が当てにならない扱い)。このスレッドに同時実行のスレッドが
+/// 2 本以上あれば、上限を付けずに温めた単体法と内点法 + クロスオーバーを同時に解く (`solve_race_warm`)
 pub(super) fn polish_in_problem_warm_ext(p: &MipProblem, x: &mut Vec<f64>, z: f64, basis: Option<&lp::Basis>, deadline: Option<std::time::Instant>, cold: bool) -> WarmPolish {
     use std::sync::atomic::Ordering;
     if p.is_int.iter().all(|&b| b) {
@@ -1062,6 +1094,11 @@ pub(super) fn polish_in_problem_warm_ext(p: &MipProblem, x: &mut Vec<f64>, z: f6
         if cold {
             how = " (cold entry)";
             lp.solve_cold_entry(&lim)
+        } else if jcap && basis.is_some() && crate::simplex::mip_lp::cold_race_threads() >= 2 && crate::cancel::current().is_none() {
+            // 空いたスレッドがあれば (外側の根・求解の終わりの主のスレッド)、温めた単体法と内点法 + クロスオーバーを最初から同時に解く
+            // (既存の `solve_race_warm`。上限まで温めた側だけで待つ分がない。dano3_3 の最後の研磨で、上限まで 8 秒 + 同時実行 7.5 秒だった)
+            how = " (warm race)";
+            lp.solve_race_warm(&lim, crate::simplex::mip_lp::cold_race_threads())
         } else if jcap && basis.is_some() {
             let cap = polish_iter_cap(p.m, p.n);
             let st = lp.solve(&lp::SolveLimits { iteration_limit: cap, ..lim });
@@ -1080,6 +1117,9 @@ pub(super) fn polish_in_problem_warm_ext(p: &MipProblem, x: &mut Vec<f64>, z: f6
     let mut out = WarmPolish::NotSolved;
     if st == lp::LpStatus::Optimal {
         out = WarmPolish::Kept;
+        if jcap || solver::rootpar_ph('f') || solver::rootpar_ph('g') {
+            POLISH_TOL_LEAK.with(|c| c.set(tol_leak_bound(p, &lp)));
+        }
         let mut xn = lp.col_values();
         for j in 0..p.n {
             if p.is_int[j] {
@@ -6699,6 +6739,20 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
     let (mut n_lwin, mut it_lc, mut n_lc) = (0usize, 0u64, 0usize);
     let mut tried: std::collections::HashSet<(usize, i64)> = std::collections::HashSet::new();
     let mut ok = true;
+    // 試作 `ENOMOTO_MIP_LPPROBE_FIX` の `d`: 子の LP の間は厳密な DSE 重みを使い回す (窓の写しは塊ごとに立てる)
+    let lpp_dse = lpprobe_fix('d');
+    if lpp_dse {
+        crate::simplex::slope_intercept_dual::lpprobe_dse_scope(true);
+    }
+    // 診断 `ENOMOTO_MIP_LPPROBE_DIAG` + `ENOMOTO_MIP_XPROF`: 最初の LP までの区間計時を出して消す (子の LP の分を別に見る)
+    let lpp_xprof = lpprobe_diag() && env_str!("ENOMOTO_MIP_XPROF").is_some();
+    if lpp_xprof {
+        for (l, ns) in crate::simplex::slope_intercept_dual::xprof_take() {
+            eprintln!("LPPDIAG xprof first {l:12} {:10.1} ms", ns as f64 / 1e6);
+        }
+        crate::simplex::slope_intercept_dual::xprof_enable(false);
+        crate::simplex::slope_intercept_dual::xprof_enable(true);
+    }
     if lpprobe_diag() {
         eprintln!("LPPDIAG first: rows {} cols {} nnz {} iters {root_iters} secs {root_secs:.3} per_lp {per_lp} iter_budget {iter_budget} giveup {giveup} giveup_iters {giveup_iters} work {work} par {} threads {par_threads}", prob.m, prob.n, prob.nnz, lpool.is_some());
     }
@@ -6780,7 +6834,10 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
                         wk.par_iter_mut()
                             .zip(blocks.par_iter())
                             .map(|(w, bl)| {
-                                bl.iter()
+                                if lpp_dse {
+                                    crate::simplex::slope_intercept_dual::lpprobe_dse_scope(true);
+                                }
+                                let r: Vec<(bool, bool, u64, f64)> = bl.iter()
                                     .map(|&(j, v)| {
                                         let it0 = w.total_iterations();
                                         let tk0 = crate::ticks::total();
@@ -6802,7 +6859,15 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
                                         }
                                         (c[0], c[1], w.total_iterations() - it0, crate::ticks::total() - tk0)
                                     })
-                                    .collect()
+                                    .collect();
+                                if lpp_dse {
+                                    let st = crate::simplex::slope_intercept_dual::lpprobe_dse_stats_take();
+                                    crate::simplex::slope_intercept_dual::lpprobe_dse_scope(false);
+                                    if lpprobe_diag() {
+                                        eprintln!("LPPDIAG dse reuse {} built {} mismatch {} (window block)", st[0], st[1], st[2]);
+                                    }
+                                }
+                                r
                             })
                             .collect()
                     });
@@ -6885,6 +6950,21 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
             }
             _ => break,
         }
+    }
+    if lpp_dse {
+        let st = crate::simplex::slope_intercept_dual::lpprobe_dse_stats_take();
+        crate::simplex::slope_intercept_dual::lpprobe_dse_scope(false);
+        if lpprobe_diag() {
+            eprintln!("LPPDIAG dse reuse {} built {} mismatch {} (main)", st[0], st[1], st[2]);
+        }
+    }
+    if lpp_xprof {
+        crate::simplex::slope_intercept_dual::xprof("lpp_tail");
+        for (l, ns) in crate::simplex::slope_intercept_dual::xprof_take() {
+            eprintln!("LPPDIAG xprof children {l:12} {:10.1} ms", ns as f64 / 1e6);
+        }
+        crate::simplex::slope_intercept_dual::xprof_enable(false);
+        crate::simplex::slope_intercept_dual::xprof_enable(true);
     }
     if verbose && n_tried > 0 {
         eprintln!(
@@ -7967,6 +8047,12 @@ thread_local! {
 /// 試作 `ENOMOTO_MIP_LPPROBE_TICKS` (analysis/scipsym_20261120/ 14・15 節、既定では使わない): LP による固定 ([`lp_probe`]) で固定がまだ 0 のとき、
 /// 子の LP に使った決定的な手間 (`crate::ticks`、窓で並べた写しの分も足す) が最初の LP の手間の `ENOMOTO_T_MIP_LP_PROBE_GIVEUP_TIME_MULT` (既定 1) 倍を
 /// 越えたらあきらめる (手間の既定 `ENOMOTO_MIP_PRESOLVE_WORK` のときだけ)。反復 x (行 + 列) の数えは 1 反復の重い密な問題 (cod105) で軽く出る
+/// 試作 `ENOMOTO_MIP_LPPROBE_FIX=<文字>` (analysis/lpprobe_20261126、既定では使わない): 前処理の LP プロービング ([`lp_probe`]) の直し。
+/// - `d` (結果を変えない): 子の LP の厳密な DSE 重みを使い回す ([`crate::simplex::slope_intercept_dual::lpprobe_dse_scope`])
+pub(crate) fn lpprobe_fix(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_LPPROBE_FIX").is_some_and(|v| v.contains(c))
+}
+
 /// 診断 `ENOMOTO_MIP_LPPROBE_DIAG` (analysis/lpprobe_20261126): 前処理の LP プロービングの子の LP ごとに、状態・反復・秒・目的値を stderr に出す
 pub(crate) fn lpprobe_diag() -> bool {
     env_str!("ENOMOTO_MIP_LPPROBE_DIAG").is_some()
