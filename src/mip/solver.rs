@@ -674,8 +674,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     par_sb_stats: [u64; 2],
     /// 試作 `ENOMOTO_MIP_PARSB` の数え: [組, LP の複製, 先に解いた子を引いた, 入力が違った, 整数の解で逐次に, 使った, 確かめた, 確かめの不一致, 先に解いた子]
     parsb_stats: [u64; 9],
-    /// 試作 `ENOMOTO_MIP_PARSB` の秒: [LP の複製, 組の壁時計]
-    parsb_secs: [f64; 2],
+    /// 試作 `ENOMOTO_MIP_PARSB` の秒: [LP の複製, 組の壁時計, 作業のスレッドが子の LP を解いた秒の和]
+    parsb_secs: [f64; 3],
+    /// 試作 `ENOMOTO_MIP_PARSB`: 子の LP を解く 1 本ずつのスレッドの池 (求解の間使い回し、スレッドごとの作業の領域を使い回す)
+    parsb_pools: Vec<std::sync::Arc<rayon::ThreadPool>>,
     pub(super) deadline: Option<Instant>,
     pub(super) nodes: u64,
     /// 強分岐に使った LP 反復数。
@@ -5740,7 +5742,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         accepting_start: false,
         par_sb_stats: [0; 2],
         parsb_stats: [0; 9],
-        parsb_secs: [0.0; 2],
+        parsb_secs: [0.0; 3],
+        parsb_pools: Vec::new(),
         deadline,
         nodes: 0,
         sb_iters: 0,
@@ -19571,7 +19574,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 保存した状態 `saved` の LP の複製 (`lps`、このノードの間は使い回す) で、逐次と同じ手順 (境界を置く → 解く → 状態を戻す) で解く。
     /// 子の伝播 (`sb_prop`) の境界は、今の定義域で衝突を作らずに伝播して求める ([`Self::parsb_prop`])
     #[allow(clippy::too_many_arguments)]
-    fn parsb_batch(&mut self, batch: &[(usize, f64)], sb_iter_limit: u64, sb_prop: bool, saved: &L::State, lps: &mut Vec<L>, nw: usize, spec: &mut std::collections::HashMap<usize, ParsbSpec>) {
+    fn parsb_batch(&mut self, batch: &[(usize, f64)], sb_iter_limit: u64, sb_prop: bool, snap: &L, lps: &mut Vec<L>, nw: usize, spec: &mut std::collections::HashMap<usize, ParsbSpec>) {
         let t0 = Instant::now();
         let lim = self.limits(sb_iter_limit);
         let cutoff = lim.cutoff.to_bits();
@@ -19605,9 +19608,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             spec.insert(j, ParsbSpec { cutoff, jb: (lo.to_bits(), up.to_bits()), orb, extra, res: [None, None] });
         }
         let k = nw.min(items.len()).max(1);
+        // 作業のスレッドごとの元の複製 (解かない)。子ごとにこれをもう一度複製して解く
         while lps.len() < k {
             let tc = Instant::now();
-            lps.push(self.lp.clone());
+            lps.push(snap.clone());
             self.parsb_secs[0] += tc.elapsed().as_secs_f64();
             self.parsb_stats[1] += 1;
         }
@@ -19617,22 +19621,74 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let lpinf = lpinf_check_on();
         let items_ref = &items;
         let inherit = crate::cancel::inherit();
-        let outs: Vec<Vec<(usize, usize, SbSide)>> = std::thread::scope(|sc| {
+        // このスレッドの LP の印 ([`crate::simplex::slope_intercept_dual::tl_flags`]: DSE 重みの引き継ぎ・ポートフォリオの設定) を作業のスレッドに持ち込む。
+        // 次の 1 回だけの印 (2・4) は持ち込まない (逐次では最初に解く子が下ろす。当てはめで下ろす)
+        let tlf = crate::simplex::slope_intercept_dual::tl_flags() & !0x06;
+        // 1 本ずつのスレッドの池 (`p` なら使わず、毎回新しいスレッドで、子の LP の中の並列も切らない)
+        let keep_par = parsb_flags().is_some_and(|f| f.contains('p'));
+        while !keep_par && self.parsb_pools.len() < k {
+            match rayon::ThreadPoolBuilder::new().num_threads(1).thread_name(|i| format!("enomoto-parsb-{i}")).build() {
+                Ok(p) => self.parsb_pools.push(std::sync::Arc::new(p)),
+                Err(_) => break,
+            }
+        }
+        let pools: Vec<Option<std::sync::Arc<rayon::ThreadPool>>> = (0..k).map(|t| self.parsb_pools.get(t).cloned()).collect();
+        // 診断 `ENOMOTO_MIP_PARSB` の `s`: 複製の LP で解くが、別スレッドにせずこのスレッドで順に解く (スレッドごとの状態の影響の切り分け)
+        let on_main = parsb_flags().is_some_and(|f| f.contains('s'));
+        let outs: Vec<Vec<(usize, usize, SbSide)>> = if on_main {
+            let mut out = Vec::new();
+            for (q, &(j, side, ref bounds)) in items.iter().enumerate() {
+                let mut lpc_own = lps[q % k].clone();
+                let lpc = &mut lpc_own;
+                let is_up = side == 1;
+                let tl0 = crate::simplex::slope_intercept_dual::tl_flags();
+                crate::simplex::slope_intercept_dual::set_tl_flags(tlf);
+                for &(c, l, u) in bounds {
+                    lpc.set_col_bounds(c, l, u);
+                }
+                let it0 = lpc.total_iterations();
+                let mut st = lpc.solve(&lim);
+                let iters = lpc.total_iterations() - it0;
+                let mut obj = lpc.objective() + offset;
+                if st == LpStatus::Infeasible && lpinf && lp_farkas_marginal(&*lpc, n) {
+                    st = LpStatus::Error;
+                    obj = f64::NAN;
+                }
+                let x = (st == LpStatus::Optimal).then(|| lpc.col_values());
+                let y = match st {
+                    LpStatus::Infeasible => lpc.farkas_ray(),
+                    LpStatus::Optimal | LpStatus::ObjectiveBound => Some(lpc.row_duals()),
+                    _ => None,
+                };
+                let rc = if st == LpStatus::Optimal && sbrc { sb_child_rc(&*lpc, j, is_up) } else { 0.0 };
+                out.push((j, side, SbSide { st, obj, iters, x, y, rc }));
+                crate::simplex::slope_intercept_dual::set_tl_flags(tl0);
+            }
+            vec![out]
+        } else {
+            std::thread::scope(|sc| {
             let hs: Vec<_> = lps
                 .iter_mut()
                 .take(k)
                 .enumerate()
-                .map(|(t, lpc)| {
+                .map(|(t, base)| {
                     let ih = inherit.clone();
-                    let saved_c = saved.clone();
                     let lim_c = lim.clone();
+                    // 子の LP の中の並列 (FTRAN の 2 本・3 本の同時、x_B の更新の区間分け。`rayon::current_num_threads() > 1` で入る) は、
+                    // 1 本の池の中では入らない (子を何本も同時に解くときのスレッドの取り合いを避ける)
+                    let one = pools[t].clone();
                     sc.spawn(move || {
+                        let run = |base: &mut L| {
                         ih.install();
+                        let tw0 = Instant::now();
                         let mut out = Vec::new();
                         let mut q = t;
                         while q < items_ref.len() {
                             let (j, side, ref bounds) = items_ref[q];
                             let is_up = side == 1;
+                            let mut lpc_own = base.clone();
+                            let lpc = &mut lpc_own;
+                            crate::simplex::slope_intercept_dual::set_tl_flags(tlf);
                             for &(c, l, u) in bounds {
                                 lpc.set_col_bounds(c, l, u);
                             }
@@ -19652,15 +19708,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             };
                             let rc = if st == LpStatus::Optimal && sbrc { sb_child_rc(&*lpc, j, is_up) } else { 0.0 };
                             out.push((j, side, SbSide { st, obj, iters, x, y, rc }));
-                            lpc.restore_state(&saved_c);
                             q += k;
                         }
-                        out
+                        (out, tw0.elapsed().as_secs_f64())
+                        };
+                        match &one {
+                            Some(pool) => pool.install(|| run(base)),
+                            None => run(base),
+                        }
                     })
                 })
                 .collect();
-            hs.into_iter().map(|h| h.join().unwrap()).collect()
-        });
+            let r: Vec<(Vec<(usize, usize, SbSide)>, f64)> = hs.into_iter().map(|h| h.join().unwrap()).collect();
+            self.parsb_secs[2] += r.iter().map(|x| x.1).sum::<f64>();
+            r.into_iter().map(|x| x.0).collect()
+            })
+        };
         for o in outs {
             for (j, side, r) in o {
                 if let Some(sp) = spec.get_mut(&j) {
@@ -19671,6 +19734,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         self.parsb_stats[0] += 1;
         self.parsb_secs[1] += t0.elapsed().as_secs_f64();
+        if env_str!("ENOMOTO_MIP_PARSB_DEBUG").is_some_and(|v| v == "3") {
+            eprintln!("PARSB batch: {:?} clones {}", batch.iter().map(|b| b.0).collect::<Vec<_>>(), lps.len());
+        }
     }
 
     /// 試作 `ENOMOTO_MIP_PARSB`: 強分枝の子の伝播 (逐次の `ENOMOTO_MIP_SB_PROP`・`SB_PROBEBD` と同じ: 分けた境界 → 行 → 目的 → 衝突の
@@ -20090,6 +20156,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let parsb_mode = parsb_flags().filter(|_| self.params.threads > 1 && !self.params.submip && !par_sb && !crate::simplex::mip_lp::nodecut_live() && !crate::simplex::mip_lp::nodecut_stat());
         let mut parsb_spec: std::collections::HashMap<usize, ParsbSpec> = std::collections::HashMap::new();
         let mut parsb_lps: Vec<L> = Vec::new();
+        // このノードの強分枝の前の LP の複製 (`PARSB` では子の LP をどれも、逐次でも並列でも、これの複製から解く。状態の保存と復元
+        // (`save_state`・`restore_state`) は LP の中の全ては戻さず、子の LP の結果が同じ LP で前に解いた子に左右される (解の下の桁・
+        // 子の伝播つきでは反復の数) ので、複製から解いて前の子に左右されないようにする)
+        let mut parsb_snap: Option<L> = None;
         // このノードで強分岐した候補の (擬似費用のスコア (強分岐の前), 強分岐のスコア)。`ENOMOTO_MIP_SB_AGREE` の一致の判定に使う
         let mut sb_eval: Vec<(f64, f64)> = Vec::new();
         let mut ci = 0usize;
@@ -20121,6 +20191,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             // 強分岐
+            if parsb_mode.is_some() && parsb_snap.is_none() && sb_saved.is_none() {
+                parsb_snap = Some(self.lp.clone());
+            }
             let saved = &*sb_saved.get_or_insert_with(|| self.lp.save_state());
             let (lo, up) = (self.dom.lo[j], self.dom.up[j]);
             let mut gains = [0.0f64; 2];
@@ -20244,7 +20317,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                     }
                     let saved = saved.clone();
-                    self.parsb_batch(&batch, sb_iter_limit, sb_probebd || env_str!("ENOMOTO_MIP_SB_PROP").is_some(), &saved, &mut parsb_lps, nw, &mut parsb_spec);
+                    if let Some(snap) = parsb_snap.as_ref() {
+                        self.parsb_batch(&batch, sb_iter_limit, sb_probebd || env_str!("ENOMOTO_MIP_SB_PROP").is_some(), snap, &mut parsb_lps, nw, &mut parsb_spec);
+                    }
                     let _ = flags;
                 }
             }
@@ -20385,6 +20460,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if let Some((r, false)) = parsb_hit {
                     // 逐次の求解の後と同じ処理を、先に解いた結果で行う (LP は解かない。反復の累計は逐次と同じに足す)
                     self.parsb_stats[5] += 1;
+                    // 逐次で解いたなら求解の始めに下ろす、次の 1 回だけの印を下ろす
+                    crate::simplex::slope_intercept_dual::set_tl_flags(crate::simplex::slope_intercept_dual::tl_flags() & !0x06);
                     if !is_up {
                         self.sb_of_count += self.sb_down_orbit(j).len() as u64;
                     }
@@ -20443,6 +20520,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     continue;
                 }
+                // 試作 `ENOMOTO_MIP_PARSB`: 逐次で解くときも、強分枝の前の LP の複製から解く (子の伝播の境界は置き直す)
+                if let Some(snap) = parsb_snap.as_ref() {
+                    let it = self.lp.total_iterations();
+                    self.lp = snap.clone();
+                    self.lp.set_total_iterations(it);
+                    if sb_prop && self.dom.stack_len() > pos && env_str!("ENOMOTO_MIP_SB_PROP_BT_EARLY").is_none() && env_str!("ENOMOTO_MIP_SB_PROP_NO_LP").is_none() {
+                        for (c, _, _) in self.dom.changes_since(pos) {
+                            self.lp.set_col_bounds(c, self.dom.lo[c], self.dom.up[c]);
+                        }
+                    }
+                }
                 if is_up {
                     self.lp.set_col_bounds(j, self.bce(j, v), up);
                 } else {
@@ -20459,12 +20547,56 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let st_ok = st == r.st || (r.st == LpStatus::Error && r.obj.is_nan() && st == LpStatus::Infeasible);
                     let it_ok = self.lp.total_iterations() - it0 == r.iters;
                     let obj_ok = (self.lp.objective() + self.p.offset).to_bits() == r.obj.to_bits() || r.obj.is_nan();
-                    let x_ok = r.x.as_ref().is_none_or(|x| x.iter().zip(self.lp.col_values()).all(|(a, b)| a.to_bits() == b.to_bits()));
+                    // 解は値の一致で見る (0.0 と -0.0 は同じ)。違えば最大の差を出す
+                    let xdiff = r.x.as_ref().map_or(0.0, |x| x.iter().zip(self.lp.col_values()).map(|(a, b)| if a == &b { 0.0 } else { (a - b).abs().max(f64::MIN_POSITIVE) }).fold(0.0, f64::max));
+                    let x_ok = xdiff == 0.0;
+                    // 証明に使う行の重み (実行不能なら Farkas の射線、それ以外は双対) も値で比べる
+                    let ys = match st {
+                        LpStatus::Infeasible => self.lp.farkas_ray(),
+                        LpStatus::Optimal | LpStatus::ObjectiveBound => Some(self.lp.row_duals()),
+                        _ => None,
+                    };
+                    let y_ok = match (&r.y, &ys) {
+                        (Some(a), Some(b)) => a.len() == b.len() && a.iter().zip(b).all(|(p, q)| p == q),
+                        (None, None) => true,
+                        _ => r.obj.is_nan(),
+                    };
+                    let x_ok = x_ok && y_ok;
                     self.parsb_stats[6] += 1;
+                    // 診断 `ENOMOTO_MIP_PARSB_DEBUG=2`: 同じ子を逐次でもう一度 (状態を戻して) 解き、逐次どうしの解の一致を見る
+                    if !x_ok && env_str!("ENOMOTO_MIP_PARSB_DEBUG").is_some_and(|v| v == "2") {
+                        let x1 = self.lp.col_values();
+                        match parsb_snap.as_ref() {
+                            Some(snap) => {
+                                let it = self.lp.total_iterations();
+                                self.lp = snap.clone();
+                                self.lp.set_total_iterations(it);
+                            }
+                            None => self.lp.restore_state(saved),
+                        }
+                        for (c, _, _) in self.dom.changes_since(pos) {
+                            self.lp.set_col_bounds(c, self.dom.lo[c], self.dom.up[c]);
+                        }
+                        if is_up {
+                            self.lp.set_col_bounds(j, self.bce(j, v), up);
+                        } else {
+                            self.lp.set_col_bounds(j, lo, self.bfl(j, v));
+                            for k in self.sb_down_orbit(j) {
+                                self.lp.set_col_bounds(k, 0.0, 0.0);
+                            }
+                        }
+                        let st2 = self.lp.solve(&self.limits_k(sb_iter_limit, 1));
+                        let d2 = x1.iter().zip(self.lp.col_values()).map(|(a, b)| if a == &b { 0.0 } else { (a - b).abs().max(f64::MIN_POSITIVE) }).fold(0.0, f64::max);
+                        let d3 = r.x.as_ref().map_or(0.0, |x| x.iter().zip(self.lp.col_values()).map(|(a, b)| if a == &b { 0.0 } else { (a - b).abs().max(f64::MIN_POSITIVE) }).fold(0.0, f64::max));
+                        eprintln!("PARSB serial twice: col {j} up {is_up} st {st2:?} serial-vs-serial {d2:.3e} parallel-vs-second {d3:.3e}");
+                    }
+                    if st_ok && it_ok && obj_ok && x_ok && env_str!("ENOMOTO_MIP_PARSB_DEBUG").is_some_and(|v| v == "3") {
+                        eprintln!("PARSB match: col {j} up {is_up}");
+                    }
                     if !(st_ok && it_ok && obj_ok && x_ok) {
                         self.parsb_stats[7] += 1;
                         if env_str!("ENOMOTO_MIP_PARSB_DEBUG").is_some() {
-                            eprintln!("PARSB mismatch: col {j} up {is_up} st {st:?}/{:?} it {}/{} obj {:.12e}/{:.12e} x {}", r.st, self.lp.total_iterations() - it0, r.iters, self.lp.objective() + self.p.offset, r.obj, x_ok);
+                            eprintln!("PARSB mismatch: col {j} up {is_up} st {st:?}/{:?} it {}/{} obj {:.12e}/{:.12e} x max diff {xdiff:.3e}", r.st, self.lp.total_iterations() - it0, r.iters, self.lp.objective() + self.p.offset, r.obj);
                         }
                     }
                 }
@@ -30340,8 +30472,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if self.parsb_stats[0] > 0 || self.parsb_stats[2] > 0 {
                 let p = &self.parsb_stats;
                 eprintln!(
-                    "MIP: PARSB tid {}: batches {} solved children {} lp clones {} ({:.3}s) batch wall {:.3}s; lookups {} used {} input differs {} integral {} verify {} mismatch {}",
-                    self.pool_tid, p[0], p[8], p[1], self.parsb_secs[0], self.parsb_secs[1], p[2], p[5], p[3], p[4], p[6], p[7]
+                    "MIP: PARSB tid {}: batches {} solved children {} lp clones {} ({:.3}s) batch wall {:.3}s worker solve {:.3}s; lookups {} used {} input differs {} integral {} verify {} mismatch {}",
+                    self.pool_tid, p[0], p[8], p[1], self.parsb_secs[0], self.parsb_secs[1], self.parsb_secs[2], p[2], p[5], p[3], p[4], p[6], p[7]
                 );
             }
             if self.par_sb_stats[0] > 0 {
