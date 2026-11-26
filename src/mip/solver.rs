@@ -1115,6 +1115,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) subfix_retry: Vec<f64>,
     /// 別スレッドの Feasibility Jump とその停止の印。
     fj_thread: Option<(std::thread::JoinHandle<Option<Vec<f64>>>, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
+    /// 試作 `ENOMOTO_MIP_T1PRIMAL` ([`super::t1primal`]): 1 スレッドの解探しの補助のスレッドと、その手間の勘定
+    pub(super) t1p: Option<Box<super::t1primal::T1Primal>>,
     /// 試作 `ENOMOTO_MIP_LMBOOST` (COMP07): Local-MIP の解で暫定解が良くなった時刻 (この求解の経過秒)
     lmip_imps: Vec<f64>,
     /// FJ のスレッドの Local-MIP (`ENOMOTO_MIP_FJ_LOCALMIP`・`ENOMOTO_MIP_FJ_LMIP_MIX`) が良くなった解を入れる箱
@@ -6150,6 +6152,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         last_submip_nodes: 0,
         subfix_retry: Vec::new(),
         fj_thread: None,
+        t1p: None,
         lmip_imps: Vec::new(),
         lmip_mailbox: None,
         fj_gate: None,
@@ -12340,6 +12343,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if t1mix_on() && mip_threads() == 1 && !self.params.submip && self.snap.is_none() && self.params.restarts == 0 && !proof_only() && self.fj_thread.is_none() && !self.root_gap_closed() {
             self.t1_fj_lmip_mix();
         }
+        // 試作 `ENOMOTO_MIP_T1PRIMAL` ([`super::t1primal`]): 1 スレッドで FJ + Local-MIP の組を補助のスレッドに持たせ、時間の取り分を
+        // 当たった率・改善の止まった時間の割合・ギャップのシグモイドで決めて、根の終わりと木のノードで少しずつ回す
+        if super::t1primal::enabled() && mip_threads() == 1 && !self.params.submip && self.snap.is_none() && self.params.restarts == 0 && !proof_only() && self.fj_thread.is_none() && !self.root_gap_closed() {
+            self.t1primal_start();
+            self.t1primal_tick(true);
+        }
         // 試作 `ENOMOTO_MIP_LPBOX` (analysis/lpbox_20261122): 根のカットのループの後の LP 解のまわりに整数列を狭めて伝播した問題で
         // FJ・Local-MIP を回す ([`Self::lpbox_heur`])。FJ のスレッドはまだ止めない
         if super::lpbox::enabled() && !self.params.submip && self.snap.is_none() && self.params.restarts == 0 && !proof_only() && !self.root_gap_closed() && !self.fractional(&self.lp.col_values()).is_empty() {
@@ -16359,6 +16368,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         if self.params.verbose && env_str!("ENOMOTO_MIP_DEBUG_NOINC").is_some() && arm != NOINC_TREE_ARM {
                             eprintln!("MIP:   no-incumbent heuristic arm {arm}: close {close:.3} found {found} ({secs:.2}s, node {}, frac {time_frac:.2}, stall {})", self.nodes, self.noinc_stall);
                         }
+                    }
+                    // 試作 `ENOMOTO_MIP_T1PRIMAL` ([`super::t1primal`]): 貯えがたまっていれば FJ + Local-MIP の補助のスレッドを回す
+                    if self.t1p.is_some() && heur_ok && node.depth > 0 && plunge_depth == 0 {
+                        self.t1primal_tick(false);
                     }
                     xp("m_heur");
                     // ダイビング (SCIP の fracdiving / veclendiving: 深さ 10 ごと、ずらし 3 / 7)
