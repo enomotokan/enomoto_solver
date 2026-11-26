@@ -4842,16 +4842,16 @@ impl Drop for LmboostBg {
 /// - `t`: `try_lp_solution` の整数を固定した LP を、元の費用で解き、反復を累計に入れない ([`Solver::with_fixed_int_lp`]、
 ///   `resolve_continuous` と同じ)
 ///
-/// 第 2 弾 (既定では入らない。`1` にも含めない。文字で付ける。analysis/unify_20261126 の 5 節):
+/// 第 2 弾 (analysis/unify_20261126 の 5 節。2026-11-26 に既定 (`1` に含める) にした):
 /// - `z`: 目的値の改善の判定 ([`better_obj`]) の許容誤差の尺度を比べる相手の値で取り、相手が +∞ のときは先に分ける
 /// - `p`: 1 本の行の伝播 ([`Domain::tighten_le_row`]・`tighten_le_row_rest`) で無限の項を積で見る。`tc_global_pool_prop` の自前の
 ///   締め方を `tighten_le_row` にする
 pub(crate) fn unify_fix(c: char) -> bool {
-    // `1` は第 1 弾 (`frsmlt`) の全部。第 2 弾 (`z`・`p`) は文字で付けたときだけ
-    env_def!("ENOMOTO_MIP_UNIFY_FIX", "1").is_some_and(|v| (v.starts_with('1') && "frsmlt".contains(c)) || v.contains(c))
+    // `1` は第 1 弾 (`frsmlt`) と第 2 弾 (`zp`) の全部。文字だけを付ければその文字だけ
+    env_def!("ENOMOTO_MIP_UNIFY_FIX", "1").is_some_and(|v| (v.starts_with('1') && "frsmltzp".contains(c)) || v.contains(c))
 }
 
-/// 目的値 `z` が `b` より良いか (最小化、相対の許容誤差 1e-9)。`ENOMOTO_MIP_UNIFY_FIX` の `z` (既定では使わない) なら、許容誤差の尺度を
+/// 目的値 `z` が `b` より良いか (最小化、相対の許容誤差 1e-9)。`ENOMOTO_MIP_UNIFY_FIX` の `z` (既定) なら、許容誤差の尺度を
 /// いつも `b` で取り、`b` = +∞ (暫定解なし) は先に分けて `z < +∞` とする。切っていれば以前の形: 尺度は呼び手ごとの `scale` (`z` か `b`)、
 /// `b` = +∞ なら `b - 1e-9 ∞` が NaN になって偽 (呼び手によっては前で `b` の有限を確かめている)。analysis/unify_20261126 の 1 節の 14
 #[inline]

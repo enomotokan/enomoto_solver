@@ -305,3 +305,12 @@
   - physiciansched6-2 は 0.74 倍。既定の 4 スレッド種 2 の 56.3 秒が、直しで 20.7 秒になった。
 - 見立て: 中立 (1・4 スレッドとも目安は候補)。
 - 集計のしかた: `UNIFY_SET=2 python summ.py 'res2_s*.jsonl'`。環境変数を付けないと、設定 `uf2` を拾わず「結果なし」になる (GcYE の指摘)。
+
+### 5.3 第 2 弾を既定にした (2026-11-26、利用者の承認、親の指示)
+
+- `unify_fix` の `1` に `z`・`p` を含めた (`frsmltzp`)。`=frsmlt` で第 1 弾だけになり、`=0`・`off` で以前の形に戻る。
+- 確かめ (既定のビルド):
+  - check_default 全部一致 (基準 ref_default.json は変えない)。
+  - cargo test 425 通過。取り込んだ alns の試験は、その担当の直しで通るようになっていた。
+  - fuzz 7 本と fuzz_bigact 2 本は誤答 0 (`fuzz_def2.out`)。
+- docs/improvement_history.md に記録した。
