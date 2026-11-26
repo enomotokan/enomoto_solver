@@ -4274,8 +4274,7 @@ pub(super) fn suba_rate(c: char) -> bool {
 ///   既定の RENS (LP で整数値の列を全部固定) も 1 回回す ([`Solver::rens`])
 ///   - `o`: `r` で足す RENS は成果連動の打ち切り (`ENOMOTO_MIP_NO_SUBMIP_OUTCOME_STOP`) を使わない (neos-1171448 種 4 では 50 ノードで止まり −239 だった)
 pub(super) fn heur4_on(c: char) -> bool {
-    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_str!("ENOMOTO_MIP_HEUR4").map_or(String::new(), |v| v.to_string())).contains(c)
+    env_str!("ENOMOTO_MIP_HEUR4").is_some_and(|v| v.contains(c))
 }
 
 thread_local! {
