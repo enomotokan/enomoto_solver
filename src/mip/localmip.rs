@@ -161,18 +161,7 @@ impl St<'_> {
 
     fn set_viol(&mut self, r: usize) {
         let v = self.viol_at(r, self.act[r]) > 0.0;
-        if v && self.vpos[r] == usize::MAX {
-            self.vpos[r] = self.vset.len();
-            self.vset.push(r);
-        } else if !v && self.vpos[r] != usize::MAX {
-            let k = self.vpos[r];
-            let last = *self.vset.last().unwrap();
-            self.vset.swap_remove(k);
-            if last != r {
-                self.vpos[last] = k;
-            }
-            self.vpos[r] = usize::MAX;
-        }
+        super::idxset::set_member(&mut self.vset, &mut self.vpos, r, v);
     }
 
     fn reset(&mut self) {
@@ -782,7 +771,7 @@ impl<'a> LocalMip<'a> {
                     done = true;
                     break;
                 }
-                if !best_obj.is_finite() || z < best_obj - 1e-9 * best_obj.abs().max(1.0) {
+                if !best_obj.is_finite() || super::solver::better_obj(z, best_obj, best_obj) {
                     best_obj = z;
                     *ot_since = 0;
                     res.best = Some(s.x.clone());

@@ -674,8 +674,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     par_sb_stats: [u64; 2],
     /// 試作 `ENOMOTO_MIP_PARSB` の数え: [組, LP の複製, 先に解いた子を引いた, 入力が違った, 整数の解で逐次に, 使った, 確かめた, 確かめの不一致, 先に解いた子]
     parsb_stats: [u64; 9],
-    /// 試作 `ENOMOTO_MIP_PARSB` の秒: [LP の複製, 組の壁時計]
-    parsb_secs: [f64; 2],
+    /// 試作 `ENOMOTO_MIP_PARSB` の秒: [LP の複製, 組の壁時計, 作業のスレッドが子の LP を解いた秒の和]
+    parsb_secs: [f64; 3],
+    /// 試作 `ENOMOTO_MIP_PARSB`: 子の LP を解く 1 本ずつのスレッドの池 (求解の間使い回し、スレッドごとの作業の領域を使い回す)
+    parsb_pools: Vec<std::sync::Arc<rayon::ThreadPool>>,
     pub(super) deadline: Option<Instant>,
     pub(super) nodes: u64,
     /// 強分岐に使った LP 反復数。
@@ -2385,8 +2387,7 @@ fn flat_changes(n: &OpenNode) -> Vec<BoundChange> {
 ///
 /// n3div36 (4 スレッド・300 秒) は既定で子の変更の並びが平均 562 本 (深さ 90)、共有の待ち行列の変更が 254 MB、最大 RSS 3453 MB、`TC=0` は 1307 MB
 fn g5inh(c: char) -> bool {
-    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_str!("ENOMOTO_MIP_G5INH").map_or(String::new(), |v| v.to_string())).contains(c)
+    env_str!("ENOMOTO_MIP_G5INH").is_some_and(|v| v.contains(c))
 }
 
 /// `ENOMOTO_MIP_INHPOOL` (既定で使う。`=0` で従来の展開。analysis/biglp_20261121/ の 8 節): 共有の待ち行列へ出すノード ([`SnapNode`]) に
@@ -3032,16 +3033,14 @@ fn mem2(c: char) -> bool {
 /// `l`: カットの非零を 100 + 0.15 × 列 までに短くする (HiGHS の `postprocessCut`、[`super::separation`] の `finish_cut`)。
 /// `o`: 木のスレッドに渡す対称性の前の問題 (`orig`) の写しから含意を除く。`c`: 密なカットをカットのプールの伝播に入れない (HiGHS と同じ規則)。
 pub(super) fn gap4(c: char) -> bool {
-    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| std::env::var("ENOMOTO_MIP_GAP4").map(|v| if v == "0" || v == "off" { String::new() } else { v }).unwrap_or_else(|_| "rocn".to_string())).contains(c)
+    env_def!("ENOMOTO_MIP_GAP4", "rocn").is_some_and(|v| v.contains(c))
 }
 
 /// 試作 `ENOMOTO_MIP_G5POOL=<文字>` (既定では使わない。analysis/vsscip_slow_20261118/g5/README.md): カットのプールの持ち物を抑える。
 /// - `d`: 上限を見ずにプールに入れる経路 (`pool_nocap`: 双対証明の CMIR (`ENOMOTO_MIP_PROOF_CMIR_POOL` の既定 `nocap`) など) でも、密なカットは
 ///   非零の上限を見る。n3div36 (4 スレッド・600 秒) は双対証明の CMIR が 1996 本入り、主のプールが上限 (問題の非零の 20 倍) を越えて 1621 万非零になっていた
 pub(super) fn g5pool(c: char) -> bool {
-    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_str!("ENOMOTO_MIP_G5POOL").map_or(String::new(), |v| v.to_string())).contains(c)
+    env_str!("ENOMOTO_MIP_G5POOL").is_some_and(|v| v.contains(c))
 }
 
 /// 診断用 `ENOMOTO_MIP_GAP4_RSS=<秒>` (既定では出さない。analysis/gap4_rootstuck_mem_20261109.md): その秒おきに RSS と生きている
@@ -3417,8 +3416,7 @@ pub(super) fn proofcost(c: char) -> bool {
 /// (`l` (リテラルの衝突の伝播で、境界の変更と同じ向きのリテラルを持つ衝突だけを調べる) も試して取り下げた: リテラルの衝突の時間は減らず
 /// (noswot 1 スレッド 2.7 → 3.7 秒)、衝突の年齢の数え方が変わって道筋が変わるだけだった。analysis/proofprop_20261123 の 4 節)
 pub(crate) fn proofprop(c: char) -> bool {
-    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_str!("ENOMOTO_MIP_PROOFPROP").map_or(String::new(), |v| v.to_string())).contains(c)
+    env_str!("ENOMOTO_MIP_PROOFPROP").is_some_and(|v| v.contains(c))
 }
 
 fn prof_tree_par() -> bool {
@@ -3959,8 +3957,7 @@ pub(super) fn tree_share_cuts() -> bool {
 /// - `r`: 従が写しの根のカットプールを入れる間は取り込み中にして、学習の記録に流し直さない (根のプールが大きいと輪から
 ///   証明・衝突・カットを押し出す)
 pub(crate) fn par4(c: char) -> bool {
-    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_def!("ENOMOTO_MIP_PAR4", "fmr").map_or(String::new(), |v| v.to_string())).contains(c)
+    env_def!("ENOMOTO_MIP_PAR4", "fmr").is_some_and(|v| v.contains(c))
 }
 
 /// 学習の記録に加える (古いものから捨てて `ENOMOTO_T_MIP_TREE_LEARNED_MAX` 件まで残す)。
@@ -4127,8 +4124,7 @@ pub(super) fn suba_cut() -> bool {
 ///   `ENOMOTO_T_MIP_SUBA_NOIMP` (既定 100) ノードで止める (cod105 の根の RINS は 1 ノード 0.7 秒で、`SUBA_CUT` だと 238 秒走った)
 /// - `o`: 外側の根のサブ MIP の成果連動の打ち切りを使わない (ノード上限・時間・停滞だけ。HiGHS の `solveSubMip` に成果連動はない)
 pub(super) fn suba_stop(c: char) -> bool {
-    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_str!("ENOMOTO_MIP_SUBA_STOP").map_or(String::new(), |v| v.to_string())).contains(c)
+    env_str!("ENOMOTO_MIP_SUBA_STOP").is_some_and(|v| v.contains(c))
 }
 
 /// `ENOMOTO_MIP_SUBCAP=<文字>` (試作、既定では使わない。analysis/submip_cap_20261106.md): 1 ノードが重い外側の根のサブ MIP
@@ -4155,8 +4151,7 @@ pub(super) fn suba_stop(c: char) -> bool {
 ///   良くならなければやめる)。HiGHS は再スタートの後の根でもう一度 RENS を回し、良くなった暫定解からまたサブ MIP を回す
 ///   (neos-4722843-widden: 26340 → 25109 → 25009 (最適) を 172 秒までに根で)。ENOMOTO の根の RINS は成果連動の打ち切りで 54 ノードで止まり、木に入る
 pub(crate) fn incumb_on(c: char) -> bool {
-    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_str!("ENOMOTO_MIP_INCUMB").map_or(String::new(), |v| v.to_string())).contains(c)
+    env_str!("ENOMOTO_MIP_INCUMB").is_some_and(|v| v.contains(c))
 }
 
 /// 試作 `ENOMOTO_MIP_OBJDIVE` (analysis/objdive_20261121、既定では使わない): 木のダイビングの種類の巡回に目的を外したダイビング
@@ -4174,8 +4169,7 @@ pub(crate) fn objdive_on() -> bool {
 /// - `e`: 手間あたりの実績で配る: 種類ごとの割合を `ENOMOTO_T_MIP_DIVEQUOTA_FRAC` × (種類の解の数 + 1) / (種類の LP 反復 / ノードの LP 反復 + 1)
 ///   で決める (`s` の呼び出し回数の代わりに使った手間で割る。見つけるほど増え、使って見つけないほど減るが 0 にはならない)
 pub(crate) fn divequota(c: char) -> bool {
-    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_str!("ENOMOTO_MIP_DIVEQUOTA").map_or(String::new(), |v| v.to_string())).contains(c)
+    env_str!("ENOMOTO_MIP_DIVEQUOTA").is_some_and(|v| v.contains(c))
 }
 
 /// 試作 `ENOMOTO_MIP_HEUR1T=<文字の並び>` (既定では使わない、analysis/heur1t_20261123): 1 スレッドの外側の根のサブ MIP の扱いを 4 スレッドに揃える。
@@ -4192,8 +4186,7 @@ pub(crate) fn divequota(c: char) -> bool {
 /// - `d`: 外側が 1 スレッドのとき、外側の根で前に解いたサブ MIP と同じ問題 (列の境界・行の数・打ち切り値が同じ) のサブ MIP は解かない
 ///   (10teams では暫定解のない根の被約費用のサブ MIP と LP face が同じ固定になり、同じ計算を 2 回する)。
 pub(crate) fn heur1t(c: char) -> bool {
-    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_str!("ENOMOTO_MIP_HEUR1T").map_or(String::new(), |v| v.to_string())).contains(c)
+    env_str!("ENOMOTO_MIP_HEUR1T").is_some_and(|v| v.contains(c))
 }
 
 /// 試作 `ENOMOTO_MIP_HEUR_ADAPT=1` (既定では使わない。analysis/heuradapt_20261124/README.md): 1 スレッドの解探しの試作
@@ -4226,8 +4219,7 @@ pub(crate) fn heur_adapt() -> bool {
 /// - `m`: FP の第 3 段 (`fp_stage3`) を、外側の根から出したサブ MIP の中では回さない (analysis/comboharm_20261124/neos-1582420.md)
 /// - `k`: f_t ([`Solver::adapt_tree_f`]) の経過・残りを壁時計でなく手間の秒で数える (analysis/comboharm_20261124/README.md 10 節)
 pub(crate) fn heur_adapt_flag(c: char) -> bool {
-    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    heur_adapt() && V.get_or_init(|| env_str!("ENOMOTO_MIP_HEUR_ADAPT").map_or(String::new(), |v| v.to_string())).contains(c)
+    heur_adapt() && env_str!("ENOMOTO_MIP_HEUR_ADAPT").is_some_and(|v| v.contains(c))
 }
 
 fn adapt_sigmoid(z: f64) -> f64 {
@@ -4235,8 +4227,7 @@ fn adapt_sigmoid(z: f64) -> f64 {
 }
 
 pub(crate) fn subcap(c: char) -> bool {
-    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_str!("ENOMOTO_MIP_SUBCAP").map_or(String::new(), |v| v.to_string())).contains(c)
+    env_str!("ENOMOTO_MIP_SUBCAP").is_some_and(|v| v.contains(c))
 }
 
 /// 改良 (11-08) の文字 ([`subcap`]):
@@ -4691,10 +4682,26 @@ impl Drop for LmboostBg {
 /// - `l`: LMBOOST の Local-MIP に、元の問題がないとき問題の境界ではなく大域の境界 (根で締めたもの) を渡す
 /// - `t`: `try_lp_solution` の整数を固定した LP を、元の費用で解き、反復を累計に入れない ([`Solver::with_fixed_int_lp`]、
 ///   `resolve_continuous` と同じ)
+///
+/// 第 2 弾 (既定では入らない。`1` にも含めない。文字で付ける。analysis/unify_20261126 の 5 節):
+/// - `z`: 目的値の改善の判定 ([`better_obj`]) の許容誤差の尺度を比べる相手の値で取り、相手が +∞ のときは先に分ける
+/// - `p`: 1 本の行の伝播 ([`Domain::tighten_le_row`]・`tighten_le_row_rest`) で無限の項を積で見る。`tc_global_pool_prop` の自前の
+///   締め方を `tighten_le_row` にする
 pub(crate) fn unify_fix(c: char) -> bool {
-    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    let v = V.get_or_init(|| env_def!("ENOMOTO_MIP_UNIFY_FIX", "1").map_or(String::new(), |v| v.to_string()));
-    v == "1" || v.contains(c)
+    // `1` は第 1 弾 (`frsmlt`) の全部。第 2 弾 (`z`・`p`) は文字で付けたときだけ
+    env_def!("ENOMOTO_MIP_UNIFY_FIX", "1").is_some_and(|v| (v.starts_with('1') && "frsmlt".contains(c)) || v.contains(c))
+}
+
+/// 目的値 `z` が `b` より良いか (最小化、相対の許容誤差 1e-9)。`ENOMOTO_MIP_UNIFY_FIX` の `z` (既定では使わない) なら、許容誤差の尺度を
+/// いつも `b` で取り、`b` = +∞ (暫定解なし) は先に分けて `z < +∞` とする。切っていれば以前の形: 尺度は呼び手ごとの `scale` (`z` か `b`)、
+/// `b` = +∞ なら `b - 1e-9 ∞` が NaN になって偽 (呼び手によっては前で `b` の有限を確かめている)。analysis/unify_20261126 の 1 節の 14
+#[inline]
+pub(crate) fn better_obj(z: f64, b: f64, scale: f64) -> bool {
+    if unify_fix('z') {
+        if b == f64::INFINITY { z < f64::INFINITY } else { z < b - 1e-9 * b.abs().max(1.0) }
+    } else {
+        z < b - 1e-9 * scale.abs().max(1.0)
+    }
 }
 
 /// 試作 `ENOMOTO_MIP_LMBOOST` (COMP07、既定では使わない): [`Solver::lmip_boost`]。
@@ -5740,7 +5747,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         accepting_start: false,
         par_sb_stats: [0; 2],
         parsb_stats: [0; 9],
-        parsb_secs: [0.0; 2],
+        parsb_secs: [0.0; 3],
+        parsb_pools: Vec::new(),
         deadline,
         nodes: 0,
         sb_iters: 0,
@@ -6492,8 +6500,7 @@ pub(super) fn pool_close_on() -> bool {
 /// `j`: 研磨の LP (温めた単体法、`i` なら LP の中の研磨) に反復の上限 `G5SEQ_C` × (行 + 列) を付け、上限に当たれば基底を捨てて
 /// 基底のない求解の既存の入口 (空いたスレッドがあれば同時実行、なければ二段解法 → 内点法 + クロスオーバー) で解き直す
 pub(super) fn rootpar_ph(c: char) -> bool {
-    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_str!("ENOMOTO_MIP_ROOTPAR_PH").map_or(String::new(), |v| v.to_string())).contains(c)
+    env_str!("ENOMOTO_MIP_ROOTPAR_PH").is_some_and(|v| v.contains(c))
 }
 
 /// プールから戻すラウンドの伸びを測るか (`POOL_CLOSE` か、`NODEROWS_ADAPT` の `p`)
@@ -8161,7 +8168,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if sym_orig_cut_on() {
                     let z = orig.objective(&x);
                     let cur = self.prune_limit();
-                    if z < cur - 1e-9 * z.abs().max(1.0) && self.orig_best.as_ref().is_none_or(|(b, _)| z < *b) {
+                    if better_obj(z, cur, z) && self.orig_best.as_ref().is_none_or(|(b, _)| z < *b) {
                         if self.params.verbose {
                             eprintln!("MIP: a solution feasible only without the symmetry rows kept as a cutoff value {z:.10e} [{}]", self.heur_label);
                         }
@@ -8213,7 +8220,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if !orig_only {
             self.pool_add(z, &x);
         }
-        let better = self.incumbent.as_ref().is_none_or(|(inc, _)| z < *inc - 1e-9 * inc.abs().max(1.0));
+        let better = self.incumbent.as_ref().is_none_or(|(inc, _)| better_obj(z, *inc, *inc));
         if better {
             // oneopt (SCIP の heur_oneopt): 整数列を 1 つずつ目的値の良くなる向きに、行を破らない範囲で動かす
             let mut x = x;
@@ -8412,7 +8419,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 改良 (11-08) の `J`・`T`・`B`: 根のサブ MIP が外側の上限より良い解を見つけた時刻を記す
             if let Some(c) = self.root_submip.as_ref() {
                 let lim = self.params.cutoff.min(c.best());
-                if !lim.is_finite() || z < lim - 1e-9 * lim.abs().max(1.0) {
+                if !lim.is_finite() || better_obj(z, lim, lim) {
                     c.note_found();
                 }
             }
@@ -8502,7 +8509,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let z0 = *z;
         let (st, iters, r) = self.with_fixed_int_lp(x, false, cost, |s, j| (s.p.col_lo[j], s.p.col_up[j]), deadline, |s, y| {
             let zy = s.p.objective(&y);
-            let better = zy < z0 - 1e-9 * z0.abs().max(1.0) && s.p.is_feasible(&y, FEASTOL);
+            let better = better_obj(zy, z0, z0) && s.p.is_feasible(&y, FEASTOL);
             if better && s.params.verbose {
                 eprintln!("MIP: fixed-integer LP improved incumbent {z0:.10e} -> {zy:.10e}");
             }
@@ -13629,7 +13636,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.heur_label = "";
                 self.lns_secs += ts.elapsed().as_secs_f64();
                 let z1 = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
-                if z1 < z0 - 1e-9 * z0.abs().max(1.0) {
+                if better_obj(z1, z0, z0) {
                     fails = 0;
                 } else {
                     fails += 1;
@@ -16933,7 +16940,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             // 共有の最良値を公表した解が主に届いていない (受信箱で拒まれた、など)。木はその値から作った打ち切り値で刈っているので、
             // 主の暫定解を最適とは言えない (以前は警告だけ出して最適と報告していた。analysis/h80x6320d_warning_20261021.md)
-            if sb < z - 1e-9 * z.abs().max(1.0) {
+            if better_obj(sb, z, z) {
                 eprintln!("MIP: WARNING: the shared best value {sb:.10e} is better than the main thread's incumbent {z:.10e} at the end of the tree search; not reporting optimality");
                 if !self.unresolved && env_str!("ENOMOTO_MIP_TREE_NO_END_CHECK").is_none() {
                     return self.finish(MipStatus::NotSolved, wlb.min(lim));
@@ -17667,7 +17674,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return;
         }
         let now = Instant::now();
-        if z < self.robust_ts_best.0 - 1e-9 * z.abs().max(1.0) {
+        if better_obj(z, self.robust_ts_best.0, z) {
             self.robust_ts_best = (z, now);
             return;
         }
@@ -17880,7 +17887,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             Some((t, best, cool)) => {
                 env_str!("ENOMOTO_MIP_HEUR_ROLE_REENTER").is_some()
                     && self.nodes % 64 == 0
-                    && (self.shared.as_ref().is_some_and(|s| s.best() < best - 1e-9 * best.abs().max(1.0)) || t.elapsed().as_secs_f64() >= cool)
+                    && (self.shared.as_ref().is_some_and(|s| better_obj(s.best(), best, best)) || t.elapsed().as_secs_f64() >= cool)
             }
         }
     }
@@ -18057,7 +18064,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn heur_role_import(&mut self, pool: &WorkPool) {
         let got = pool.best_x.lock().unwrap().clone();
         if let Some((z, x)) = got {
-            if self.incumbent.as_ref().is_none_or(|(zi, _)| z < *zi - 1e-9 * zi.abs().max(1.0)) {
+            if self.incumbent.as_ref().is_none_or(|(zi, _)| better_obj(z, *zi, *zi)) {
                 self.pool_add(z, &x);
                 self.incumbent = Some((z, (*x).clone()));
                 self.heur_role_stats[2] += 1;
@@ -18113,7 +18120,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let cand = lm.res.best.clone();
         if let Some(x) = cand {
             let z = p.objective(&x);
-            if self.incumbent.as_ref().is_none_or(|(zi, _)| z < *zi - 1e-9 * zi.abs().max(1.0)) {
+            if self.incumbent.as_ref().is_none_or(|(zi, _)| better_obj(z, *zi, *zi)) {
                 self.heur_label = "Local-MIP (heuristic role)";
                 self.try_incumbent(x);
                 self.heur_label = "";
@@ -18148,11 +18155,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         lm.run(t_end, None, &|_| {});
         let mut improved = false;
         if let Some(x) = lm.res.best.clone() {
-            if p.objective(&x) < z0 - 1e-9 * z0.abs().max(1.0) {
+            if better_obj(p.objective(&x), z0, z0) {
                 self.heur_label = "RESTCHAIN W (Local-MIP)";
                 self.try_incumbent(x);
                 self.heur_label = "";
-                improved = self.incumbent.as_ref().is_some_and(|(zi, _)| *zi < z0 - 1e-9 * z0.abs().max(1.0));
+                improved = self.incumbent.as_ref().is_some_and(|(zi, _)| better_obj(*zi, z0, z0));
             }
         }
         if improved {
@@ -18190,9 +18197,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         lm.run(t_end, None, &|_| {});
         let Some(x) = lm.res.best.clone() else { return false };
         let z = p.objective(&x);
-        if z < z0 - 1e-9 * z0.abs().max(1.0) {
+        if better_obj(z, z0, z0) {
             self.try_incumbent(x);
-            return self.incumbent.as_ref().is_some_and(|(zi, _)| *zi < z0 - 1e-9 * z0.abs().max(1.0));
+            return self.incumbent.as_ref().is_some_and(|(zi, _)| better_obj(*zi, z0, z0));
         }
         false
     }
@@ -19538,7 +19545,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 保存した状態 `saved` の LP の複製 (`lps`、このノードの間は使い回す) で、逐次と同じ手順 (境界を置く → 解く → 状態を戻す) で解く。
     /// 子の伝播 (`sb_prop`) の境界は、今の定義域で衝突を作らずに伝播して求める ([`Self::parsb_prop`])
     #[allow(clippy::too_many_arguments)]
-    fn parsb_batch(&mut self, batch: &[(usize, f64)], sb_iter_limit: u64, sb_prop: bool, saved: &L::State, lps: &mut Vec<L>, nw: usize, spec: &mut std::collections::HashMap<usize, ParsbSpec>) {
+    fn parsb_batch(&mut self, batch: &[(usize, f64)], sb_iter_limit: u64, sb_prop: bool, snap: &L, lps: &mut Vec<L>, nw: usize, spec: &mut std::collections::HashMap<usize, ParsbSpec>) {
         let t0 = Instant::now();
         let lim = self.limits(sb_iter_limit);
         let cutoff = lim.cutoff.to_bits();
@@ -19572,9 +19579,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             spec.insert(j, ParsbSpec { cutoff, jb: (lo.to_bits(), up.to_bits()), orb, extra, res: [None, None] });
         }
         let k = nw.min(items.len()).max(1);
+        // 作業のスレッドごとの元の複製 (解かない)。子ごとにこれをもう一度複製して解く
         while lps.len() < k {
             let tc = Instant::now();
-            lps.push(self.lp.clone());
+            lps.push(snap.clone());
             self.parsb_secs[0] += tc.elapsed().as_secs_f64();
             self.parsb_stats[1] += 1;
         }
@@ -19584,22 +19592,74 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let lpinf = lpinf_check_on();
         let items_ref = &items;
         let inherit = crate::cancel::inherit();
-        let outs: Vec<Vec<(usize, usize, SbSide)>> = std::thread::scope(|sc| {
+        // このスレッドの LP の印 ([`crate::simplex::slope_intercept_dual::tl_flags`]: DSE 重みの引き継ぎ・ポートフォリオの設定) を作業のスレッドに持ち込む。
+        // 次の 1 回だけの印 (2・4) は持ち込まない (逐次では最初に解く子が下ろす。当てはめで下ろす)
+        let tlf = crate::simplex::slope_intercept_dual::tl_flags() & !0x06;
+        // 1 本ずつのスレッドの池 (`p` なら使わず、毎回新しいスレッドで、子の LP の中の並列も切らない)
+        let keep_par = parsb_flags().is_some_and(|f| f.contains('p'));
+        while !keep_par && self.parsb_pools.len() < k {
+            match rayon::ThreadPoolBuilder::new().num_threads(1).thread_name(|i| format!("enomoto-parsb-{i}")).build() {
+                Ok(p) => self.parsb_pools.push(std::sync::Arc::new(p)),
+                Err(_) => break,
+            }
+        }
+        let pools: Vec<Option<std::sync::Arc<rayon::ThreadPool>>> = (0..k).map(|t| self.parsb_pools.get(t).cloned()).collect();
+        // 診断 `ENOMOTO_MIP_PARSB` の `s`: 複製の LP で解くが、別スレッドにせずこのスレッドで順に解く (スレッドごとの状態の影響の切り分け)
+        let on_main = parsb_flags().is_some_and(|f| f.contains('s'));
+        let outs: Vec<Vec<(usize, usize, SbSide)>> = if on_main {
+            let mut out = Vec::new();
+            for (q, &(j, side, ref bounds)) in items.iter().enumerate() {
+                let mut lpc_own = lps[q % k].clone();
+                let lpc = &mut lpc_own;
+                let is_up = side == 1;
+                let tl0 = crate::simplex::slope_intercept_dual::tl_flags();
+                crate::simplex::slope_intercept_dual::set_tl_flags(tlf);
+                for &(c, l, u) in bounds {
+                    lpc.set_col_bounds(c, l, u);
+                }
+                let it0 = lpc.total_iterations();
+                let mut st = lpc.solve(&lim);
+                let iters = lpc.total_iterations() - it0;
+                let mut obj = lpc.objective() + offset;
+                if st == LpStatus::Infeasible && lpinf && lp_farkas_marginal(&*lpc, n) {
+                    st = LpStatus::Error;
+                    obj = f64::NAN;
+                }
+                let x = (st == LpStatus::Optimal).then(|| lpc.col_values());
+                let y = match st {
+                    LpStatus::Infeasible => lpc.farkas_ray(),
+                    LpStatus::Optimal | LpStatus::ObjectiveBound => Some(lpc.row_duals()),
+                    _ => None,
+                };
+                let rc = if st == LpStatus::Optimal && sbrc { sb_child_rc(&*lpc, j, is_up) } else { 0.0 };
+                out.push((j, side, SbSide { st, obj, iters, x, y, rc }));
+                crate::simplex::slope_intercept_dual::set_tl_flags(tl0);
+            }
+            vec![out]
+        } else {
+            std::thread::scope(|sc| {
             let hs: Vec<_> = lps
                 .iter_mut()
                 .take(k)
                 .enumerate()
-                .map(|(t, lpc)| {
+                .map(|(t, base)| {
                     let ih = inherit.clone();
-                    let saved_c = saved.clone();
                     let lim_c = lim.clone();
+                    // 子の LP の中の並列 (FTRAN の 2 本・3 本の同時、x_B の更新の区間分け。`rayon::current_num_threads() > 1` で入る) は、
+                    // 1 本の池の中では入らない (子を何本も同時に解くときのスレッドの取り合いを避ける)
+                    let one = pools[t].clone();
                     sc.spawn(move || {
+                        let run = |base: &mut L| {
                         ih.install();
+                        let tw0 = Instant::now();
                         let mut out = Vec::new();
                         let mut q = t;
                         while q < items_ref.len() {
                             let (j, side, ref bounds) = items_ref[q];
                             let is_up = side == 1;
+                            let mut lpc_own = base.clone();
+                            let lpc = &mut lpc_own;
+                            crate::simplex::slope_intercept_dual::set_tl_flags(tlf);
                             for &(c, l, u) in bounds {
                                 lpc.set_col_bounds(c, l, u);
                             }
@@ -19619,15 +19679,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             };
                             let rc = if st == LpStatus::Optimal && sbrc { sb_child_rc(&*lpc, j, is_up) } else { 0.0 };
                             out.push((j, side, SbSide { st, obj, iters, x, y, rc }));
-                            lpc.restore_state(&saved_c);
                             q += k;
                         }
-                        out
+                        (out, tw0.elapsed().as_secs_f64())
+                        };
+                        match &one {
+                            Some(pool) => pool.install(|| run(base)),
+                            None => run(base),
+                        }
                     })
                 })
                 .collect();
-            hs.into_iter().map(|h| h.join().unwrap()).collect()
-        });
+            let r: Vec<(Vec<(usize, usize, SbSide)>, f64)> = hs.into_iter().map(|h| h.join().unwrap()).collect();
+            self.parsb_secs[2] += r.iter().map(|x| x.1).sum::<f64>();
+            r.into_iter().map(|x| x.0).collect()
+            })
+        };
         for o in outs {
             for (j, side, r) in o {
                 if let Some(sp) = spec.get_mut(&j) {
@@ -19638,6 +19705,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         self.parsb_stats[0] += 1;
         self.parsb_secs[1] += t0.elapsed().as_secs_f64();
+        if env_str!("ENOMOTO_MIP_PARSB_DEBUG").is_some_and(|v| v == "3") {
+            eprintln!("PARSB batch: {:?} clones {}", batch.iter().map(|b| b.0).collect::<Vec<_>>(), lps.len());
+        }
     }
 
     /// 試作 `ENOMOTO_MIP_PARSB`: 強分枝の子の伝播 (逐次の `ENOMOTO_MIP_SB_PROP`・`SB_PROBEBD` と同じ: 分けた境界 → 行 → 目的 → 衝突の
@@ -20057,6 +20127,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let parsb_mode = parsb_flags().filter(|_| self.params.threads > 1 && !self.params.submip && !par_sb && !crate::simplex::mip_lp::nodecut_live() && !crate::simplex::mip_lp::nodecut_stat());
         let mut parsb_spec: std::collections::HashMap<usize, ParsbSpec> = std::collections::HashMap::new();
         let mut parsb_lps: Vec<L> = Vec::new();
+        // このノードの強分枝の前の LP の複製 (`PARSB` では子の LP をどれも、逐次でも並列でも、これの複製から解く。状態の保存と復元
+        // (`save_state`・`restore_state`) は LP の中の全ては戻さず、子の LP の結果が同じ LP で前に解いた子に左右される (解の下の桁・
+        // 子の伝播つきでは反復の数) ので、複製から解いて前の子に左右されないようにする)
+        let mut parsb_snap: Option<L> = None;
         // このノードで強分岐した候補の (擬似費用のスコア (強分岐の前), 強分岐のスコア)。`ENOMOTO_MIP_SB_AGREE` の一致の判定に使う
         let mut sb_eval: Vec<(f64, f64)> = Vec::new();
         let mut ci = 0usize;
@@ -20088,6 +20162,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
             }
             // 強分岐
+            if parsb_mode.is_some() && parsb_snap.is_none() && sb_saved.is_none() {
+                parsb_snap = Some(self.lp.clone());
+            }
             let saved = &*sb_saved.get_or_insert_with(|| self.lp.save_state());
             let (lo, up) = (self.dom.lo[j], self.dom.up[j]);
             let mut gains = [0.0f64; 2];
@@ -20211,7 +20288,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         }
                     }
                     let saved = saved.clone();
-                    self.parsb_batch(&batch, sb_iter_limit, sb_probebd || env_str!("ENOMOTO_MIP_SB_PROP").is_some(), &saved, &mut parsb_lps, nw, &mut parsb_spec);
+                    if let Some(snap) = parsb_snap.as_ref() {
+                        self.parsb_batch(&batch, sb_iter_limit, sb_probebd || env_str!("ENOMOTO_MIP_SB_PROP").is_some(), snap, &mut parsb_lps, nw, &mut parsb_spec);
+                    }
                     let _ = flags;
                 }
             }
@@ -20352,6 +20431,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 if let Some((r, false)) = parsb_hit {
                     // 逐次の求解の後と同じ処理を、先に解いた結果で行う (LP は解かない。反復の累計は逐次と同じに足す)
                     self.parsb_stats[5] += 1;
+                    // 逐次で解いたなら求解の始めに下ろす、次の 1 回だけの印を下ろす
+                    crate::simplex::slope_intercept_dual::set_tl_flags(crate::simplex::slope_intercept_dual::tl_flags() & !0x06);
                     if !is_up {
                         self.sb_of_count += self.sb_down_orbit(j).len() as u64;
                     }
@@ -20410,6 +20491,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     continue;
                 }
+                // 試作 `ENOMOTO_MIP_PARSB`: 逐次で解くときも、強分枝の前の LP の複製から解く (子の伝播の境界は置き直す)
+                if let Some(snap) = parsb_snap.as_ref() {
+                    let it = self.lp.total_iterations();
+                    self.lp = snap.clone();
+                    self.lp.set_total_iterations(it);
+                    if sb_prop && self.dom.stack_len() > pos && env_str!("ENOMOTO_MIP_SB_PROP_BT_EARLY").is_none() && env_str!("ENOMOTO_MIP_SB_PROP_NO_LP").is_none() {
+                        for (c, _, _) in self.dom.changes_since(pos) {
+                            self.lp.set_col_bounds(c, self.dom.lo[c], self.dom.up[c]);
+                        }
+                    }
+                }
                 if is_up {
                     self.lp.set_col_bounds(j, self.bce(j, v), up);
                 } else {
@@ -20426,12 +20518,56 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let st_ok = st == r.st || (r.st == LpStatus::Error && r.obj.is_nan() && st == LpStatus::Infeasible);
                     let it_ok = self.lp.total_iterations() - it0 == r.iters;
                     let obj_ok = (self.lp.objective() + self.p.offset).to_bits() == r.obj.to_bits() || r.obj.is_nan();
-                    let x_ok = r.x.as_ref().is_none_or(|x| x.iter().zip(self.lp.col_values()).all(|(a, b)| a.to_bits() == b.to_bits()));
+                    // 解は値の一致で見る (0.0 と -0.0 は同じ)。違えば最大の差を出す
+                    let xdiff = r.x.as_ref().map_or(0.0, |x| x.iter().zip(self.lp.col_values()).map(|(a, b)| if a == &b { 0.0 } else { (a - b).abs().max(f64::MIN_POSITIVE) }).fold(0.0, f64::max));
+                    let x_ok = xdiff == 0.0;
+                    // 証明に使う行の重み (実行不能なら Farkas の射線、それ以外は双対) も値で比べる
+                    let ys = match st {
+                        LpStatus::Infeasible => self.lp.farkas_ray(),
+                        LpStatus::Optimal | LpStatus::ObjectiveBound => Some(self.lp.row_duals()),
+                        _ => None,
+                    };
+                    let y_ok = match (&r.y, &ys) {
+                        (Some(a), Some(b)) => a.len() == b.len() && a.iter().zip(b).all(|(p, q)| p == q),
+                        (None, None) => true,
+                        _ => r.obj.is_nan(),
+                    };
+                    let x_ok = x_ok && y_ok;
                     self.parsb_stats[6] += 1;
+                    // 診断 `ENOMOTO_MIP_PARSB_DEBUG=2`: 同じ子を逐次でもう一度 (状態を戻して) 解き、逐次どうしの解の一致を見る
+                    if !x_ok && env_str!("ENOMOTO_MIP_PARSB_DEBUG").is_some_and(|v| v == "2") {
+                        let x1 = self.lp.col_values();
+                        match parsb_snap.as_ref() {
+                            Some(snap) => {
+                                let it = self.lp.total_iterations();
+                                self.lp = snap.clone();
+                                self.lp.set_total_iterations(it);
+                            }
+                            None => self.lp.restore_state(saved),
+                        }
+                        for (c, _, _) in self.dom.changes_since(pos) {
+                            self.lp.set_col_bounds(c, self.dom.lo[c], self.dom.up[c]);
+                        }
+                        if is_up {
+                            self.lp.set_col_bounds(j, self.bce(j, v), up);
+                        } else {
+                            self.lp.set_col_bounds(j, lo, self.bfl(j, v));
+                            for k in self.sb_down_orbit(j) {
+                                self.lp.set_col_bounds(k, 0.0, 0.0);
+                            }
+                        }
+                        let st2 = self.lp.solve(&self.limits_k(sb_iter_limit, 1));
+                        let d2 = x1.iter().zip(self.lp.col_values()).map(|(a, b)| if a == &b { 0.0 } else { (a - b).abs().max(f64::MIN_POSITIVE) }).fold(0.0, f64::max);
+                        let d3 = r.x.as_ref().map_or(0.0, |x| x.iter().zip(self.lp.col_values()).map(|(a, b)| if a == &b { 0.0 } else { (a - b).abs().max(f64::MIN_POSITIVE) }).fold(0.0, f64::max));
+                        eprintln!("PARSB serial twice: col {j} up {is_up} st {st2:?} serial-vs-serial {d2:.3e} parallel-vs-second {d3:.3e}");
+                    }
+                    if st_ok && it_ok && obj_ok && x_ok && env_str!("ENOMOTO_MIP_PARSB_DEBUG").is_some_and(|v| v == "3") {
+                        eprintln!("PARSB match: col {j} up {is_up}");
+                    }
                     if !(st_ok && it_ok && obj_ok && x_ok) {
                         self.parsb_stats[7] += 1;
                         if env_str!("ENOMOTO_MIP_PARSB_DEBUG").is_some() {
-                            eprintln!("PARSB mismatch: col {j} up {is_up} st {st:?}/{:?} it {}/{} obj {:.12e}/{:.12e} x {}", r.st, self.lp.total_iterations() - it0, r.iters, self.lp.objective() + self.p.offset, r.obj, x_ok);
+                            eprintln!("PARSB mismatch: col {j} up {is_up} st {st:?}/{:?} it {}/{} obj {:.12e}/{:.12e} x max diff {xdiff:.3e}", r.st, self.lp.total_iterations() - it0, r.iters, self.lp.objective() + self.p.offset, r.obj);
                         }
                     }
                 }
@@ -25840,6 +25976,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if !rhs.is_finite() || coefs.is_empty() {
                 return true;
             }
+            // `ENOMOTO_MIP_UNIFY_FIX` の `p`: カットの貯めの伝播と同じ [`Domain::tighten_le_row`] で締める (自前の締め方は連続列を
+            // `1e-6 (1 + |rhs|) / a` も緩め、矛盾を絶対値 1e-6 で見ていた)
+            if unify_fix('p') {
+                return match d.tighten_le_row(p, coefs.iter().copied(), rhs, 0.0, false, |_| {}) {
+                    super::domain::LeRowTighten::Skip => true,
+                    super::domain::LeRowTighten::Infeasible => false,
+                    super::domain::LeRowTighten::Done(n) => {
+                        *changed |= n > 0;
+                        !d.infeasible
+                    }
+                };
+            }
             let (mut minact, mut ninf, mut infj) = (0.0f64, 0usize, usize::MAX);
             for &(j, a) in coefs {
                 let b = if a > 0.0 { d.lo[j] } else { d.up[j] };
@@ -27517,7 +27665,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         if let Some(x) = lm.res.best.clone() {
                             let z = q.objective(&x);
                             let mut b = best.lock().unwrap();
-                            if z < b.0 - 1e-9 * b.0.abs().max(1.0) {
+                            if better_obj(z, b.0, b.0) {
                                 *b = (z, x.clone());
                                 mb.lock().unwrap().push(x);
                             }
@@ -27525,7 +27673,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     // ほかのスレッドの良い解から磨き直す
                     let (bz, bx) = best.lock().unwrap().clone();
-                    if bz - q.offset < lm.best_obj() - 1e-9 * bz.abs().max(1.0) {
+                    if better_obj(bz - q.offset, lm.best_obj(), bz) {
                         lm.inject(&bx);
                     }
                     if lm.done {
@@ -27686,7 +27834,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if ok {
                 self.snap_stats[2] += 1;
                 better = true;
-            } else if self.incumbent.as_ref().is_none_or(|(z, _)| zx < *z - 1e-9 * z.abs().max(1.0)) {
+            } else if self.incumbent.as_ref().is_none_or(|(z, _)| better_obj(zx, *z, *z)) {
                 // 届いた解を受け付けられなかった (従で実行可能と判定した解が主で通らない)。最良値だけが下がり解が失われる
                 eprintln!("MIP: WARNING: a solution from another thread was rejected (objective {zx:.10e}, len {})", self.p.n);
             }
@@ -30238,8 +30386,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if self.parsb_stats[0] > 0 || self.parsb_stats[2] > 0 {
                 let p = &self.parsb_stats;
                 eprintln!(
-                    "MIP: PARSB tid {}: batches {} solved children {} lp clones {} ({:.3}s) batch wall {:.3}s; lookups {} used {} input differs {} integral {} verify {} mismatch {}",
-                    self.pool_tid, p[0], p[8], p[1], self.parsb_secs[0], self.parsb_secs[1], p[2], p[5], p[3], p[4], p[6], p[7]
+                    "MIP: PARSB tid {}: batches {} solved children {} lp clones {} ({:.3}s) batch wall {:.3}s worker solve {:.3}s; lookups {} used {} input differs {} integral {} verify {} mismatch {}",
+                    self.pool_tid, p[0], p[8], p[1], self.parsb_secs[0], self.parsb_secs[1], self.parsb_secs[2], p[2], p[5], p[3], p[4], p[6], p[7]
                 );
             }
             if self.par_sb_stats[0] > 0 {

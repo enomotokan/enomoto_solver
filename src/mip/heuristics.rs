@@ -1469,10 +1469,7 @@ pub(super) fn local_search(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64
         let mut vset: Vec<usize> = Vec::new();
         let mut vpos = vec![usize::MAX; m + 1];
         for i in 0..=m {
-            if viol(i, act[i], obj_bound) > 0.0 {
-                vpos[i] = vset.len();
-                vset.push(i);
-            }
+            super::idxset::set_member(&mut vset, &mut vpos, i, viol(i, act[i], obj_bound) > 0.0);
         }
         let mut stall = 0u64;
         let mut best_round = f64::INFINITY;
@@ -1584,19 +1581,7 @@ pub(super) fn local_search(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64
             tabu_until[j] = step + 3 + (rand() * 10.0) as u64;
             for &(r, b) in &cols[j] {
                 act[r] += b * d;
-                let is_v = viol(r, act[r], obj_bound) > 0.0;
-                if is_v && vpos[r] == usize::MAX {
-                    vpos[r] = vset.len();
-                    vset.push(r);
-                } else if !is_v && vpos[r] != usize::MAX {
-                    let k = vpos[r];
-                    let last = *vset.last().unwrap();
-                    vset.swap_remove(k);
-                    if last != r {
-                        vpos[last] = k;
-                    }
-                    vpos[r] = usize::MAX;
-                }
+                super::idxset::set_member(&mut vset, &mut vpos, r, viol(r, act[r], obj_bound) > 0.0);
             }
         }
     }
@@ -1778,10 +1763,7 @@ fn fj_search_old(p: &MipProblem, lo: &[f64], up: &[f64], effort: u64, time_cap: 
         let mut vset: Vec<usize> = Vec::new();
         let mut vpos = vec![usize::MAX; m];
         for i in 0..m {
-            if viol(i, act[i]) > 0.0 {
-                vpos[i] = vset.len();
-                vset.push(i);
-            }
+            super::idxset::set_member(&mut vset, &mut vpos, i, viol(i, act[i]) > 0.0);
         }
         let mut last_move = vec![0u64; n];
         let mut work = 0u64;
@@ -1857,19 +1839,7 @@ fn fj_search_old(p: &MipProblem, lo: &[f64], up: &[f64], effort: u64, time_cap: 
                     last_move[j] = step;
                     for &(r, a) in &p.cols[j] {
                         act[r] += a * d;
-                        let is_v = viol(r, act[r]) > 0.0;
-                        if is_v && vpos[r] == usize::MAX {
-                            vpos[r] = vset.len();
-                            vset.push(r);
-                        } else if !is_v && vpos[r] != usize::MAX {
-                            let k = vpos[r];
-                            let last = *vset.last().unwrap();
-                            vset.swap_remove(k);
-                            if last != r {
-                                vpos[last] = k;
-                            }
-                            vpos[r] = usize::MAX;
-                        }
+                        super::idxset::set_member(&mut vset, &mut vpos, r, viol(r, act[r]) > 0.0);
                     }
                 }
                 _ => {
@@ -4235,7 +4205,7 @@ pub(super) fn fj_lmip_mix(p: &MipProblem, lo: &[f64], up: &[f64], cap: f64, seed
         };
         if let Some(x) = got {
             let z = p.objective(&x);
-            if best.as_ref().is_none_or(|(bz, _)| z < *bz - 1e-9 * bz.abs().max(1.0)) {
+            if best.as_ref().is_none_or(|(bz, _)| super::solver::better_obj(z, *bz, *bz)) {
                 let who = if use_lm { 2 } else { 1 };
                 leader = who;
                 wins[(who - 1) as usize] += 1;
@@ -4304,8 +4274,7 @@ pub(super) fn suba_rate(c: char) -> bool {
 ///   既定の RENS (LP で整数値の列を全部固定) も 1 回回す ([`Solver::rens`])
 ///   - `o`: `r` で足す RENS は成果連動の打ち切り (`ENOMOTO_MIP_NO_SUBMIP_OUTCOME_STOP`) を使わない (neos-1171448 種 4 では 50 ノードで止まり −239 だった)
 pub(super) fn heur4_on(c: char) -> bool {
-    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_str!("ENOMOTO_MIP_HEUR4").map_or(String::new(), |v| v.to_string())).contains(c)
+    env_str!("ENOMOTO_MIP_HEUR4").is_some_and(|v| v.contains(c))
 }
 
 thread_local! {
