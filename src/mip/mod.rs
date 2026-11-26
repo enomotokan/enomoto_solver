@@ -964,6 +964,7 @@ pub(super) fn polish_in_problem(p: &MipProblem, x: &mut Vec<f64>, z: f64) -> Opt
 
 /// `ENOMOTO_MIP_POLISH_WARM` (`ENOMOTO_MIP_POLISH_STRICT` と組で使う。analysis/nattai_20261125/。
 /// **2026-11-25 に既定にした: 値 `d`。`0`・`off` で使わない (研磨の LP を前処理つきで一から解き、期限を渡さない前の形)。**
+/// **2026-11-26 から、付けなければ [`polish_final_on`] (既定) で `e`。**
 /// 根拠は [`polish_strict_mode`] と同じ。dano3_3・dano3_5 の時間切れの回で上限を越えない (60.02 秒。期限なしでは 73〜78 秒)):
 /// 0 = 使わない、1 = 研磨の LP を B&B の LP の基底から温めて解く (返す前の研磨には期限を渡さない)、
 /// 2 (`d`) = 1 に加えて返す前の研磨にも期限を渡し、間に合わなければ漏れの見積り ([`solver::Solver::leak_estimate`]) で目的値を正す、
@@ -972,14 +973,30 @@ pub(super) fn polish_in_problem(p: &MipProblem, x: &mut Vec<f64>, z: f64) -> Opt
 /// 「未研磨」の印をつける。返す前の研磨は、木の中で研磨が済んだ暫定解なら飛ばす。
 /// 見積りの双対値と温める基底は、暫定解の連続部を出した LP ([`solver::Solver::resolve_continuous`] の整数を固定した LP、
 /// または双対値で最適と示せた今の LP) のもの
+/// `ENOMOTO_MIP_POLISH_WARM` を付けていなければ、[`polish_final_on`] (既定) で 3 (`e`)、切っていれば 2 (`d`)。
 pub(super) fn polish_warm_mode() -> u8 {
     static V: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
-    *V.get_or_init(|| match env_def!("ENOMOTO_MIP_POLISH_WARM", "d") {
-        Some(v) if v == "e" => 3,
-        Some(v) if v == "d" => 2,
-        Some(_) => 1,
-        None => 0,
+    *V.get_or_init(|| {
+        if env_str!("ENOMOTO_MIP_POLISH_WARM").is_none() && polish_final_on() {
+            return 3;
+        }
+        match env_def!("ENOMOTO_MIP_POLISH_WARM", "d") {
+            Some(v) if v == "e" => 3,
+            Some(v) if v == "d" => 2,
+            Some(_) => 1,
+            None => 0,
+        }
     })
+}
+
+/// `ENOMOTO_MIP_POLISH_FINAL` (**2026-11-26 に既定にした。`0`・`off` で前の形 `POLISH_WARM=d` に戻す**。analysis/rootpar_ph_20261126 の 5 節):
+/// 研磨は返す前の 1 回だけにする。木の中では暫定解を研磨せず、漏れの見積りを足して受け取る (`POLISH_WARM=e`)。返す前に研磨の LP を期限なしで
+/// 1 回解き (試作 `ROOTPAR_PH` の `g`)、空いたスレッドがあれば温めた単体法と内点法 + クロスオーバーの同時実行で解く (`j`)。
+/// 最後の研磨で上がった幅が刈りの余裕と W_mip (研磨の LP の双対値 × MIP の実行可能性の許容) の大きい方を越えれば最適と言わない
+/// (「最適」は MIP の実行可能性の許容の中での最適。以前の `d` は単体法の主の許容の水準)。dano3_3 (4 スレッド) で木の中の研磨 22〜33 秒が
+/// 最後の 1 回 3.3 秒になる。`ENOMOTO_MIP_POLISH_WARM` を付ければその形 (`g`・`j` は `ROOTPAR_PH` で付けたときだけ)
+pub(super) fn polish_final_on() -> bool {
+    env_def!("ENOMOTO_MIP_POLISH_FINAL", "1").is_some()
 }
 
 /// `ENOMOTO_MIP_POLISH_WARM` で、返す暫定解の目的値に足す漏れの見積り (f64 のビット)。木の求解の終わり ([`solver::Solver::finish`]) で
@@ -1088,7 +1105,7 @@ pub(super) fn polish_in_problem_warm_ext(p: &MipProblem, x: &mut Vec<f64>, z: f6
     // 解の研磨が手間の期限で 3 反復で止まり、研磨しないまま見積り (その解を出した LP の双対値がなく、今の LP の双対値から取った小さな値) で
     // 受け取って、4 スレッドの nattai が最適値より 9.4e-5 良い値を返した (analysis/nattai_20261125 の 9 節)
     let lim = lp::SolveLimits { deadline, ..Default::default() };
-    let jcap = solver::rootpar_ph('j');
+    let jcap = solver::polish_final('j');
     let mut how = "";
     let st = crate::ticks::without_budget(|| {
         if cold {
@@ -1117,7 +1134,7 @@ pub(super) fn polish_in_problem_warm_ext(p: &MipProblem, x: &mut Vec<f64>, z: f6
     let mut out = WarmPolish::NotSolved;
     if st == lp::LpStatus::Optimal {
         out = WarmPolish::Kept;
-        if jcap || solver::rootpar_ph('f') || solver::rootpar_ph('g') {
+        if jcap || solver::rootpar_ph('f') || solver::polish_final('g') {
             POLISH_TOL_LEAK.with(|c| c.set(tol_leak_bound(p, &lp)));
         }
         let mut xn = lp.col_values();
@@ -8051,14 +8068,15 @@ thread_local! {
 /// 試作 `ENOMOTO_MIP_LPPROBE_TICKS` (analysis/scipsym_20261120/ 14・15 節、既定では使わない): LP による固定 ([`lp_probe`]) で固定がまだ 0 のとき、
 /// 子の LP に使った決定的な手間 (`crate::ticks`、窓で並べた写しの分も足す) が最初の LP の手間の `ENOMOTO_T_MIP_LP_PROBE_GIVEUP_TIME_MULT` (既定 1) 倍を
 /// 越えたらあきらめる (手間の既定 `ENOMOTO_MIP_PRESOLVE_WORK` のときだけ)。反復 x (行 + 列) の数えは 1 反復の重い密な問題 (cod105) で軽く出る
-/// 試作 `ENOMOTO_MIP_LPPROBE_FIX=<文字>` (analysis/lpprobe_20261126、既定では使わない): 前処理の LP プロービング ([`lp_probe`]) の直し。
+/// `ENOMOTO_MIP_LPPROBE_FIX=<文字>` (analysis/lpprobe_20261126、未設定は `d`): 前処理の LP プロービング ([`lp_probe`]) の直し。
 /// - `d` (結果を変えない): 子の LP の厳密な DSE 重みを使い回す ([`crate::simplex::slope_intercept_dual::lpprobe_dse_scope`])
 /// - `c` (結果が変わりうる): 子の LP 1 本の反復の上限 `per_lp` に、ここまでの効き目 (試した列のうち固定が出た割合) のシグモイドを掛ける。
 ///   効き目の対数オッズ (ラプラスの数え方) L = ln((固定 + 1) / (試した列 − 固定 + 1)) で 2σ(L) = 2 (固定 + 1) / (試した列 + 2) (1 で頭打ち)。
 ///   まだ何も試していなければ 1 (今と同じ)、固定のないまま列を試すほど縮む (2 列で 1/2、6 列で 1/4)。窓では窓の始めの値を使う (数えた量だけで決まる)。
 ///   P では結果を生む子 (実行不能) は上限の 0.55 倍以内で終わり、上限まで走る子は何も生まない (analysis/lpprobe_20261126 1.2 節)
+/// **未設定は `d` で既定で使う** (2026-11-26 に利用者の承認で既定化、analysis/lpprobe_20261126 5 節)。`=0`・`off` で切る。`c` は試作 (既定オフ)
 pub(crate) fn lpprobe_fix(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_LPPROBE_FIX").is_some_and(|v| v.contains(c))
+    env_def!("ENOMOTO_MIP_LPPROBE_FIX", "d").is_some_and(|v| v.contains(c))
 }
 
 /// 試作 `ENOMOTO_MIP_LPPROBE_FIX` の `c` ([`lpprobe_fix`]): 子の LP の反復の上限 `per_lp` に、試した列 `tried` のうち固定 `fixed` の効き目の
