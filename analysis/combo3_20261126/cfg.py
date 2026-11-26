@@ -8,8 +8,11 @@ c3 = 今の c2c (analysis/combo2_20261125/cfg.py の C2C = C2 + SB_PROBEBD=1) �
 - `enumt` : ENUM_ADAPT を 1s → 1st (`t`: 主でないスレッドの前処理に ENUM_ADAPT の時計を置く。src/mip/mod.rs `EnumClockGuard::new` が `t` を含むかで見る。
             analysis/nrashare_20261126 7 節。P の 4 スレッドで確かめ中)。
 - `pskip` : SB_PROP_PSKIP=1 (伝播の境界つきで解いた強分枝の子の伸びを擬似費用に入れない。src/mip/solver.rs `sb_prop_pskip`、0 でなければ有効。
-            analysis/c2c1t_20261126。P で確かめ中)。
-`t`・`pskip` の P の結果が悪ければ、PARTS から外して (または c3_without で) 外した形を作る。"""
+            analysis/c2c1t_20261126。P で確かめ中)。**2026-11-26 夜に USE から外した** (親の判断: P の 4 スレッドで binkar10_1・nu25-pr12 に仕組みの害、README 2 節)。
+- `nolp`  : SB_PROP_NO_LP=1 (強分枝の子の伝播は、子を切る判定とノードに置く境界にだけ使い、子の LP には境界を渡さない。pskip の代わり。
+            src/mip/solver.rs の判定は `env_str!("ENOMOTO_MIP_SB_PROP_NO_LP").is_none()` で、値があれば (0 でも) 有効。
+            analysis/c2c1t_20261126 10 節: P で c2c と比べ 1 スレッド 1.012・4 スレッド 1.003、binkar10_1・nu25-pr12 の害なし)。
+`t` の P の結果が悪ければ、PARTS から外して (または c3_without で) 外した形を作る。"""
 import importlib.util
 from pathlib import Path
 _s = importlib.util.spec_from_file_location("combo2_cfg", Path(__file__).resolve().parents[1] / "combo2_20261125" / "cfg.py")
@@ -23,9 +26,10 @@ PARTS = {
     "share": ("ENOMOTO_MIP_NRA_SHARE", "1"),
     "enumt": ("ENOMOTO_MIP_ENUM_ADAPT", "1st"),
     "pskip": ("ENOMOTO_MIP_SB_PROP_PSKIP", "1"),
+    "nolp": ("ENOMOTO_MIP_SB_PROP_NO_LP", "1"),
 }
 # c3 に入れる部品 (P の結果で外すときはここから消す)
-USE = ["nrap", "share", "enumt", "pskip"]
+USE = ["nrap", "share", "enumt", "nolp"]  # 2026-11-26 夜: pskip → nolp (親の判断)
 
 
 def c3_without(*drop):
