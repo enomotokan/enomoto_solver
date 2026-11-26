@@ -276,3 +276,32 @@
   - 分担表: `UNIFY_SET=2 python plan.py 4 shards2.json`。
   - 回し方: `python analysis/unify_20261126/run.py K analysis/unify_20261126/shards2.json analysis/unify_20261126/res2_sK.jsonl`。
   - 集計: `UNIFY_SET=2 python analysis/unify_20261126/summ.py 'analysis/unify_20261126/res2_s*.jsonl'`。
+
+### 5.1 TwoStageLp の尺度をかけた写し `scaled_copy` (1 節の 11、HJZ2 の了承のうえ)
+
+- mip_lp.rs の `attach_tw`・`ipm_scale`・`solve_scaled` が同じ 7 行で写しを作っていたので、`TwoStageLp::scaled_copy(rs, cs)` にまとめた。
+  - 写しの中身: 係数 × rs_i cs_j、行の範囲 × rs_i、列の範囲 ÷ cs_j、費用 × cs_j。
+- `ipm_scale` が手書きしていた係数の絶対値の最小・最大は、`coef_range` と共通の `coef_minmax` に出した (係数がないときの (∞, 0) も同じ)。
+- 動き: 演算は同じで、ビット単位で同じ。
+- 確かめ: check_default 全部一致。cargo test は 424 通過・1 失敗。
+  - 失敗は、取り込んだ別の試作 `mip::alns_cp::tests::adaptive_moves_like_cpsat` (a6beb833d、ENOMOTO_MIP_ALNS) の `assert!((c.value - 0.5).abs() < 0.1)`。
+  - mip_lp.rs とは関わらない。親に伝えた。
+
+### 5.2 第 2 弾の P の結果 (696 回、38d7d6478 のビルド、`summ2.txt`)
+
+- 分担: 0 は GATE、1 は GcYE、2 は GU3WAp、3 は GZRx。4 人とも 38d7d6478 を取り出してビルドし、check_default は全部一致。
+- crash・取得失敗は 0、食い違いは 0。
+- 既定 (第 1 弾を含む) との比 (`uf2` ÷ `def`):
+
+| スレッド | 比 | 95% 区間 | 解けた数 (既定 → 直し) | 全種 1.25 倍超の遅れ | 目安 |
+|---|---:|---|---|---|---|
+| 1 | 0.997 | [0.993, 1.001] | 118 → 120 | なし | 候補 |
+| 4 | 1.001 | [0.981, 1.022] | 138 → 138 | なし | 候補 |
+
+- 4 スレッドで目立った問題:
+  - 10teams は 1.60 倍。種ごとの秒数は、既定 3.7・3.7・3.5、直し 5.2・42.3・3.0。種 2 だけが遅い。
+    - 10teams は木に入る前に解けるかどうかで時間が二つに分かれる問題 (paridle_20261126 の記録と同じ)。
+    - 1 スレッドでは既定も直しも 3 種とも時間切れで、同じ。
+  - physiciansched6-2 は 0.74 倍。既定の 4 スレッド種 2 の 56.3 秒が、直しで 20.7 秒になった。
+- 見立て: 中立 (1・4 スレッドとも目安は候補)。
+- 集計のしかた: `UNIFY_SET=2 python summ.py 'res2_s*.jsonl'`。環境変数を付けないと、設定 `uf2` を拾わず「結果なし」になる (GcYE の指摘)。
