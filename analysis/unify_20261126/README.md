@@ -69,3 +69,106 @@
 - 動き: 有限で正の秒なら、前と同じ計算。`.min(1e6)` を付けていた所は、ヘルパの中の押さえで同じになる。
 - 直った所: 2 節の 3 (separation.rs:3785) が、秒を押さえるので落ちなくなった。
 - 確かめ: cargo test 424 通過、check_default 全部一致。
+
+### 3.2 整数を固定した LP を B&B の LP の上で解く `with_fixed_int_lp` (1 節の 5)
+
+- `resolve_continuous` (solver.rs) と `fixed_int_lp` (heuristics.rs) の共通部分を `Solver::with_fixed_int_lp` にまとめた。共通部分は次のとおり。
+  1. 状態を取っておく。
+  2. 費用を元に戻す。
+  3. 整数列を固定する。
+  4. 解く。
+  5. 整数列を固定値に置き直す。
+  6. 状態・費用・反復の累計を戻す。
+- 違いは引数で渡す。
+  - 丸めるか: `round`。`fixed_int_lp` は丸める。
+  - 連続列の範囲: `cont`。`resolve_continuous` は問題の境界、`fixed_int_lp` は大域の境界。
+  - 期限。
+  - 最適のときの処理: `on_opt`。LP が解けた状態のまま呼ぶので、`resolve_continuous` の漏れの見積りと基底の取り置きもその中でできる。
+- 磨いた所: `fixed_int_lp` は `x[j].round()` を 2 回計算していたが、`resolve_continuous` と同じ流れにそろえた。
+- 動き:
+  - LP の演算は同じ。
+  - `resolve_continuous` の期限の計算は、前は列の境界を置いた後、今は前。差はマイクロ秒で、期限の上限が効くのは試作の `INC_LP_CAP`・`FJ_P3` のときだけ。
+- `try_lp_solution` と RR は入れていない。`try_lp_solution` は費用を戻さず反復を累計に入れる (2 節の 4)。そろえると動きが変わるので、別に扱う。
+- 確かめ: cargo test 424 通過、check_default 全部一致。
+
+### 3.3 サブ MIP の設定の土台 `MipParams::submip_base` (1 節の 6)
+
+- `MipParams::submip_base(time_limit, node_limit, seed)` を置いた。中身は、ギャップ 0 (絶対 1e-9)、打ち切り値なし、1 スレッド、経過を出さない、`submip: true`、`tl_base: NaN`。
+- 全フィールドを書いていた 6 か所を、土台 + 違う所だけの形にした。
+  - heuristics.rs: `fp_stage3`、`solve_submip_problem`
+  - heur_scip.rs: `min_relaxation`、`repair`、vb01
+  - mod.rs: `clqprb_shadow_locks`
+- 動き: どのフィールドの値も前と同じ。
+- 確かめ: cargo test 424 通過、check_default 全部一致。
+
+### 3.4 `min_relaxation` と `repair` の共通部分 (1 節の 7)
+
+- heur_scip.rs の 2 つの補助 MIP のヒューリスティクスから、共通部分を 3 つの関数に出した。
+  - `slack_relaxed(p, col_lo, col_up, relax)`: 違反量の列を足した問題を作る。足す行は `relax(i)` で選ぶ (`min_relaxation` は全部、`repair` は違反行だけ)。列は下限側・上限側の順で、前と同じ。
+  - `solve_slack_relaxed`: サブ MIP の設定で解き、反復を数える。
+  - `finish_slack_point`: 点を暫定解として試し、だめなら整数列の値を目標に固定・伝播する。
+- 磨いた所: 違反量の合計は経過を出すときだけ計算する。
+- 動き: 同じ。
+- 確かめ: cargo test 424 通過、check_default 全部一致。
+
+### 3.5 カットの貯めの伝播の全部を回す道を `cutpool_prop_cut` に寄せる (1 節の 2 のうち純粋な写し)
+
+- 対象は `propagate_cut_pool_inner` (`ENOMOTO_MIP_CUTPOOL_PROP_FULL`、既定では通らない)。差分版の `cutpool_prop_cut` と一字一句同じ 50 行の写しを持っていたので、呼び出しに置き換えた。
+- 締めたカットの年齢を 0 に戻すのは、前から差分版だけだった。これを引数 `reset_age` で残した。
+- 消したもの: 写しの中にあった、特定のカット 1 本 (`k + 738 == 本数`) を出す診断の行 (`ENOMOTO_MIP_DEBUG_CPP`)。入口の診断の行は残した。
+- 動き: 同じ (既定の道は変わらない)。
+- 確かめ: cargo test 424 通過、check_default 全部一致。
+
+### 3.6 安全の直し (2 節の 3・10・11、親の指示でまとめのついでに直す)
+
+- `crate::cancel::secs(x)` を置いた。秒を [0, 1e6] に押さえた `Duration` を返す (`Duration::from_secs_f64` は負・NaN・無限で落ちる)。
+  - 次の 4 か所の期限の作り方をこれにした。
+    - `Solver::deadline_in`
+    - heuristics.rs の `local_search` と `fj_search_old` (前は押さえなし、2 節の 11)
+    - fj.rs と localmip.rs (前は `.max(0.0)` だけで、無限で落ちた)
+- `max_violation` (mod.rs): NaN の違反を無限として扱う (2 節の 10)。前は `f64::max` が NaN を捨てて、NaN を含む点の違反が 0 になり、研磨の採否で通りえた。
+- 動き: 有限の値では同じ。
+- 確かめ: cargo test 424 通過、check_default 全部一致。
+
+### 3.7 履歴で確かめたこと (2 節の 4・7、親の指示)
+
+- 2 節の 4 (`try_lp_solution` が費用を戻さず、反復を累計に入れない):
+  - `try_lp_solution` は 2026-10-06 の分枝限定法の骨組み (008552d28) からある。
+  - 費用を元に戻す処理と、反復を累計に入れない処理は、2026-10-15 に `resolve_continuous` を足したとき (9ba979b42) に、そちらにだけ入った。そのとき `try_lp_solution` は見直されていない。意図した違いではない。
+  - 揃えると動きが変わるので、4 節の切り替え (`t`) に入れて P で測る。
+- 2 節の 7 (lp_probe の ROOTCAP の道で `ROOT_BASIS_SAVED` を置かない、DSE を条件なしで渡す):
+  - 試作 `ENOMOTO_MIP_ROOTCAP` の `p`・`q` (e3fd57dc3、既定では切) の道で、コメントに「止まった LP の基底 (行の状態・DSE 重みつき) を捨てずに根の LP に渡す (根の LP はここから続きを解く)」とある。
+  - DSE を渡すのは意図的。`ROOT_BASIS_SAVED` は別の試作 (`ROOT_BASIS_FIX`) の置き場で、この道には関わらない。
+  - 写し違いではないので、直さない。
+
+## 4. 写し違いの直し `ENOMOTO_MIP_UNIFY_FIX` (既定オフ、P で測る)
+
+親の指示で、動きが変わる直しは正しい側にそろえる形で切り替えにし、まとめて 1 つの P で測る。文字ごとに入れ、`1` は全部。
+
+| 文字 | 2 節 | 直し |
+|---|---|---|
+| `f` | 1 | `local_search`・`fj_search_old` の違反の許容誤差を `0.5e-6 + 1e-10\|b\|` (Local-MIP の `viol_at` と同じで、`is_feasible` より少し狭い) にする |
+| `r` | 2 | Repair の「違反なし」の判定を `is_feasible` と同じ `1e-6 + 1e-9\|b\|` にする |
+| `s` | 5 | FIXMORE の `obj_row_pass` で整数列に丸めの余裕を足さない (`global_obj_prop_ex` と同じ。FIXMORE は既定では使わないので P では効かない) |
+| `m` | 6 | 対称な列の併合の `sum_ub` の余裕を 1e-6 にする (`merge_twin_classes` の `FZ2_FIX` の `m` と同じ) |
+| `l` | 8 | LMBOOST の Local-MIP に、元の問題がないとき大域の境界を渡す |
+| `t` | 4 | `try_lp_solution` の固定 LP を `with_fixed_int_lp` で解く (元の費用、反復は累計に入れない、連続列はノードの境界) |
+
+- 既定オフのときの確かめ: cargo test 424 通過、check_default 全部一致。
+- P: 58 問 × 種 1〜3 × (def_t1・def_t4・uf_t1・uf_t4)、60 秒、696 回。台本は analysis/polishp_20261125 の写し (cfg.py だけ差し替え)。
+  - 分担表: `python plan.py 4 shards.json` (4 分担、各 1.6 時間の見積り)。
+  - 回し方: `python analysis/unify_20261126/run.py K` → res_sK.jsonl。
+  - 集計: `python analysis/unify_20261126/summ.py`。
+
+### 4.1 fuzz (`ENOMOTO_MIP_UNIFY_FIX=1`、`FUZZ_VENV=/usr/local bash analysis/unify_20261126/fuzz.sh uf ENOMOTO_MIP_UNIFY_FIX=1` → fuzz_uf.out)
+
+- 7 本は誤答 0。
+  - fuzz_tiny 0/400・0/400
+  - fuzz_highs 0/300
+  - fuzz_objint 0/1000・0/1000
+  - fuzz_slack は mismatches 0 (1000・1000 回)
+- cargo test は 424 通過。
+- 新しく足した fuzz_bigact.py: 活動度の大きい行 (係数に 10^2〜10^4 を掛け、|act| が 1e3〜1e6) の小さな MIP で、HiGHS との突き合わせと、返した点の実行可能性 (`1e-6 + 1e-9|b|`) を見る。
+  - 2 節の 1 (旧 FJ の緩い許容誤差) の誤答の芽を見るためのもの。
+  - 結果は 0/300・0/300。
+  - seed 88 は、こちらが -15350.21 で HiGHS が -15310.65 だった。こちらの点は厳密に実行可能 (違反 0) で、HiGHS はギャップ 1e-12 でも同じ値なので、HiGHS の取りこぼし。既定でも直しでも同じ値。判定は「HiGHS より良く、点が実行可能なら印字だけ」にした。

@@ -91,6 +91,28 @@ pub fn default_seed() -> u64 {
 }
 
 impl MipParams {
+    /// サブ MIP (ヒューリスティクスの中で解く補助の MIP) の設定の土台: 時間の上限 `time_limit`、ノードの上限 `node_limit`、乱数の種 `seed`
+    /// (親のものを渡す)。ギャップ 0 (絶対 1e-9)、打ち切り値なし、再スタートの記録なし、1 スレッド、経過は出さない。
+    /// ほかの値は `MipParams { cutoff: .., ..MipParams::submip_base(..) }` の形で上書きする
+    pub fn submip_base(time_limit: f64, node_limit: u64, seed: u64) -> MipParams {
+        MipParams {
+            time_limit,
+            node_limit,
+            rel_gap: 0.0,
+            abs_gap: 1e-9,
+            verbose: false,
+            submip: true,
+            cutoff: f64::INFINITY,
+            restarts: 0,
+            skip_heurs: 0,
+            threads: 1,
+            distinguish: false,
+            fc_submip: false,
+            tl_base: f64::NAN,
+            seed,
+        }
+    }
+
     /// 割合で決める量 (時間の上限の x 倍) の基準。`ENOMOTO_MIP_TIMEDEP` の `b` (既定、analysis/timedep_20261114.md・det1t_20261120) なら外側の求解では
     /// 元の時間上限 `tl_base` (前処理・再スタートに使った壁時計の秒で変わらない)、それ以外は `time_limit` (残り時間)。期限は `time_limit` のまま
     pub fn frac_tl(&self) -> f64 {
@@ -4638,6 +4660,22 @@ impl Drop for LmboostBg {
     }
 }
 
+/// 試作 `ENOMOTO_MIP_UNIFY_FIX` (既定では使わない。analysis/unify_20261126/ の 2 節・4 節): 重複の洗い出しで見つけた写し違いを、
+/// 正しい側にそろえる。文字ごとに入れる (`1` は全部)。
+/// - `f`: 旧 FJ (`fj_search_old`)・`local_search` の違反の許容誤差を、活動度に比例する `1e-6 (1 + min(|act|, 1e6))` から、
+///   [`super::problem::MipProblem::is_feasible`] より少し狭い `0.5e-6 + 1e-10 |b|` (Local-MIP と同じ) にする
+/// - `r`: Repair の「違反なし」の判定を `1e-6 (1 + |b|)` から `is_feasible` と同じ `1e-6 + 1e-9 |b|` にする
+/// - `s`: FIXMORE の目的の行の伝播 (`obj_row_pass`) で、整数列には丸めの余裕を足さない ([`Solver::global_obj_prop_ex`] と同じ)
+/// - `m`: 対称な列の併合 (`add_symmetry_rows` の `sum_ub`) の丸めの余裕を 1e-9 から 1e-6 にする (`FZ2_FIX` の `m` と同じ)
+/// - `l`: LMBOOST の Local-MIP に、元の問題がないとき問題の境界ではなく大域の境界 (根で締めたもの) を渡す
+/// - `t`: `try_lp_solution` の整数を固定した LP を、元の費用で解き、反復を累計に入れない ([`Solver::with_fixed_int_lp`]、
+///   `resolve_continuous` と同じ)
+pub(crate) fn unify_fix(c: char) -> bool {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let v = V.get_or_init(|| env_def!("ENOMOTO_MIP_UNIFY_FIX", "").map_or(String::new(), |v| v.to_string()));
+    v == "1" || v.contains(c)
+}
+
 /// 試作 `ENOMOTO_MIP_LMBOOST` (COMP07、既定では使わない): [`Solver::lmip_boost`]。
 fn lmboost_on() -> bool {
     env_def!("ENOMOTO_MIP_LMBOOST", "1").is_some()
@@ -7393,7 +7431,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 今から `secs` 秒後と、求解の期限 (`self.deadline`) の早い方。
     /// `secs` は [0, 1e6] 秒に押さえる (負・NaN は 0、無限・大きすぎる値は 1e6 秒。`Duration::from_secs_f64` が落ちないように)
     pub(super) fn deadline_in(&self, secs: f64) -> Instant {
-        let d = Instant::now() + Duration::from_secs_f64(if secs > 0.0 { secs.min(1e6) } else { 0.0 });
+        let d = Instant::now() + crate::cancel::secs(secs);
         self.deadline.map_or(d, |g| g.min(d))
     }
 
@@ -8411,16 +8449,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             return;
         }
-        let saved = self.lp.save_state();
-        let it0 = self.lp.total_iterations();
-        let swap = cost != self.p.cost;
-        if swap {
-            self.lp.set_costs(&self.p.cost);
-        }
-        for j in 0..self.p.n {
-            let (lo, up) = if self.p.is_int[j] { (x[j], x[j]) } else { (self.p.col_lo[j], self.p.col_up[j]) };
-            self.lp.set_col_bounds(j, lo, up);
-        }
         // `ENOMOTO_MIP_INC_LP_CAP` (試作、既定では使わない): この LP の時間の上限を全体の `ENOMOTO_T_MIP_INC_LP_TIME_FRAC`
         // (0.02、最低 1 秒) にする。uccase12 で DUAL_UB + CS_OBJ_PIVOT のとき、根の LP の直後に FJ の解 (865106) を受け取り、
         // この LP が 8.4 秒から 56 秒まで止まらず、根のカット・ヒューリスティクスが 1 つも回らなかった
@@ -8431,39 +8459,76 @@ impl<'a, L: MipLp> Solver<'a, L> {
         } else {
             self.deadline
         };
-        let st = self.lp.solve(&SolveLimits { deadline, ..Default::default() });
+        let z0 = *z;
+        let (st, iters, r) = self.with_fixed_int_lp(x, false, cost, |s, j| (s.p.col_lo[j], s.p.col_up[j]), deadline, |s, y| {
+            let zy = s.p.objective(&y);
+            let better = zy < z0 - 1e-9 * z0.abs().max(1.0) && s.p.is_feasible(&y, FEASTOL);
+            if better && s.params.verbose {
+                eprintln!("MIP: fixed-integer LP improved incumbent {z0:.10e} -> {zy:.10e}");
+            }
+            // `ENOMOTO_MIP_POLISH_WARM`: 漏れはこの LP が許容誤差の範囲で行を破るところで入るので、この LP の最適の双対値で見積もり
+            // (取り替えるなら新しい点で)、基底も研磨の LP を温めるのに取っておく
+            if super::polish_warm_mode() > 0 {
+                s.warm_rc = Some((s.leak_estimate(if better { &y } else { x }), Some(s.lp.basis())));
+            }
+            better.then_some((y, zy))
+        });
+        if let Some((y, zy)) = r.flatten() {
+            *x = y;
+            *z = zy;
+        }
         if self.params.verbose && st != LpStatus::Optimal {
-            eprintln!("MIP: fixed-integer LP: {st:?} ({} iters)", self.lp.total_iterations() - it0);
+            eprintln!("MIP: fixed-integer LP: {st:?} ({iters} iters)");
         }
         if st == LpStatus::TimeLimit {
             self.gap4_inclp.0 += 1;
         }
-        if st == LpStatus::Optimal {
-            let mut y = self.lp.col_values();
-            for j in 0..self.p.n {
-                if self.p.is_int[j] {
-                    y[j] = x[j];
-                }
-            }
-            let zy = self.p.objective(&y);
-            if zy < *z - 1e-9 * z.abs().max(1.0) && self.p.is_feasible(&y, FEASTOL) {
-                if self.params.verbose {
-                    eprintln!("MIP: fixed-integer LP improved incumbent {z:.10e} -> {zy:.10e}");
-                }
-                *x = y;
-                *z = zy;
-            }
-            // `ENOMOTO_MIP_POLISH_WARM`: 漏れはこの LP が許容誤差の範囲で行を破るところで入るので、この LP の最適の双対値で見積もり、
-            // 基底も研磨の LP を温めるのに取っておく
-            if super::polish_warm_mode() > 0 {
-                self.warm_rc = Some((self.leak_estimate(x), Some(self.lp.basis())));
-            }
+    }
+
+    /// 今の B&B の LP の上で、整数列を `x` の値 (`round` なら丸めた値) に固定し、連続列 `j` を `cont(self, j)` の範囲にして、
+    /// 元の費用 (`self.p.cost`) で解く。`cost` は今の LP の費用 (`self.lp.costs()`。Feasibility Pump の距離の費用のこともある)。
+    /// 最適なら、整数列を固定値に置き直した点を `on_opt` に渡す (LP は解けた状態のままなので、双対値・基底を読める)。
+    /// 戻る前に LP の状態と費用を戻し、解き直しの反復は LP の反復の累計に入れない (累計を基準にするヒューリスティクスの予算などを
+    /// 動かさないため)。返り値は (LP の状態、解き直しの反復、`on_opt` の返り値)。
+    /// [`Self::resolve_continuous`] (連続列は問題の境界) と [`Self::fixed_int_lp`] (大域の境界) の共通部分
+    pub(super) fn with_fixed_int_lp<R>(
+        &mut self,
+        x: &[f64],
+        round: bool,
+        cost: Vec<f64>,
+        cont: impl Fn(&Self, usize) -> (f64, f64),
+        deadline: Option<Instant>,
+        on_opt: impl FnOnce(&mut Self, Vec<f64>) -> R,
+    ) -> (LpStatus, u64, Option<R>) {
+        let p = self.p;
+        let fixed = |j: usize| if round { x[j].round() } else { x[j] };
+        let saved = self.lp.save_state();
+        let it0 = self.lp.total_iterations();
+        let swap = cost != p.cost;
+        if swap {
+            self.lp.set_costs(&p.cost);
         }
+        for j in 0..p.n {
+            let (lo, up) = if p.is_int[j] { (fixed(j), fixed(j)) } else { cont(self, j) };
+            self.lp.set_col_bounds(j, lo, up);
+        }
+        let st = self.lp.solve(&SolveLimits { deadline, ..Default::default() });
+        let iters = self.lp.total_iterations() - it0;
+        let r = (st == LpStatus::Optimal).then(|| {
+            let mut y = self.lp.col_values();
+            for j in 0..p.n {
+                if p.is_int[j] {
+                    y[j] = fixed(j);
+                }
+            }
+            on_opt(self, y)
+        });
         if swap {
             self.lp.set_costs(&cost);
         }
         self.lp.restore_state(&saved);
         self.lp.set_total_iterations(it0);
+        (st, iters, r)
     }
 
     /// `ENOMOTO_MIP_POLISH_WARM` の漏れの見積り: 点 `x` (この問題の空間) の行・列の境界の違反に、今の LP の双対値・被約費用の
@@ -8545,6 +8610,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return false;
         }
         // 整数を固定して連続変数を解き直す (`try_incumbent` が偽なら LP には触れていないので、LP の値は上と同じ)
+        // `ENOMOTO_MIP_UNIFY_FIX` の `t`: [`Self::with_fixed_int_lp`] で解く (元の費用で解き、反復を累計に入れない。連続列はノードの境界のまま)
+        if unify_fix('t') {
+            let x = self.lp.col_values();
+            let cost = self.lp.costs();
+            let (_, _, ok) = self.with_fixed_int_lp(&x, true, cost, |s, j| s.lp.col_bounds(j), self.deadline, |s, y| s.try_incumbent(y));
+            return ok.unwrap_or(false);
+        }
         let saved = self.lp.save_state();
         for j in 0..self.p.n {
             if self.p.is_int[j] {
@@ -23930,7 +24002,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     };
                     self.dom.set_cut_tag(idx);
                 }
-                let r = self.cutpool_prop_cut(k as usize, cont_frac);
+                let r = self.cutpool_prop_cut(k as usize, cont_frac, true);
                 if super::cutconf::mode().is_some() && !self.params.submip {
                     let kk = k as usize;
                     super::cutconf::note_range(&self.dom, cc_pos0, &mut None, || (self.cut_pool[kk].0.clone(), self.cut_pool[kk].1));
@@ -24224,7 +24296,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.lit_conflicts.propagate_tag(p, &mut self.dom, start, Some(&mut tagger))
     }
 
-    fn cutpool_prop_cut(&mut self, k: usize, cont_frac: f64) -> Result<bool, ()> {
+    /// カットの貯めの `k` 本目 (`sum c_j x_j <= rhs`) で定義域の境界を締める (最小活動度の無限の項が 2 つ以上なら何もしない)。
+    /// 連続列は幅の `cont_frac` 倍以上縮むときだけ締める。締めたら真。矛盾 (最小活動度が右辺を越える、締めて空になる) なら `Err`。
+    /// `reset_age` なら、締めたカットの年齢を 0 に戻す (HiGHS と同じく、使われたとみなす)
+    fn cutpool_prop_cut(&mut self, k: usize, cont_frac: f64, reset_age: bool) -> Result<bool, ()> {
         let p = self.p;
         let (s0, e0) = (self.pool_start[k] as usize, self.pool_start[k + 1] as usize);
         let rhs = self.cut_pool[k].1;
@@ -24275,7 +24350,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 return Err(());
             }
         }
-        if changed {
+        if changed && reset_age {
             // HiGHS と同じく、境界を締めたカットは使われたとして年齢を戻す
             self.pool_age[k] = 0;
         }
@@ -24297,55 +24372,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         'outer: for _ in 0..passes {
             let mut changed = false;
             for k in 0..self.cut_pool.len() {
-                let (s0, e0) = (self.pool_start[k] as usize, self.pool_start[k + 1] as usize);
-                let rhs = self.cut_pool[k].1;
-                let mut minact = 0.0f64;
-                let mut ninf = 0usize;
-                let mut infj = usize::MAX;
-                for t in s0..e0 {
-                    let (j, c) = (self.pool_idx[t] as usize, self.pool_val[t]);
-                    let b = if c > 0.0 { self.dom.lo[j] } else { self.dom.up[j] };
-                    if b.is_finite() {
-                        minact += c * b;
-                    } else {
-                        ninf += 1;
-                        infj = j;
-                    }
-                }
-                if env_str!("ENOMOTO_MIP_DEBUG_CPP").is_some() && !self.params.submip && self.cutpool_prop_stats[0] < 12 && k + 738 == self.cut_pool.len() {
-                    eprintln!("CPP call {} cut {k} minact {minact} rhs {rhs} ninf {ninf} vals {:?}", self.cutpool_prop_stats[0], (s0..e0).map(|t| (self.pool_idx[t], self.pool_val[t], self.dom.lo[self.pool_idx[t] as usize], self.dom.up[self.pool_idx[t] as usize])).collect::<Vec<_>>());
-                }
-                if ninf >= 2 {
-                    continue;
-                }
-                if ninf == 0 && minact > rhs + 1e-6 * (1.0 + rhs.abs()) {
-                    bad = Some(k);
-                    break 'outer;
-                }
-                let gap = rhs - minact;
-                for t in s0..e0 {
-                    let (j, c) = (self.pool_idx[t] as usize, self.pool_val[t]);
-                    if ninf == 1 && j != infj {
-                        continue;
-                    }
-                    let (lo, up) = (self.dom.lo[j], self.dom.up[j]);
-                    if ninf == 0 && c.abs() * (up - lo) <= gap + 1e-9 * (1.0 + gap.abs()) {
-                        continue;
-                    }
-                    let tight = if c > 0.0 {
-                        let v = if ninf == 0 { lo + gap / c } else { gap / c };
-                        let need = if p.is_int[j] { 1e-6 * (1.0 + up.abs().min(1e6)) } else { (cont_frac * (up - lo)).max(1e-6 * (1.0 + up.abs().min(1e6))) };
-                        v < up - need && self.dom.tighten_upper(p, j, v)
-                    } else {
-                        let v = if ninf == 0 { up + gap / c } else { gap / c };
-                        let need = if p.is_int[j] { 1e-6 * (1.0 + lo.abs().min(1e6)) } else { (cont_frac * (up - lo)).max(1e-6 * (1.0 + lo.abs().min(1e6))) };
-                        v > lo + need && self.dom.tighten_lower(p, j, v)
-                    };
-                    if tight {
-                        changed = true;
-                        self.cutpool_prop_stats[2] += 1;
-                    }
-                    if self.dom.infeasible {
+                // 年齢は戻さない (この全部を回す道は前からそうだった)
+                match self.cutpool_prop_cut(k, cont_frac, false) {
+                    Ok(c) => changed |= c,
+                    Err(()) => {
                         bad = Some(k);
                         break 'outer;
                     }
@@ -27203,6 +27233,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let Some((_, x0)) = self.incumbent.clone() else { return };
         let q: std::sync::Arc<MipProblem> = std::sync::Arc::new(match &self.orig {
             Some(o) => (**o).clone(),
+            // `ENOMOTO_MIP_UNIFY_FIX` の `l`: 元の問題がなければ、大域の境界 (根で締めたもの) を渡す (ほかの FJ・Local-MIP の呼び手と同じ)
+            None if unify_fix('l') => {
+                let mut q = self.p.clone();
+                q.col_lo.clone_from(&self.dom.global_lo);
+                q.col_up.clone_from(&self.dom.global_up);
+                q
+            }
             None => self.p.clone(),
         });
         if q.n != x0.len() {

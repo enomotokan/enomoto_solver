@@ -10,7 +10,7 @@
 //!
 //! 等式の行は `>=` と `<=` の 2 本にする (HiGHS と同じ)。
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 thread_local! {
     /// 止める合図が立った FJ2 では LP 修復をしない ([`super::heuristics::fj_lmip_mix`] が立てる)
@@ -342,7 +342,7 @@ pub(super) fn fj2_search_from(p: &super::problem::MipProblem, lo: &[f64], up: &[
     if n == 0 {
         return None;
     }
-    let t_end = Instant::now() + Duration::from_secs_f64(time_cap.max(0.0));
+    let t_end = Instant::now() + crate::cancel::secs(time_cap);
     // 試作 `ENOMOTO_MIP_TICKS` の `j` ([`crate::ticks::vclock`]): 終わりを手間で数える
     let tk_end = crate::ticks::vclock().then(|| crate::ticks::total() + time_cap.max(0.0) * 1e9);
     let past_end = || match tk_end { Some(e) => crate::ticks::total() >= e, None => Instant::now() >= t_end };

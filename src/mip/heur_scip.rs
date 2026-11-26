@@ -375,67 +375,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return false;
         }
         let n = p.n;
-        let mut rows = p.rows.clone();
-        let mut col_lo = self.dom.global_lo.clone();
-        let mut col_up = self.dom.global_up.clone();
-        let mut cost = vec![0.0; n];
-        let mut is_int = p.is_int.clone();
-        for (i, r) in rows.iter_mut().enumerate() {
-            let scale = r.iter().fold(0.0f64, |m, &(_, a)| m.max(a.abs())).max(1e-9);
-            // 下限側の違反 s_lo (a x + s_lo >= lo)、上限側の違反 s_up (a x - s_up <= up)
-            if p.row_lo[i].is_finite() {
-                r.push((col_lo.len(), scale));
-                col_lo.push(0.0);
-                col_up.push(f64::INFINITY);
-                cost.push(1.0);
-                is_int.push(false);
-            }
-            if p.row_up[i].is_finite() {
-                r.push((col_lo.len(), -scale));
-                col_lo.push(0.0);
-                col_up.push(f64::INFINITY);
-                cost.push(1.0);
-                is_int.push(false);
-            }
-        }
-        let sub = super::problem::MipProblem::from_rows(col_lo, col_up, cost, 0.0, 1.0, is_int, rows, p.row_lo.clone(), p.row_up.clone());
-        let remaining = self.secs_left();
-        let params = super::solver::MipParams {
-            time_limit: (tunable!("ENOMOTO_T_MIP_MINREL_TIME_FRAC", 0.1, f64) * remaining).min(10.0),
-            node_limit: 1000,
-            rel_gap: 0.0,
-            abs_gap: 1e-9,
-            verbose: false,
-            submip: true,
-            cutoff: f64::INFINITY,
-            restarts: 0,
-            skip_heurs: 0,
-            threads: 1,
-            distinguish: false,
-            fc_submip: false,
-            tl_base: f64::NAN,
-            // 乱数の種は親のものを渡す
-            seed: self.params.seed,
-        };
-        let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());
-        self.heur_iters += r.lp_iterations;
+        let sub = slack_relaxed(p, self.dom.global_lo.clone(), self.dom.global_up.clone(), |_| true);
+        let time_limit = (tunable!("ENOMOTO_T_MIP_MINREL_TIME_FRAC", 0.1, f64) * self.secs_left()).min(10.0);
+        let r = self.solve_slack_relaxed(&sub, time_limit, 1000);
         let Some(xs) = r.x else {
             if self.params.verbose {
                 eprintln!("MIP:   min relaxation: no point ({:?})", r.status);
             }
             return false;
         };
-        let viol: f64 = xs[n..].iter().sum();
-        let x: Vec<f64> = xs[..n].to_vec();
         if self.params.verbose {
+            let viol: f64 = xs[n..].iter().sum();
             eprintln!("MIP:   min relaxation: status {:?}, nodes {}, total violation {viol:.3e}", r.status, r.nodes);
         }
-        if self.try_incumbent(x.clone()) {
-            return true;
-        }
-        // 違反が残った: 整数列の値を目標に固定・伝播し、連続部分を LP で解いて直す
-        let ints: Vec<usize> = (0..n).filter(|&j| p.is_int[j]).collect();
-        self.fix_and_propagate(&x, &ints)
+        self.finish_slack_point(&xs)
     }
 
     /// LP face (SCIP の heur_lpface): 根の LP で被約費用が 0 でない非基底の列 (整数・連続とも) をその境界に固定し、
@@ -659,7 +612,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             Some(x) => x,
             None => (0..p.n).map(|j| if p.is_int[j] { xlp[j].round().clamp(self.dom.lo[j], self.dom.up[j]) } else { xlp[j] }).collect(),
         };
-        let tol = |b: f64| 1e-6 * (1.0 + b.abs());
+        // `ENOMOTO_MIP_UNIFY_FIX` の `r`: `is_feasible` と同じ許容誤差 (前は `1e-6 (1 + |b|)` で、|b| の大きい行の違反を見落とし、
+        // 補助 MIP を試さずに `try_incumbent` で落ちていた)
+        let fix_r = super::solver::unify_fix('r');
+        let tol = |b: f64| if fix_r { FEASTOL + 1e-9 * b.abs() } else { 1e-6 * (1.0 + b.abs()) };
         let act: Vec<f64> = p.rows.iter().map(|r| r.iter().map(|&(j, a)| a * x0[j]).sum()).collect();
         let violated: Vec<bool> = (0..p.m).map(|i| act[i] < p.row_lo[i] - tol(p.row_lo[i]) || act[i] > p.row_up[i] + tol(p.row_up[i])).collect();
         let nviol = violated.iter().filter(|&&v| v).count();
@@ -684,62 +640,66 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 col_up[j] = x0[j];
             }
         }
-        let mut rows = p.rows.clone();
-        let mut cost = vec![0.0; n];
-        let mut is_int = p.is_int.clone();
-        for (i, r) in rows.iter_mut().enumerate() {
-            if !violated[i] {
-                continue;
-            }
-            let scale = r.iter().fold(0.0f64, |m, &(_, a)| m.max(a.abs())).max(1e-9);
-            for (bound, sign) in [(p.row_lo[i], 1.0), (p.row_up[i], -1.0)] {
-                if bound.is_finite() {
-                    r.push((col_lo.len(), sign * scale));
-                    col_lo.push(0.0);
-                    col_up.push(f64::INFINITY);
-                    cost.push(1.0);
-                    is_int.push(false);
-                }
-            }
-        }
-        let sub = super::problem::MipProblem::from_rows(col_lo, col_up, cost, 0.0, 1.0, is_int, rows, p.row_lo.clone(), p.row_up.clone());
-        let remaining = self.secs_left();
-        let params = super::solver::MipParams {
-            time_limit: (0.07 * remaining).min(6.0),
-            node_limit: 500,
-            rel_gap: 0.0,
-            abs_gap: 1e-9,
-            verbose: false,
-            submip: true,
-            cutoff: f64::INFINITY,
-            restarts: 0,
-            skip_heurs: 0,
-            threads: 1,
-            distinguish: false,
-            fc_submip: false,
-            tl_base: f64::NAN,
-            // 乱数の種は親のものを渡す
-            seed: self.params.seed,
-        };
-        let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());
-        self.heur_iters += r.lp_iterations;
+        let sub = slack_relaxed(p, col_lo, col_up, |i| violated[i]);
+        let r = self.solve_slack_relaxed(&sub, (0.07 * self.secs_left()).min(6.0), 500);
         let Some(xs) = r.x else {
             if self.params.verbose && self.nodes <= 1 {
                 eprintln!("MIP:   repair: {nviol} violated rows, no point ({:?})", r.status);
             }
             return false;
         };
-        let v: f64 = xs[n..].iter().sum();
         if self.params.verbose && self.nodes <= 1 {
+            let v: f64 = xs[n..].iter().sum();
             eprintln!("MIP:   repair: {nviol} violated rows, {} free columns, remaining violation {v:.3e}", free.iter().filter(|&&f| f).count());
         }
-        let x: Vec<f64> = xs[..n].to_vec();
+        self.finish_slack_point(&xs)
+    }
+
+    /// 違反量の列を足した補助 MIP ([`slack_relaxed`]) を、サブ MIP の設定 (時間の上限 `time_limit`、ノードの上限 `node_limit`) で解く。
+    /// [`Self::min_relaxation`] と [`Self::repair`] の共通部分
+    fn solve_slack_relaxed(&mut self, sub: &MipProblem, time_limit: f64, node_limit: u64) -> super::solver::MipResult {
+        let params = super::solver::MipParams::submip_base(time_limit, node_limit, self.params.seed);
+        let r = super::solve_problem(sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());
+        self.heur_iters += r.lp_iterations;
+        r
+    }
+
+    /// 補助 MIP の点 `xs` (元の列 + 違反量の列) の元の列を暫定解として試す。違反が残って解にならなければ、整数列の値を目標に
+    /// 固定・伝播し、連続部分を LP で解いて直す
+    fn finish_slack_point(&mut self, xs: &[f64]) -> bool {
+        let p = self.p;
+        let x: Vec<f64> = xs[..p.n].to_vec();
         if self.try_incumbent(x.clone()) {
             return true;
         }
-        let ints: Vec<usize> = (0..n).filter(|&j| p.is_int[j]).collect();
+        let ints: Vec<usize> = (0..p.n).filter(|&j| p.is_int[j]).collect();
         self.fix_and_propagate(&x, &ints)
     }
+}
+
+/// 違反量の列を足した補助 MIP (feasRelax 型): `relax(i)` の行 `i` に、下限側の違反 s_lo (a x + s_lo >= lo)・上限側の違反 s_up
+/// (a x - s_up <= up) の非負の連続列を (有限な側だけ、この順に) 足す。違反量の係数は行の係数の絶対値の最大 (1e-9 以上) で、
+/// 目的は違反量の合計 (元の列の費用は 0)。元の列の範囲は `col_lo`・`col_up`
+fn slack_relaxed(p: &MipProblem, mut col_lo: Vec<f64>, mut col_up: Vec<f64>, relax: impl Fn(usize) -> bool) -> MipProblem {
+    let mut rows = p.rows.clone();
+    let mut cost = vec![0.0; p.n];
+    let mut is_int = p.is_int.clone();
+    for (i, r) in rows.iter_mut().enumerate() {
+        if !relax(i) {
+            continue;
+        }
+        let scale = r.iter().fold(0.0f64, |m, &(_, a)| m.max(a.abs())).max(1e-9);
+        for (bound, sign) in [(p.row_lo[i], 1.0), (p.row_up[i], -1.0)] {
+            if bound.is_finite() {
+                r.push((col_lo.len(), sign * scale));
+                col_lo.push(0.0);
+                col_up.push(f64::INFINITY);
+                cost.push(1.0);
+                is_int.push(false);
+            }
+        }
+    }
+    MipProblem::from_rows(col_lo, col_up, cost, 0.0, 1.0, is_int, rows, p.row_lo.clone(), p.row_up.clone())
 }
 
 /// 試作 `ENOMOTO_MIP_VB01` の `c`: 位相順に行のクリーク ([`vb01_cliques`]) も使う (衝突グラフで落ちる長い集合分割・詰め込みの行を入れる)
@@ -1011,23 +971,7 @@ pub(crate) fn vbounds01_on_problem(p: &MipProblem, verbose: bool, time_limit: f6
         let mut sub = p.clone();
         sub.col_lo = lo;
         sub.col_up = up;
-        let params = super::solver::MipParams {
-            time_limit,
-            node_limit: 500,
-            rel_gap: 0.0,
-            abs_gap: 1e-9,
-            verbose: false,
-            submip: true,
-            cutoff: best.as_ref().map_or(f64::INFINITY, |(z, _)| *z),
-            restarts: 0,
-            skip_heurs: 0,
-            threads: 1,
-            distinguish: false,
-            fc_submip: false,
-            tl_base: f64::NAN,
-            // 乱数の種は親のものを渡す
-            seed,
-        };
+        let params = super::solver::MipParams { cutoff: best.as_ref().map_or(f64::INFINITY, |(z, _)| *z), ..super::solver::MipParams::submip_base(time_limit, 500, seed) };
         let r = super::solve_problem(&sub, params, true);
         if let Some(x) = r.x {
             let z = p.objective(&x);

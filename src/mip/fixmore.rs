@@ -75,7 +75,8 @@ fn obj_row_pass(p: &MipProblem, d: &mut Domain, obj: &[(usize, f64)], u: f64) ->
         };
         let lim = (u - rest) / c;
         // 丸め誤差の分だけ緩める (整数列は `tighten_*` が切り捨てる前に許容誤差を足す)
-        let slack = 1e-9 * (1.0 + lim.abs());
+        // `ENOMOTO_MIP_UNIFY_FIX` の `s`: 整数列には足さない (`Solver::global_obj_prop_ex` と同じ)
+        let slack = if p.is_int[j] && super::solver::unify_fix('s') { 0.0 } else { 1e-9 * (1.0 + lim.abs()) };
         if c > 0.0 {
             if lim + slack < d.up[j] {
                 d.tighten_upper(p, j, lim + slack);
