@@ -1163,6 +1163,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// `ENOMOTO_MIP_POLISH_WARM`: 研磨で値を確かめた暫定解のうち最良のもの (目的値は整数を固定した LP の値)。返す暫定解の値が確かでない
     /// ([`WarmMark::Unknown`]、または印がない) まま時間切れになったとき、こちらを返す (analysis/nattai_20261125 の 10 節)
     warm_verified: Option<(f64, Vec<f64>)>,
+    /// 試作 `ENOMOTO_MIP_ROOTPAR_PH` の `b` ([`Solver::rph_join_polish`]): 根で別スレッドで回している研磨 (結果, 研磨した解) と、研磨にかけた解・見積りを足す前の目的値
+    rph_bg: Option<(std::thread::JoinHandle<(super::WarmPolish, Vec<f64>)>, Vec<f64>, f64)>,
     /// 診断用 `ENOMOTO_MIP_GAP4_RSS`: 生きている `Solver` の数に数えたか (サブ MIP か)。[`GAP4_LIVE`]
     gap4_live: Option<bool>,
     /// `ENOMOTO_MIP_GAP4` の `k`: 最後の locks の固定率と、根の並列の locks のサブ MIP が実行不能だったか ([`Self::locks_retry`])
@@ -5951,6 +5953,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         warm_rc: None,
         warm_mark: None,
         warm_verified: None,
+        rph_bg: None,
         gap4_live: gap4_sub,
         gap4_locks: (0.0, false),
         mem2_keep: (true, true),
@@ -6418,7 +6421,9 @@ pub(super) fn pool_close_on() -> bool {
 }
 
 /// 試作 `ENOMOTO_MIP_ROOTPAR_PH=<文字>` (既定では使わない、analysis/rootpar_ph_20261126): 4 スレッドの根の前処理・ヒューリスティクスの段で、
-/// 空いているスレッドを使う。`r`: カット前の LP 解の RENS をカットのループの前に並列のサブ MIP として出す
+/// 空いているスレッドを使う。`r`: カット前の LP 解の RENS をカットのループの前に並列のサブ MIP として出す。
+/// `w`: 暫定解を受け取るときの研磨の LP に、整数を固定した LP と同じ時間の上限を付ける (1 スレッドの道筋も変わる)。
+/// `b`: 2 スレッド以上の外側の根では、研磨を別スレッドで回し、見積りの印で先に受け取って、根のヒューリスティクスの終わりと求解の終わりで待って受け取る
 pub(super) fn rootpar_ph(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     V.get_or_init(|| env_str!("ENOMOTO_MIP_ROOTPAR_PH").map_or(String::new(), |v| v.to_string())).contains(c)
@@ -7385,6 +7390,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
         !self.params.submip && self.snap.is_none() && self.pool_tid == 0 && self.watch.is_none() && work_limit().is_some()
     }
 
+    /// 今から `secs` 秒後と、求解の期限 (`self.deadline`) の早い方。
+    /// `secs` は [0, 1e6] 秒に押さえる (負・NaN は 0、無限・大きすぎる値は 1e6 秒。`Duration::from_secs_f64` が落ちないように)
+    pub(super) fn deadline_in(&self, secs: f64) -> Instant {
+        let d = Instant::now() + Duration::from_secs_f64(if secs > 0.0 { secs.min(1e6) } else { 0.0 });
+        self.deadline.map_or(d, |g| g.min(d))
+    }
+
+    /// 求解の期限までの残り秒 (期限がなければ無限)
+    pub(super) fn secs_left(&self) -> f64 {
+        self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64())
+    }
+
     pub(super) fn time_up(&self) -> bool {
         self.deadline.is_some_and(|d| Instant::now() >= d)
             || (self.work_counted() && WORK_BASE.load(std::sync::atomic::Ordering::Relaxed) + self.lp.total_iterations() + self.heur_iters >= work_limit().unwrap_or(u64::MAX))
@@ -8198,11 +8215,37 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         // (返すときに確かめた解に戻す道・期限なしで解く道を通す確かめ用。analysis/nattai_20261125 の 10 節)
                         let diag_u = env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('u'));
                         let rel = rel && !diag_u;
+                        // 試作 `ROOTPAR_PH` の `b` ([`rootpar_ph`]): 2 スレッド以上の外側の根では、研磨を別スレッドで始めて、ここでは解かない扱い
+                        // (見積りを足して印をつける) で受け取る。根のヒューリスティクスの終わりと求解の終わりで待って受け取る ([`Self::rph_join_polish`])
+                        let rph_b = rootpar_ph('b') && mip_threads() > 1 && !self.params.submip && self.snap.is_none() && self.nodes <= 1 && self.rph_bg.is_none() && warm == 2 && !diag_u;
                         let r = if warm == 3 || diag_u {
+                            super::WarmPolish::NotSolved
+                        } else if rph_b {
+                            let pc = MipProblem::clone(self.p);
+                            let (xc, zc, bc, dl) = (x.clone(), z, rb.clone().or_else(|| Some(self.lp.basis())), self.deadline);
+                            let h = std::thread::spawn(move || {
+                                let mut xx = xc;
+                                let r = super::polish_in_problem_warm(&pc, &mut xx, zc, bc.as_ref(), dl);
+                                (r, xx)
+                            });
+                            if self.params.verbose {
+                                eprintln!("MIP: ROOTPAR_PH b: polishing the incumbent {z:.10e} in the background ({:.2}s)", self.start.elapsed().as_secs_f64());
+                            }
+                            self.rph_bg = Some((h, x.clone(), z));
                             super::WarmPolish::NotSolved
                         } else {
                             let b = if env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('n')) { Some(self.lp.basis()) } else { rb.or_else(|| Some(self.lp.basis())) };
-                            let r = super::polish_in_problem_warm(&self.p, &mut x, z, b.as_ref(), self.deadline);
+                            // 試作 `ENOMOTO_MIP_ROOTPAR_PH` の `w` ([`rootpar_ph`]、analysis/rootpar_ph_20261126): 研磨の LP に、整数を固定した LP
+                            // (`resolve_continuous`) と同じ時間の上限 (`ENOMOTO_T_MIP_INC_LP_TIME_FRAC` (0.02) × 時間の上限、最低 1 秒) を付ける。
+                            // 間に合わなければ下の `NotSolved` の道 (その点を出した LP の双対値からの見積り `Est`、取れなければ `Unknown` で返す前に確かめる) に入る。
+                            // dano3_3 (4 スレッド) では根のカットのループの乱択丸めの解の研磨が 20 秒かかり、カットのループの時間の上限を越えていた
+                            let deadline = if rootpar_ph('w') && self.params.frac_tl().is_finite() {
+                                let cap = (tunable!("ENOMOTO_T_MIP_INC_LP_TIME_FRAC", 0.02, f64) * self.params.frac_tl()).max(1.0);
+                                Some(self.deadline_in(cap))
+                            } else {
+                                self.deadline
+                            };
+                            let r = super::polish_in_problem_warm(&self.p, &mut x, z, b.as_ref(), deadline);
                             // 診断 `ENOMOTO_MIP_POLISH_STATS` の `v`: 見積りと、解き直しで実際に上がった目的値を並べて出す
                             if env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('v')) {
                                 let got = if let super::WarmPolish::Replaced(zn) = r { format!("{:.3e}", zn - z) } else { "-".into() };
@@ -8384,8 +8427,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_FJ_P3` のときも使う (FJ の解は境界を締めた問題のもので、uccase12 では同じくこの LP が長引く)
         let deadline = if (env_str!("ENOMOTO_MIP_INC_LP_CAP").is_some() || super::fj_p3_on()) && self.params.frac_tl().is_finite() {
             let cap = (tunable!("ENOMOTO_T_MIP_INC_LP_TIME_FRAC", 0.02, f64) * self.params.frac_tl()).max(1.0);
-            let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap);
-            Some(self.deadline.map_or(d, |g| g.min(d)))
+            Some(self.deadline_in(cap))
         } else {
             self.deadline
         };
@@ -11857,9 +11899,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         // 内点法の時間の上限: 根の LP の時間の `ENOMOTO_T_MIP_ROBUST_ROOTIPM_MULT` 倍 (既定 3)、少なくとも 0.2 秒
                         // (neos-960392 は根の LP 1.9 秒に対し内点法 + クロスオーバーが 35 秒かかった)
                         let cap = (tunable!("ENOMOTO_T_MIP_ROBUST_ROOTIPM_MULT", 3.0, f64) * self.root_lp_secs).max(0.2);
-                        let d = Instant::now() + std::time::Duration::from_secs_f64(cap);
+                        let d = self.deadline_in(cap);
                         let t0 = Instant::now();
-                        let st = self.lp.solve_rescue(&SolveLimits { deadline: Some(self.deadline.map_or(d, |g| g.min(d))), ..Default::default() });
+                        let st = self.lp.solve_rescue(&SolveLimits { deadline: Some(d), ..Default::default() });
                         let nfrac = if st == LpStatus::Optimal { self.fractional(&self.lp.col_values()).len() } else { 0 };
                         if self.params.verbose {
                             eprintln!("MIP: robust root IPM: cut loop flat at {post:.10e}; re-solved by IPM + crossover (cap {cap:.2}s): {st:?}, obj {:.10e}, {nfrac} fractional ({:.2}s)", self.lp.objective() + self.p.offset, t0.elapsed().as_secs_f64());
@@ -11971,7 +12013,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let light_root = self.params.restarts > 0 && self.params.cutoff.is_finite() && env_str!("ENOMOTO_MIP_LIGHT_RESTART_ROOT").is_some();
         if find_thread_on() && !light_root && self.snap.is_none() && !self.params.submip && self.params.threads > if thread_budget_on() { 3 } else { 2 } && self.fj_poor() && !self.fractional(&self.lp.col_values()).is_empty() {
             let snap = self.make_snapshot(&Portfolio::new(), &mut None, false);
-            let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
+            let remaining = self.secs_left();
             let budget = (tunable!("ENOMOTO_T_MIP_FIND_THREAD_FRAC", 0.3, f64) * remaining).min(tunable!("ENOMOTO_T_MIP_FIND_THREAD_MAX", 20.0, f64));
             let params = MipParams { time_limit: budget, node_limit: u64::MAX, verbose: env_str!("ENOMOTO_MIP_FIND_THREAD_LOG").is_some(), threads: 1, ..self.params };
             let dive_budget = 2 * root_iters + 1000;
@@ -12016,7 +12058,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 let job = std::sync::Arc::new(CutJob::new(mode == "heavy", determ, self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z), self.lp.objective() + self.p.offset));
                 let snap = self.make_snapshot(&Portfolio::new(), &mut None, false);
-                let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
+                let remaining = self.secs_left();
                 let mut threads = tunable!("ENOMOTO_T_MIP_BG_CUTS_THREADS", (self.params.threads - 1).max(1), usize);
                 // 暫定解が質の悪い FJ の解だけなら (`ENOMOTO_MIP_NO_FJ_POOR_BG_RENS` で使わない)、背景のカットの分離のスレッドを 1 本減らし、
                 // 空いた分で暫定解なし用のダイビング式 RENS のサブ MIP を別スレッドで解く ([`fj_poor_bg_rens`])
@@ -12310,7 +12352,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let each = tunable!("ENOMOTO_T_MIP_ROOTCAP_EACH_MIN", 1.0, f64)
                         .max(tunable!("ENOMOTO_T_MIP_ROOTCAP_EACH_TL", 0.02, f64) * tl)
                         .max(tunable!("ENOMOTO_T_MIP_ROOTCAP_EACH", if rootcap('k') { 1.0 } else { 5.0 }, f64) * t_lp);
-                    let rem = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
+                    let rem = self.secs_left();
                     let f_rem = if self.incumbent.is_some() { tunable!("ENOMOTO_T_MIP_ROOTCAP_REM", 0.15, f64) } else { tunable!("ENOMOTO_T_MIP_ROOTCAP_REM_NOINC", 0.25, f64) };
                     let tot = (tunable!("ENOMOTO_T_MIP_ROOTCAP_TOT_TL", 0.05, f64) * tl).max(tunable!("ENOMOTO_T_MIP_ROOTCAP_TOT", if rootcap('k') { 2.0 } else { 20.0 }, f64) * t_lp).min(f_rem * rem);
                     let each = each.min(tot);
@@ -12596,7 +12638,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let mut par_dives: Vec<Option<std::thread::JoinHandle<MipResult>>> = Vec::new();
                 if self.incumbent.is_none() && !light && mip_threads() > 1 && !self.params.submip && env_str!("ENOMOTO_MIP_PAR_DIVES").is_some() {
                     let snap = self.make_snapshot(&Portfolio::new(), &mut None, false);
-                    let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
+                    let remaining = self.secs_left();
                     let params = MipParams { time_limit: remaining, node_limit: u64::MAX, verbose: false, threads: 1, ..self.params };
                     for kind in 1..=4u8 {
                         let on = kind != 4 || env_str!("ENOMOTO_MIP_NO_COEF_DIVE").is_none();
@@ -12879,6 +12921,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     heur!("sub-MIP Local-MIP", self.subheur_local_mip());
                 }
                 self.rootcap_end = self.rootcap_until.take();
+                // 試作 `ROOTPAR_PH` の `b`: 別スレッドの研磨をここで待って受け取る
+                self.rph_join_polish();
                 if self.params.verbose {
                     eprintln!("MIP: after root heuristics: incumbent {:?} ({:.2}s)", self.incumbent.as_ref().map(|(z, _)| *z), self.start.elapsed().as_secs_f64());
                     // 診断用 (`ENOMOTO_MIP_SUBMIP_VERBOSE`): 根のヒューリスティクスの時間を、どの求解の根か (道筋、`M` は外側) をつけて出す
@@ -12947,7 +12991,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let mut wait_why = "";
             if let Some(d) = determ {
                 // 試作 `ENOMOTO_MIP_BG_CUTS_DETERM`: 裏のカットが自分で終わるまで待つ (時間の上限は安全網)
-                let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
+                let remaining = self.secs_left();
                 let min_left = tunable!("ENOMOTO_T_MIP_BG_CUTS_WAIT_MIN_LEFT", 0.05, f64) * self.params.frac_tl();
                 let mut cap = (tunable!("ENOMOTO_T_MIP_BG_DETERM_SAFE_FRAC", 0.3, f64) * remaining).min((remaining - min_left).max(0.0));
                 // `ENOMOTO_MIP_LOSE6_3_CUTRESTART` の `w` (試作): 根のカットのループを再スタートの判定で抜けたなら、裏のカットを待たない
@@ -13004,7 +13048,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     eprintln!("MIP: background cuts: rounds so far [{}]", rounds.join(", "));
                 }
             } else if bg_cuts_wait_on() && !small_nowait && !er_halt {
-                let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
+                let remaining = self.secs_left();
                 let mult = tunable!("ENOMOTO_T_MIP_BG_CUTS_WAIT_MULT", 5.0, f64);
                 let mut cap = tunable!("ENOMOTO_T_MIP_BG_CUTS_WAIT_FRAC", 0.1, f64) * remaining;
                 if mult > 0.0 {
@@ -13066,7 +13110,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let mut cap = tunable!("ENOMOTO_T_MIP_OPTFACE_PAR_WAIT", 0.5, f64) * t0.elapsed().as_secs_f64();
                 // `k`: 勝った写しは主の写しより後まで回るので、裏のカットの待ちの安全網 (`ENOMOTO_T_MIP_BG_DETERM_SAFE_FRAC` x 残り時間) まで待つ
                 if env_str!("ENOMOTO_MIP_OPTFACE_PARCUTS").is_some_and(|v| v.contains('k')) {
-                    let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
+                    let remaining = self.secs_left();
                     cap = cap.max(tunable!("ENOMOTO_T_MIP_BG_DETERM_SAFE_FRAC", 0.3, f64) * remaining.min(1e6));
                 }
                 // `m`: 写しはラウンド数で自分で止まるので、終わるまで `ENOMOTO_T_MIP_OPTFACE_MERGE_WAIT` (既定 3) 秒までは待つ
@@ -13160,8 +13204,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // 既定の道で元のカットに戻す)。satellites2-60-fs では 157395 反復 359 秒 (根の LP は 62 秒) で時間の上限に当たり、木に入らなかった
                     let bg_deadline = if env_str!("ENOMOTO_MIP_TREE3_BGCAP").is_some_and(|v| v != "0") {
                         let secs = tunable!("ENOMOTO_T_MIP_TREE3_BGCAP_MIN", 1.0, f64).max(tunable!("ENOMOTO_T_MIP_TREE3_BGCAP_MULT", 1.0, f64) * self.root_lp_secs);
-                        let d = Instant::now() + std::time::Duration::from_secs_f64(secs.min(1e6));
-                        Some(self.deadline.map_or(d, |g| g.min(d)))
+                        Some(self.deadline_in(secs))
                     } else {
                         self.deadline
                     };
@@ -26127,10 +26170,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             super::dump_mps(&newp, &f);
             eprintln!("MIP: restart: dumped the problem to {f} (offset {}, cutoff {}, incumbent {:?})", newp.offset, self.prune_limit().min(self.params.cutoff), self.incumbent.as_ref().map(|(z, _)| *z));
         }
-        let remaining = match self.deadline {
-            Some(d) => d.saturating_duration_since(Instant::now()).as_secs_f64(),
-            None => f64::INFINITY,
-        };
+        let remaining = self.secs_left();
         // `ENOMOTO_MIP_WORK_LIMIT`: この求解の手間を次の求解 (再スタートの後) に引き継ぐ
         if self.work_counted() {
             WORK_BASE.fetch_add(self.lp.total_iterations() + self.heur_iters, std::sync::atomic::Ordering::Relaxed);
@@ -27574,7 +27614,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // (主の 2 秒後) まで解き続けることがあり、主はそれを待つ (時間の上限の超過がほぼ 2.0 秒: physiciansched6-2・mzzv42z。
         // analysis/overrun_20261023.md)。`ENOMOTO_MIP_WORKER_HALT` なら止める合図を従の LP の反復にも伝える
         let halt = worker_halt().then(|| pool.halt.clone());
-        let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64() + 2.0);
+        let remaining = self.secs_left() + 2.0;
         let params = MipParams { time_limit: remaining, node_limit: u64::MAX, verbose: false, threads: 1, ..self.params };
         let prof = crate::simplex::slope_intercept_dual::mip_profile();
         let dbg = DEBUG_SOL.with(|d| d.borrow().clone());
@@ -28903,7 +28943,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let lb = self.global_lower_bound().min(plunge.map_or(f64::INFINITY, |n| n.lower_bound));
         let ub = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
         let gap = if ub.is_finite() && lb.is_finite() { (ub - lb).max(0.0) / ub.abs().max(1.0) } else { f64::INFINITY };
-        let left = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
+        let left = self.secs_left();
         let root_cost = if td_e { self.tr_w0.0 } else { self.tr_t0 } * tunable!("ENOMOTO_T_MIP_TREE_RESTART_GUARD_ROOT", 1.0, f64);
         // 木の残りの秒の見込み: 刈った重み q の木に入ってからの進みから (残り = 木の秒 × (1 − q) / q)。HiGHS 式の見積もり
         // ([`Self::tree_restart_due`] のノード数) からの値は記帳だけ (q が止まると見積もりが桁外れに大きくなる。eil33-2 で 1e9 秒)
@@ -29337,7 +29377,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             sub.cost.iter_mut().for_each(|c| *c = 0.0);
             sub.offset = 0.0;
         }
-        let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
+        let remaining = self.secs_left();
         // 区別を求められていない (`ENOMOTO_MIP_UNB_FEAS` だけで来た) ときは、実行可能性の問題に使う時間を
         // `ENOMOTO_T_MIP_UNB_FEAS_SECS` (既定 60 秒) までにし、結論が出なければ以前どおり `InfeasibleOrUnbounded` にする
         // (上限のない整数列の木の探索が終わらないことがある)
@@ -29363,7 +29403,32 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
     }
 
+    /// 試作 `ENOMOTO_MIP_ROOTPAR_PH` の `b`: 別スレッドで回している研磨を待って受け取る。研磨できたら (取り替えた・そのままで確かめた) 確かめた解に控え、
+    /// 今の暫定解がその解のままなら、目的値を研磨した値に、印を `Polished` にする (見積りで足した分を外す)。研磨できなければ見積りの印のまま
+    fn rph_join_polish(&mut self) {
+        let Some((h, x0, z0)) = self.rph_bg.take() else { return };
+        let Ok((r, xn)) = h.join() else { return };
+        let zn = match r {
+            super::WarmPolish::Replaced(zn) => Some(zn),
+            super::WarmPolish::Kept => Some(z0),
+            super::WarmPolish::NotSolved => None,
+        };
+        if self.params.verbose {
+            eprintln!("MIP: ROOTPAR_PH b: background polish done: {:?} ({:.2}s)", zn, self.start.elapsed().as_secs_f64());
+        }
+        let Some(zn) = zn else { return };
+        let xv = if matches!(r, super::WarmPolish::Replaced(_)) { xn } else { x0.clone() };
+        if self.warm_verified.as_ref().is_none_or(|(zv, _)| zn < *zv) {
+            self.warm_verified = Some((zn, xv.clone()));
+        }
+        if self.incumbent.as_ref().is_some_and(|(_, xi)| *xi == x0) {
+            self.incumbent = Some((zn, xv.clone()));
+            self.warm_mark = Some((xv, WarmMark::Polished));
+        }
+    }
+
     fn finish(&mut self, status: MipStatus, best_bound: f64) -> MipResult {
+        self.rph_join_polish();
         self.subcap_drain_deferred("finish");
         if tubr_on() && !self.params.submip && matches!(self.tubr_mask, Some(Some(_))) {
             eprintln!(

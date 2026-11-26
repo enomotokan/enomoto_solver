@@ -1008,12 +1008,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // max(`ENOMOTO_T_MIP_TREE3_CLIQUECAP_MIN` (1 秒), `ENOMOTO_T_MIP_TREE3_CLIQUECAP_MULT` (2) x 根の LP の秒) を置く (超えたら使わない)。
         // neos-3216931-puriri ではこの LP 1 回が 285〜388 秒 (根の LP は 11.7 秒) かかり、伸びは 0 で使われなかった
         let deadline = if let Some((_, secs)) = cap.filter(|c| c.1.is_finite()) {
-            let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(secs.min(1e6));
-            Some(self.deadline.map_or(d, |g| g.min(d)))
+            Some(self.deadline_in(secs))
         } else if env_str!("ENOMOTO_MIP_TREE3_CLIQUECAP").is_some_and(|v| v != "0") {
             let secs = tunable!("ENOMOTO_T_MIP_TREE3_CLIQUECAP_MIN", 1.0, f64).max(tunable!("ENOMOTO_T_MIP_TREE3_CLIQUECAP_MULT", 2.0, f64) * self.root_lp_secs);
-            let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(secs.min(1e6));
-            Some(self.deadline.map_or(d, |g| g.min(d)))
+            Some(self.deadline_in(secs))
         } else {
             self.deadline
         };
@@ -3596,8 +3594,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             work_rounds += 1;
             let lp_deadline = if cap.is_finite() {
-                let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap);
-                Some(self.deadline.map_or(d, |g| g.min(d)))
+                Some(self.deadline_in(cap))
             } else {
                 self.deadline
             };
@@ -3658,8 +3655,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let it1 = self.lp.total_iterations();
                         let mult = tunable!("ENOMOTO_T_MIP_HO5_CUTLP_GAIN_TIME_MULT", 3.0, f64);
                         let d = if cap.is_finite() {
-                            let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(mult * cap);
-                            Some(self.deadline.map_or(d, |g| g.min(d)))
+                            Some(self.deadline_in(mult * cap))
                         } else {
                             self.deadline
                         };
@@ -3782,8 +3778,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // `d`: 上限 (反復・時間) に当たったら、上限を倍にして止まったところからもう 1 回だけ続ける
             if rob_d && matches!(st, LpStatus::IterationLimit | LpStatus::TimeLimit) && !self.time_up() && !stopped(&job) {
                 let it1 = self.lp.total_iterations();
-                let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(2.0 * cap);
-                let d = if cap.is_finite() { Some(self.deadline.map_or(d, |g| g.min(d))) } else { self.deadline };
+                let d = if cap.is_finite() { Some(self.deadline_in(2.0 * cap)) } else { self.deadline };
                 let st0 = st;
                 st = self.lp.solve(&SolveLimits { iteration_limit: 2 * solve_lim, cutoff: cut_cutoff, deadline: d });
                 if self.params.verbose {
@@ -3827,8 +3822,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if self.time_up() || stopped(&job) {
                         break;
                     }
-                    let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap);
-                    let d = Some(self.deadline.map_or(d, |g| g.min(d)));
+                    let d = Some(self.deadline_in(cap));
                     st = self.lp.solve(&SolveLimits { iteration_limit: lim, cutoff: cut_cutoff, deadline: d });
                     if self.params.verbose {
                         eprintln!("MIP: cut round {round}: LP continued after the time limit: {st:?}");
@@ -3848,8 +3842,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 retry = 4.0;
             }
             if st == LpStatus::TimeLimit && retry > 0.0 && cap.is_finite() && !self.time_up() {
-                let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(retry * cap);
-                let d = Some(self.deadline.map_or(d, |g| g.min(d)));
+                let d = Some(self.deadline_in(retry * cap));
                 st = self.lp.solve(&SolveLimits { iteration_limit: lim, cutoff: cut_cutoff, deadline: d });
                 if self.params.verbose {
                     eprintln!("MIP: cut round {round}: LP hit the time cap; continued for up to {:.2}s more: {st:?}", retry * cap);
@@ -3882,8 +3875,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         crate::simplex::mip_lp::PROGRESS_STOP_ONCE.with(|c| c.set(Some((lim as usize, w, frac, prev_lp_obj))));
                     }
                     let d = if cap.is_finite() {
-                        let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap);
-                        Some(self.deadline.map_or(d, |g| g.min(d)))
+                        Some(self.deadline_in(cap))
                     } else {
                         self.deadline
                     };
@@ -6854,8 +6846,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let cost2: Vec<f64> = (0..n).map(|j| p.cost[j] + eps * c2[j]).collect();
             f2.set_costs(&cost2);
             let deadline = if cap.is_finite() {
-                let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap);
-                Some(self.deadline.map_or(d, |g| g.min(d)))
+                Some(self.deadline_in(cap))
             } else {
                 self.deadline
             };
