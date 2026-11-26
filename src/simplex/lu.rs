@@ -4759,6 +4759,9 @@ pub struct FtLu {
     /// `m` と `L`/`U` の非対角非ゼロ数から 1 回だけ計算する。`CLOCK` トリガは
     /// `tick` が `FACTOR * build_tick` に達したら再分解する。
     build_tick: u64,
+    /// 試作 `ENOMOTO_LU_REFAC_BAL=t`: 分解 1 回の実際の秒 ([`super::basis_kernel::factorize_basis`] が測る) と分解し終えた時刻。
+    build_secs: f64,
+    built_at: std::time::Instant,
     /// [`btran_l_scatter_gate`] の値 (再分解ごとに 1 回取得)。
     btran_l_scatter: f64,
     /// [`u_zero_skip_enabled`] の値 (再分解ごとに 1 回取得、[`Self::u_solve_into`] 参照)。
@@ -4934,6 +4937,8 @@ impl FtLu {
                 0
             }),
             build_tick,
+            build_secs: 0.0,
+            built_at: std::time::Instant::now(),
             fill_baseline,
             lu_nnz: fill_baseline,
             reuse_fail_streak: 0,
@@ -5015,6 +5020,22 @@ impl FtLu {
     /// この分解自体の構築コスト ([`Self::synth_tick`] と同じ単位)。
     pub fn build_tick(&self) -> u64 {
         self.build_tick
+    }
+
+    /// 試作 `ENOMOTO_LU_REFAC_BAL=t`: 分解 1 回の秒を記録し、経過の起点をいまにする。
+    pub fn set_build_secs(&mut self, secs: f64) {
+        self.build_secs = secs;
+        self.built_at = std::time::Instant::now();
+    }
+
+    /// 試作 `ENOMOTO_LU_REFAC_BAL=t`: 分解 1 回の秒。
+    pub fn build_secs(&self) -> f64 {
+        self.build_secs
+    }
+
+    /// 試作 `ENOMOTO_LU_REFAC_BAL=t`: 分解し終えてからの経過 (ナノ秒)。
+    pub fn secs_since_build_ns(&self) -> u64 {
+        self.built_at.elapsed().as_nanos() as u64
     }
 
     /// 求解段の非ゼロ数 `n` を tick に加える (係数 [`TICK_SOLVE_NNZ_COEF`])。
