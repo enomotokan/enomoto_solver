@@ -479,6 +479,9 @@ pub(super) mod sepprof {
         pub face_solves: usize,
         pub face_used: usize,
         pub rounds: usize,
+        /// tableau 行の並列の形 (主のスレッド): BTRAN・集約・作業のスレッドへ渡す待ち・残りを受け取る待ち (秒)、行の数
+        pub tab_par: [f64; 4],
+        pub tab_rows: usize,
     }
     thread_local! {
         pub static PROF: RefCell<Prof> = RefCell::new(Prof::default());
@@ -528,6 +531,7 @@ pub(super) mod sepprof {
             }
             s += &format!(" | raw {} fin {}", p.raw[f], p.fin[f]);
         }
+        s += &format!("\nSEPPROF {tag}   tableau (parallel form, main thread) per round: btran {:.1} aggregate {:.1} send wait {:.1} drain wait {:.1} | rows {:.0}", ms(p.tab_par[0]), ms(p.tab_par[1]), ms(p.tab_par[2]), ms(p.tab_par[3]), p.tab_rows as f64 / r);
         let (gc, gt) = super::super::cuts::GEN_PROF.with(|g| std::mem::take(&mut *g.borrow_mut()));
         s += &format!("\nSEPPROF {tag}   generate_cuts (this thread) per round: calls {:.0} mean nnz {:.0} substituted {:.0} raw {:.0} | subst {:.1} cmir {:.1} extcover {:.1} flowcover {:.1}", gc[0] as f64 / r, gc[1] as f64 / gc[0].max(1) as f64, gc[2] as f64 / r, gc[3] as f64 / r, ms(gt[0]), ms(gt[1]), ms(gt[2]), ms(gt[3]));
         s += &format!("\nSEPPROF {tag}   cands/chosen per round:");
@@ -7982,10 +7986,28 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let halt_ref = &halt_flag;
             let stop = std::sync::atomic::AtomicBool::new(false);
             let stop_ref = &stop;
-            let (job_tx, job_rx) = std::sync::mpsc::sync_channel::<(usize, Vec<(usize, f64)>)>(2 * nth);
+            // 試作 `ENOMOTO_MIP_ROOTPAR_CUT` ([`rootpar_cut`]): 1 行の 2 つの側 (集約行とその符号を変えた行) を別の仕事にし (`s`)、主も
+            // 待つ間に仕事を取って作る (`m`)。仕事は (番号, 集約行, 側: 0・1、2 は両方) で、行の候補は側 0・1 の順につなぐ
+            // (側ごとに `keep_best` するので、つないだ候補は両方を 1 つの仕事で作ったときと同じ)
+            let rpc_split = rootpar_cut('s');
+            let rpc_main = rootpar_cut('m');
+            let (job_tx, job_rx) = std::sync::mpsc::sync_channel::<(usize, std::sync::Arc<Vec<(usize, f64)>>, u8)>(2 * nth);
             let job_rx = std::sync::Mutex::new(job_rx);
             let job_rx_ref = &job_rx;
-            let (res_tx, res_rx) = std::sync::mpsc::channel::<(usize, Vec<Candidate>)>();
+            let (res_tx, res_rx) = std::sync::mpsc::channel::<(usize, u8, Vec<Candidate>)>();
+            // 側を分けたときの、片側だけ届いた行
+            let mut partial: std::collections::HashMap<usize, (u8, Vec<Candidate>)> = std::collections::HashMap::new();
+            let mut put = |pending: &mut std::collections::BTreeMap<usize, Vec<Candidate>>, k: usize, side: u8, cs: Vec<Candidate>| {
+                if side == 2 {
+                    pending.insert(k, cs);
+                } else if let Some((s0, c0)) = partial.remove(&k) {
+                    let (mut a, b) = if s0 == 0 { (c0, cs) } else { (cs, c0) };
+                    a.extend(b);
+                    pending.insert(k, a);
+                } else {
+                    partial.insert(k, (side, cs));
+                }
+            };
             // 番号の順につなぐ: 届いた行の候補を `pending` に置き、`next` 番から順に足す。予算に届いたら `exhausted`
             let mut pending: std::collections::BTreeMap<usize, Vec<Candidate>> = std::collections::BTreeMap::new();
             let mut next = 0usize;
@@ -8008,6 +8030,49 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     cands.extend(cs);
                 }
             };
+            // 1 つの仕事 (行 `base` の側 `side`) の候補を作る (作業のスレッドと、`ENOMOTO_MIP_ROOTPAR_CUT` の `m` では主も使う)
+            let work = |base: &[(usize, f64)], side: u8, scratch: &mut Vec<f64>| -> Vec<Candidate> {
+                let mut cs: Vec<Candidate> = Vec::new();
+                for sd in 0..2u8 {
+                    if side != 2 && side != sd {
+                        continue;
+                    }
+                    let neg: Vec<(usize, f64)>;
+                    let b: &[(usize, f64)] = if sd == 0 {
+                        base
+                    } else {
+                        neg = base.iter().map(|&(j, a)| (j, -a)).collect();
+                        &neg
+                    };
+                    let n0 = cs.len();
+                    for raw in generate_cuts(vars_ref, b, 0.0, tab_fc, false) {
+                        if let Some(c) = finish_cut(raw, n, lp_rows_ref, cut_int, glo, gup, x, inc, scratch) {
+                            cs.push(c);
+                        }
+                    }
+                    keep_best(&mut cs, n0, pp);
+                }
+                cs
+            };
+            let work_ref = &work;
+            let mut main_scratch = vec![0.0f64; if rpc_main { n } else { 0 }];
+            // 主が仕事を 1 つ取って作る (取れなければ `false`)。作業のスレッドが受け口を持って待っているときは取らない
+            let late_now = || deadline.is_some_and(|d| std::time::Instant::now() >= d) || halt_flag.as_ref().is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
+            let mut main_take = |pending: &mut std::collections::BTreeMap<usize, Vec<Candidate>>, put: &mut dyn FnMut(&mut std::collections::BTreeMap<usize, Vec<Candidate>>, usize, u8, Vec<Candidate>)| -> bool {
+                let job = match job_rx_ref.try_lock() {
+                    Ok(g) => g.try_recv().ok(),
+                    Err(_) => None,
+                };
+                let Some((k, base, side)) = job else { return false };
+                let cs = if late_now() || stop_ref.load(std::sync::atomic::Ordering::Relaxed) {
+                    Vec::new()
+                } else {
+                    let _hc = super::hnfcut::Guard::new(hnfcut_ref.clone());
+                    work_ref(&base, side, &mut main_scratch)
+                };
+                put(pending, k, side, cs);
+                true
+            };
             let mut nb = 0usize;
             let cpus: Vec<f64> = std::thread::scope(|sc| {
                 let hs: Vec<_> = (0..nth)
@@ -8019,26 +8084,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             let mut scratch = vec![0.0f64; n];
                             loop {
                                 let job = job_rx_ref.lock().unwrap().recv();
-                                let Ok((k, base)) = job else { break };
+                                let Ok((k, base, side)) = job else { break };
                                 // 求解の期限 ([`sep_deadline`]) を過ぎたら残りの行は作らない (逐次の形は行ごとに `time_up` を見る)
                                 let late = deadline.is_some_and(|d| std::time::Instant::now() >= d) || halt_ref.as_ref().is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
                                 if late || stop_ref.load(std::sync::atomic::Ordering::Relaxed) {
-                                    let _ = res_tx.send((k, Vec::new()));
+                                    let _ = res_tx.send((k, side, Vec::new()));
                                     continue;
                                 }
-                                let neg: Vec<(usize, f64)> = base.iter().map(|&(j, a)| (j, -a)).collect();
-                                let mut cs: Vec<Candidate> = Vec::new();
-                                for b in [&base, &neg] {
-                                    let n0 = cs.len();
-                                    for raw in generate_cuts(vars_ref, b, 0.0, tab_fc, false) {
-                                        if let Some(c) = finish_cut(raw, n, lp_rows_ref, cut_int, glo, gup, x, inc, &mut scratch) {
-                                            cs.push(c);
-                                        }
-                                    }
-                                    keep_best(&mut cs, n0, pp);
-                                }
-                                drop((base, neg));
-                                let _ = res_tx.send((k, cs));
+                                let cs = work_ref(&base, side, &mut scratch);
+                                drop(base);
+                                let _ = res_tx.send((k, side, cs));
                             }
                             super::cap_clock() - c0
                         })
@@ -8050,15 +8105,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         break;
                     }
                     // 届いた行をつなぐ (予算に届いたら後ろの行は作らない)
-                    while let Ok((k, cs)) = res_rx.try_recv() {
-                        pending.insert(k, cs);
+                    while let Ok((k, side, cs)) = res_rx.try_recv() {
+                        put(&mut pending, k, side, cs);
                     }
                     merge(&mut pending, &mut next, nb, &mut exhausted, &mut cands);
                     if exhausted && stop_at_budget {
                         stop_ref.store(true, std::sync::atomic::Ordering::Relaxed);
                         break;
                     }
+                    let tp0 = sepprof::on().then(std::time::Instant::now);
                     let w = self.lp.basis_inverse_row(s);
+                    let tp1 = sepprof::on().then(std::time::Instant::now);
                     let wmax = w.iter().fold(0.0f64, |m, v| m.max(v.abs()));
                     if wmax == 0.0 {
                         continue;
@@ -8129,21 +8186,68 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         nb += 1;
                         continue;
                     }
-                    if job_tx.send((nb, base)).is_err() {
+                    let tp2 = sepprof::on().then(std::time::Instant::now);
+                    let base = std::sync::Arc::new(base);
+                    let jobs: Vec<(usize, std::sync::Arc<Vec<(usize, f64)>>, u8)> = if rpc_split { vec![(nb, base.clone(), 0), (nb, base, 1)] } else { vec![(nb, base, 2)] };
+                    let mut sent = Ok(());
+                    for mut job in jobs {
+                        // `m`: 待ち行列が詰まっていれば、主も仕事を取って作る
+                        if rpc_main {
+                            loop {
+                                match job_tx.try_send(job) {
+                                    Ok(()) => break,
+                                    Err(std::sync::mpsc::TrySendError::Full(j)) => {
+                                        job = j;
+                                        if !main_take(&mut pending, &mut put) {
+                                            sent = job_tx.send(job).map_err(|_| ());
+                                            break;
+                                        }
+                                    }
+                                    Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                                        sent = Err(());
+                                        break;
+                                    }
+                                }
+                            }
+                        } else {
+                            sent = job_tx.send(job).map_err(|_| ());
+                        }
+                        if sent.is_err() {
+                            break;
+                        }
+                    }
+                    if let (Some(a), Some(b), Some(c)) = (tp0, tp1, tp2) {
+                        sepprof::PROF.with(|pp| {
+                            let mut pp = pp.borrow_mut();
+                            pp.tab_par[0] += (b - a).as_secs_f64();
+                            pp.tab_par[1] += (c - b).as_secs_f64();
+                            pp.tab_par[2] += c.elapsed().as_secs_f64();
+                            pp.tab_rows += 1;
+                        });
+                    }
+                    if sent.is_err() {
                         break;
                     }
                     nb += 1;
                 }
                 for (k, base) in std::mem::take(&mut held).into_iter().enumerate() {
-                    if job_tx.send((k, base)).is_err() {
+                    if job_tx.send((k, std::sync::Arc::new(base), 2)).is_err() {
                         break;
                     }
                 }
                 drop(job_tx);
+                // `m`: 残りの仕事も主が取って作る
+                if rpc_main {
+                    while main_take(&mut pending, &mut put) {}
+                }
                 // 残りを受け取る (作業のスレッドが全部終わると送り口がすべて閉じる)
-                for (k, cs) in res_rx.iter() {
-                    pending.insert(k, cs);
+                let td0 = sepprof::on().then(std::time::Instant::now);
+                for (k, side, cs) in res_rx.iter() {
+                    put(&mut pending, k, side, cs);
                     merge(&mut pending, &mut next, nb, &mut exhausted, &mut cands);
+                }
+                if let Some(t) = td0 {
+                    sepprof::PROF.with(|pp| pp.borrow_mut().tab_par[3] += t.elapsed().as_secs_f64());
                 }
                 hs.into_iter().map(|h| h.join().unwrap()).collect()
             });
@@ -9529,6 +9633,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if super::solver::thread_budget_on() && self.snap.is_none() && !self.params.submip && self.params.threads > 1 { self.params.threads - 1 } else { self.params.threads }
     }
+}
+
+/// 試作 `ENOMOTO_MIP_ROOTPAR_CUT` (既定では使わない、analysis/rootpar_cut_20261126/): 根の分離の tableau 行の並列の形
+/// (`gen_cuts_parallel` と同じく主が行の BTRAN と集約を行い、作業のスレッドがカットを作る形) の詰まりを減らす。値は部品の文字 (`1` なら全部):
+/// - `s`: 1 行の 2 つの側 (集約行とその符号を変えた行) を別の仕事にする (行の少ない問題で最後の数行を待つ時間を減らす。nw04)
+/// - `m`: 主も、待ち行列が詰まっている間と残りを待つ間に仕事を取って作る (作業のスレッドが 1 本増えるのと同じ。physiciansched6-2)
+/// どちらも候補を番号の順につなぐので、候補は既定と同じ (道筋は変わらない)。1 スレッドではこの形を通らない
+pub(crate) fn rootpar_cut(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_ROOTPAR_CUT").is_some_and(|v| v == "1" || v.contains(c))
 }
 
 fn sep_threads(threads: usize) -> usize {
