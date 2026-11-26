@@ -3,4 +3,5 @@
 ALNS = {"ENOMOTO_MIP_ALNS": "1"}
 # alnss: 1 回を手間 LNS_CALL_MIN ずつに分けて近傍を選び直す版 (今の ENOMOTO_MIP_ALNS=1。pint の alns は分ける前の版 = 今の "w")
 # alnsb: それに加えて 1 スレッドの予算を効き目のシグモイドで決める (b)
-CFGS = {"def": {}, "alns": ALNS, "def_t1": {}, "alns_t1": ALNS, "alnss": ALNS, "alnsb": {"ENOMOTO_MIP_ALNS": "1b"}}
+CFGS = {"def": {}, "alns": ALNS, "def_t1": {}, "alns_t1": ALNS, "alnss": ALNS, "alnsb": {"ENOMOTO_MIP_ALNS": "1b"},
+        "alnsb_t1": {"ENOMOTO_MIP_ALNS": "1b"}}
