@@ -100,3 +100,13 @@
   - mod.rs: `clqprb_shadow_locks`
 - 動き: どのフィールドの値も前と同じ。
 - 確かめ: cargo test 424 通過、check_default 全部一致。
+
+### 3.4 `min_relaxation` と `repair` の共通部分 (1 節の 7)
+
+- heur_scip.rs の 2 つの補助 MIP のヒューリスティクスから、共通部分を 3 つの関数に出した。
+  - `slack_relaxed(p, col_lo, col_up, relax)`: 違反量の列を足した問題を作る。足す行は `relax(i)` で選ぶ (`min_relaxation` は全部、`repair` は違反行だけ)。列は下限側・上限側の順で、前と同じ。
+  - `solve_slack_relaxed`: サブ MIP の設定で解き、反復を数える。
+  - `finish_slack_point`: 点を暫定解として試し、だめなら整数列の値を目標に固定・伝播する。
+- 磨いた所: 違反量の合計は経過を出すときだけ計算する。
+- 動き: 同じ。
+- 確かめ: cargo test 424 通過、check_default 全部一致。
