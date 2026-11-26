@@ -71,4 +71,9 @@ h80x6320d 220 回・roll3000 368 回・mc11 300 回・eil33-2 298 回 (既定)�
 
 `python plan.py 1` → shards.json (348 回、見積り 2.8 時間)、`python run.py 0` → res_s0.jsonl、集計 `python summ.py`。
 
+- 版: 3d8853863 のビルド (UNIFY_FIX の既定化 1d687b7df・行の伝播のまとめ 893782077 より前)。1 スレッドの道筋: `check_default.py ENOMOTO_MIP_PARSB=1` で 6 問とも一致
+  (1 スレッドでは働かない)。
+- 誤答の確かめ (`analysis/paridle_20261126/fuzz.sh`、`ENOMOTO_MIP_PARSB=1 ENOMOTO_MIP_THREADS=4`、既定と c2c の 2 組): fuzz 7 本とも誤答 0
+  (fuzz_tiny 0/400・fuzz_highs 0/300・fuzz_objint 0/1000・fuzz_slack 0・fuzz_tiny2 0/400・fuzz_objint2 0/1000・fuzz_slack2 0)、cargo test 424 通過・失敗 0 (2 組とも)。
+
 (結果は下に追記)
