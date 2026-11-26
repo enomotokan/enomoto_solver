@@ -1,0 +1,13 @@
+== fuzz_tiny: env ENOMOTO_MIP_REL_GAP=1e-9 python3 benchmarks/equiv2_bug_20261022/fuzz_tiny.py 400 0
+rc=0
+tol 61 highs Optimal -26.50000005229 ours optimal -35.54 許容誤差の内の差 (1e-10 の HiGHS -16.32)
+tol 81 highs Optimal -30.36000030836 ours optimal -37.53 許容誤差の内の差 (1e-10 の HiGHS -10.95000030853)
+tol 139 highs Optimal 0.0 ours optimal -1.90027e-06 許容誤差の内の差 (1e-10 の HiGHS -1.90027e-06)
+tol 148 highs Optimal -25.430000239920002 ours optimal -29.700000000000003 許容誤差の内の差 (1e-10 の HiGHS -5.980000807390001)
+tol 201 highs Optimal 0.0 ours optimal -1.11891e-06 許容誤差の内の差 (1e-10 の HiGHS -1.11891e-06)
+tol 246 highs Optimal 0.0 ours optimal -1.0485700000000002e-06 許容誤差の内の差 (1e-10 の HiGHS -1.04857e-06)
+tol 260 highs Optimal -3.11 ours optimal -11.629999999999999 許容誤差の内の差 (1e-10 の HiGHS -1.8241e-07)
+tol 324 highs Optimal -3.49 ours optimal -9.77 許容誤差の内の差 (1e-10 の HiGHS -7.3704e-07)
+tol 350 highs Optimal -14.07 ours optimal -18.71 許容誤差の内の差 (1e-10 の HiGHS -9.6459e-07)
+bad 0 of 400 time 3.4 (strict 9: 値の一致だけの以前の判定)
+== fuzz_objint: python3 analysis/objint_20261112/fuzz_objint.py 1000 0
