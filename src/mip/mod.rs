@@ -32,6 +32,7 @@ pub(crate) mod fj;
 pub(crate) mod localmip;
 pub(crate) mod fjsub;
 mod heuristics;
+mod t1primal;
 mod subb;
 mod alns_cp;
 pub(crate) mod sympre;
