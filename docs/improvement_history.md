@@ -11435,3 +11435,18 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
     道筋がノード数まで同じで、仕組みの差は見つからなかった (README 5.10 節)。
 - 1 スレッドの道筋が変わる: check_default で mik-250-20-75-4 のノード数 5856 → 6277 (目的値は同じ、2 回解いて同じ)。基準 `ref_default.json` を書き直した
   (`ENOMOTO_MIP_POLISH_FINAL=0` で前の基準と全部一致)。
+- 確かめ (既定、309092db8): fuzz 7 本と fuzz_bigact 2 本は誤答 0・not_solved 0 (tiny 0/400・0/400、vs HiGHS 0/300、objint 0/1000・0/1000、
+  slack 0・0、bigact 0/300・0/300)。cargo test 425 通過。先端 (8d45e35b5) の check_default も新しい基準と全部一致。
+
+
+## 2026-11-26: ENOMOTO_MIP_UNIFY_FIX の第 2 弾 (z・p) を既定に加える (採用、利用者の判断)
+
+記録: analysis/unify_20261126/README.md (5 節)。既定の `1` に `z`・`p` を含めた。`=frsmlt` で第 1 弾だけに、`=0`・`off` で以前の形に戻る。
+
+- `z`: 目的値の改善の判定 (23 か所、`solver::better_obj`) で、許容誤差の尺度を比べる相手の値で取る。相手が +∞ (暫定解なし) のときは先に分ける。以前は尺度の取り方が呼び手ごとに割れていて、`b − 1e-9·∞` が NaN で偽になる所もあった。
+- `p`: 1 本の行の伝播 (`Domain::tighten_le_row`・`tighten_le_row_rest`) で、無限の項を積で見る (積があふれると、矛盾と誤って判定しうる)。`tc_global_pool_prop` の自前の締め方を `tighten_le_row` にする。
+- P (種 1〜3、60 秒、696 回、第 1 弾を既定にした後のビルド):
+  - 1 スレッド: 0.997 [0.993, 1.001]、解けた数 118 → 120。
+  - 4 スレッド: 1.001 [0.981, 1.022]、解けた数 138 → 138。10teams 1.60 (二つに分かれる問題の種 2)、physiciansched6-2 0.74。
+  - 食い違いは 0。中立なので、利用者の方針で既定にした。
+- 確かめ: check_default 全部一致 (基準は変えない)、cargo test 425 通過、fuzz 7 本と fuzz_bigact 2 本は誤答 0。

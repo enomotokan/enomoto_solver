@@ -707,6 +707,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     sb_agree_tick: u64,
     /// `ENOMOTO_MIP_SB_AGREE` の集計: [判定した回, 一致した回, 強分岐を省いたノード]
     sb_agree_stats: [u64; 3],
+    /// 試作 `ENOMOTO_MIP_SBDEGEN` ([`sbdegen_on`]): [強分枝をしたノードの数, そのうち強分枝で選んだ列が擬似費用だけの 1 位と違った数]
+    sbdg_stats: [u64; 2],
     /// 直前の分枝の選択で、選んだ列の強分岐の子の LP 値 (列, 下の子, 上の子)。最適まで解けなかった側は -inf。
     pub(super) last_sb: Option<(usize, f64, f64)>,
     /// clique カット用の 2 値列の衝突グラフ (根で作る)。
@@ -762,6 +764,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// ALNS の腕ごとの報酬の合計と試した回数。
     pub(super) alns_reward: [f64; 6],
     pub(super) alns_count: [u32; 6],
+    /// 試作 `ENOMOTO_MIP_ALNS` の `b` ([`super::alns_cp::budget_on`]): 測り始め (暫定解があって初めて予算を決めた時) の (主ギャップ, 手間, 大近傍探索の手間) と、
+    /// その後に ALNS-CP が出した相対改善の合計
+    pub(super) alns_bud0: Option<(f64, f64, f64)>,
+    pub(super) alns_lns_gain: f64,
     /// `ENOMOTO_MIP_SUBB_DIV` (試作): 近傍の多様化の状態 ([`super::subb::DivState`])
     pub(super) subb: super::subb::DivState,
     /// `ENOMOTO_MIP_MEMBQ_LNSGROW` (試作、analysis/membq_path_20261105.md): ALNS の腕ごとの、サブ MIP の時間の上限の倍率。
@@ -1115,6 +1121,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) subfix_retry: Vec<f64>,
     /// 別スレッドの Feasibility Jump とその停止の印。
     fj_thread: Option<(std::thread::JoinHandle<Option<Vec<f64>>>, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
+    /// 試作 `ENOMOTO_MIP_T1PRIMAL` ([`super::t1primal`]): 1 スレッドの解探しの補助のスレッドと、その手間の勘定
+    pub(super) t1p: Option<Box<super::t1primal::T1Primal>>,
     /// 試作 `ENOMOTO_MIP_LMBOOST` (COMP07): Local-MIP の解で暫定解が良くなった時刻 (この求解の経過秒)
     lmip_imps: Vec<f64>,
     /// FJ のスレッドの Local-MIP (`ENOMOTO_MIP_FJ_LOCALMIP`・`ENOMOTO_MIP_FJ_LMIP_MIX`) が良くなった解を入れる箱
@@ -4842,16 +4850,16 @@ impl Drop for LmboostBg {
 /// - `t`: `try_lp_solution` の整数を固定した LP を、元の費用で解き、反復を累計に入れない ([`Solver::with_fixed_int_lp`]、
 ///   `resolve_continuous` と同じ)
 ///
-/// 第 2 弾 (既定では入らない。`1` にも含めない。文字で付ける。analysis/unify_20261126 の 5 節):
+/// 第 2 弾 (analysis/unify_20261126 の 5 節。2026-11-26 に既定 (`1` に含める) にした):
 /// - `z`: 目的値の改善の判定 ([`better_obj`]) の許容誤差の尺度を比べる相手の値で取り、相手が +∞ のときは先に分ける
 /// - `p`: 1 本の行の伝播 ([`Domain::tighten_le_row`]・`tighten_le_row_rest`) で無限の項を積で見る。`tc_global_pool_prop` の自前の
 ///   締め方を `tighten_le_row` にする
 pub(crate) fn unify_fix(c: char) -> bool {
-    // `1` は第 1 弾 (`frsmlt`) の全部。第 2 弾 (`z`・`p`) は文字で付けたときだけ
-    env_def!("ENOMOTO_MIP_UNIFY_FIX", "1").is_some_and(|v| (v.starts_with('1') && "frsmlt".contains(c)) || v.contains(c))
+    // `1` は第 1 弾 (`frsmlt`) と第 2 弾 (`zp`) の全部。文字だけを付ければその文字だけ
+    env_def!("ENOMOTO_MIP_UNIFY_FIX", "1").is_some_and(|v| (v.starts_with('1') && "frsmltzp".contains(c)) || v.contains(c))
 }
 
-/// 目的値 `z` が `b` より良いか (最小化、相対の許容誤差 1e-9)。`ENOMOTO_MIP_UNIFY_FIX` の `z` (既定では使わない) なら、許容誤差の尺度を
+/// 目的値 `z` が `b` より良いか (最小化、相対の許容誤差 1e-9)。`ENOMOTO_MIP_UNIFY_FIX` の `z` (既定) なら、許容誤差の尺度を
 /// いつも `b` で取り、`b` = +∞ (暫定解なし) は先に分けて `z < +∞` とする。切っていれば以前の形: 尺度は呼び手ごとの `scale` (`z` か `b`)、
 /// `b` = +∞ なら `b - 1e-9 ∞` が NaN になって偽 (呼び手によっては前で `b` の有限を確かめている)。analysis/unify_20261126 の 1 節の 14
 #[inline]
@@ -5930,6 +5938,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         sb_agree: std::collections::VecDeque::new(),
         sb_agree_tick: 0,
         sb_agree_stats: [0; 3],
+        sbdg_stats: [0; 2],
         last_sb: None,
         clique_graph: None,
         cut_clique_adj: std::collections::HashMap::new(),
@@ -5969,6 +5978,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         improve_turn: 0,
         alns_reward: [0.0; 6],
         alns_count: [0; 6],
+        alns_bud0: None,
+        alns_lns_gain: 0.0,
         subb: Default::default(),
         lns_grow: [1.0; 6],
         submip_nosol_timeout: false,
@@ -6150,6 +6161,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         last_submip_nodes: 0,
         subfix_retry: Vec::new(),
         fj_thread: None,
+        t1p: None,
         lmip_imps: Vec::new(),
         lmip_mailbox: None,
         fj_gate: None,
@@ -10060,7 +10072,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if !matches!(root_kind, Some(3) | Some(4)) || env_str!("ENOMOTO_MIP_ROOTLP_PRESOLVE").is_none_or(|v| v == "0") || self.lp.has_warm_basis() {
             return None;
         }
-        use crate::types::{ConstraintRow, LinearExpr, Objective, RowSense, Sense, VarType, VariableData};
+        use crate::types::{VarType, VariableData};
         let t0 = Instant::now();
         let n = self.p.n;
         let vars: Vec<VariableData> = (0..n)
@@ -10070,22 +10082,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             })
             .collect();
         let cost = self.lp.costs();
-        let obj = Objective { expr: LinearExpr { coeffs: (0..n).filter(|&j| cost[j] != 0.0).map(|j| (j, cost[j])).collect(), constant: 0.0 }, sense: Sense::Minimize };
-        let mut cons: Vec<ConstraintRow> = Vec::with_capacity(self.lp.num_rows());
-        for i in 0..self.lp.num_rows() {
+        let obj = super::min_objective(&cost, 0.0);
+        // 行の範囲 lo = up = ±∞ はない (LP の行の範囲は lo <= up で、両側とも無限なら等式にならない) ので、ほかと同じ形で直してよい
+        let nr = self.lp.num_rows();
+        let cons = super::ranged_constraints((0..nr).map(|i| {
             let (lo, up) = self.lp.row_bounds(i);
-            let expr = || LinearExpr { coeffs: self.lp.row_ref(i).iter().map(|&(j, a)| (j, a)).collect(), constant: 0.0 };
-            if lo.is_finite() && up.is_finite() && lo == up {
-                cons.push(ConstraintRow { expr: expr(), sense: RowSense::Eq, rhs: lo });
-                continue;
-            }
-            if lo.is_finite() {
-                cons.push(ConstraintRow { expr: expr(), sense: RowSense::Ge, rhs: lo });
-            }
-            if up.is_finite() {
-                cons.push(ConstraintRow { expr: expr(), sense: RowSense::Le, rhs: up });
-            }
-        }
+            (self.lp.row_ref(i), lo, up)
+        }), nr);
         let t_build = t0.elapsed().as_secs_f64();
         let r = crate::cancel::with_deadline(self.deadline, || crate::simplex::solve_lp_dual_with(&vars, &obj, &cons, crate::types::LpOptions::default()));
         let t_lp = t0.elapsed().as_secs_f64() - t_build;
@@ -12339,6 +12342,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // (並列なら FJ のスレッドを止める所) で本体が同じ組を回す ([`Self::t1_fj_lmip_mix`])
         if t1mix_on() && mip_threads() == 1 && !self.params.submip && self.snap.is_none() && self.params.restarts == 0 && !proof_only() && self.fj_thread.is_none() && !self.root_gap_closed() {
             self.t1_fj_lmip_mix();
+        }
+        // 試作 `ENOMOTO_MIP_T1PRIMAL` ([`super::t1primal`]): 1 スレッドで FJ + Local-MIP の組を補助のスレッドに持たせ、時間の取り分を
+        // 当たった率・改善の止まった時間の割合・ギャップのシグモイドで決めて、根の終わりと木のノードで少しずつ回す
+        if super::t1primal::enabled() && mip_threads() == 1 && !self.params.submip && self.snap.is_none() && self.params.restarts == 0 && !proof_only() && self.fj_thread.is_none() && !self.root_gap_closed() {
+            self.t1primal_start();
+            self.t1primal_tick(true);
         }
         // 試作 `ENOMOTO_MIP_LPBOX` (analysis/lpbox_20261122): 根のカットのループの後の LP 解のまわりに整数列を狭めて伝播した問題で
         // FJ・Local-MIP を回す ([`Self::lpbox_heur`])。FJ のスレッドはまだ止めない
@@ -16083,6 +16092,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let frac = if stalled { frac.max(tunable!("ENOMOTO_T_MIP_ROBUST_LNSFREQ_TIME", 0.1, f64)) } else { frac };
                     // 試作 `ENOMOTO_MIP_HEUR1T` の `l` ([`heur1t`]): 1 スレッドの外側の木では、時間の割合を 4 スレッドのヒューリスティクス役の
                     // 割合 (`ENOMOTO_T_MIP_HEUR_ROLE_FRAC`、[`heur_role_count`]) まで上げる (暫定解があるときだけ。役も暫定解があるときだけ就く)
+                    // 試作 `ENOMOTO_MIP_ALNS` の `b` ([`super::alns_cp::budget_on`]): 1 スレッドの木で、割合を ALNS-CP の効き目のシグモイドで決める
+                    let frac = if super::alns_cp::budget_on() && !self.params.submip && self.pool.is_none() && self.params.threads <= 1 && self.incumbent.is_some() {
+                        self.alns_budget_frac()
+                    } else {
+                        frac
+                    };
                     let frac = if heur1t('l') && !self.params.submip && self.pool.is_none() && self.params.threads <= 1 && self.incumbent.is_some() {
                         frac.max(tunable!("ENOMOTO_T_MIP_HEUR_ROLE_FRAC", 0.25, f64))
                     } else if heur_adapt() && !self.params.submip && self.pool.is_none() && self.params.threads <= 1 && self.incumbent.is_some() {
@@ -16359,6 +16374,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         if self.params.verbose && env_str!("ENOMOTO_MIP_DEBUG_NOINC").is_some() && arm != NOINC_TREE_ARM {
                             eprintln!("MIP:   no-incumbent heuristic arm {arm}: close {close:.3} found {found} ({secs:.2}s, node {}, frac {time_frac:.2}, stall {})", self.nodes, self.noinc_stall);
                         }
+                    }
+                    // 試作 `ENOMOTO_MIP_T1PRIMAL` ([`super::t1primal`]): 貯えがたまっていれば FJ + Local-MIP の補助のスレッドを回す
+                    if self.t1p.is_some() && heur_ok && node.depth > 0 && plunge_depth == 0 {
+                        self.t1primal_tick(false);
                     }
                     xp("m_heur");
                     // ダイビング (SCIP の fracdiving / veclendiving: 深さ 10 ごと、ずらし 3 / 7)
@@ -20188,6 +20207,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             _ => (quot, maxsb),
         };
+        // 試作 `ENOMOTO_MIP_SBDEGEN` ([`sbdegen_on`]、analysis/sbdegen_20261126): 予算を既定 (0.125 x + 25000) と HiGHS・SCIP の大きさ
+        // (0.5 x + 100000) の間で、強分枝の効き目 s で内分する。s は強分枝をしたノードのうち、強分枝で選んだ列が擬似費用だけの 1 位と違った割合の
+        // 対数オッズのシグモイド (ラプラスの数え方) = (違った数 + 1) / (強分枝をしたノード + 2)。始めは 0.5
+        let (quot, maxsb) = if sbdegen_on() && !sb_highs && sbad.is_none() && !self.params.submip {
+            let sv = (self.sbdg_stats[1] + 1) as f64 / (self.sbdg_stats[0] + 2) as f64;
+            let qh = tunable!("ENOMOTO_T_MIP_SB_HIGHS_QUOT", 0.5, f64) * self.node_iters as f64;
+            let mh = qh + tunable!("ENOMOTO_T_MIP_SB_HIGHS_BASE", 100_000.0, f64);
+            (quot + sv * (qh - quot), maxsb + sv * (mh - maxsb))
+        } else {
+            (quot, maxsb)
+        };
         let sb = self.sb_iters as f64;
         // 双対退化の強いノードでは強分岐をしない (根以外)
         // `ENOMOTO_MIP_SB_NO_DEGEN_SKIP`: 双対退化でも強分岐を止めない
@@ -20317,6 +20347,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // このノードで強分岐した候補の (擬似費用のスコア (強分岐の前), 強分岐のスコア)。`ENOMOTO_MIP_SB_AGREE` の一致の判定に使う
         let mut sb_eval: Vec<(f64, f64)> = Vec::new();
         let mut ci = 0usize;
+        // 試作 `ENOMOTO_MIP_SBDEGEN`: 擬似費用だけで選ぶなら選ばれる列 (強分枝の前の点数の 1 位)
+        let pc_top = cands.first().map(|c| c.0);
         while ci < cands.len() {
             let (j, v, pscore) = cands[ci];
             ci += 1;
@@ -21157,6 +21189,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if sb_agree_on() && sb_eval.len() >= 2 {
             self.sb_agree_record(&sb_eval);
+        }
+        // 試作 `ENOMOTO_MIP_SBDEGEN`: 強分枝をしたノードで、選んだ列が擬似費用だけの 1 位と違ったかを数える
+        if sbdegen_on() && tried > 0 {
+            self.sbdg_stats[0] += 1;
+            self.sbdg_stats[1] += (best.map(|b| b.0) != pc_top) as u64;
         }
         // `ENOMOTO_MIP_SB_TIGHTEN_PROP` (試作、既定では使わない): 凸性で境界を締めたら、その場で伝播する。矛盾ならノードを刈り、
         // 締まった境界から今の LP 解が外れたら解き直す (`Resolve`)。そうでなければそのまま分枝する (伝播の結果は子が受け継ぐ)。
@@ -27603,6 +27640,35 @@ impl<'a, L: MipLp> Solver<'a, L> {
         adapt_sigmoid(a * (g - tunable!("ENOMOTO_T_MIP_FJ_POOR_GAP", 0.5, f64)))
     }
 
+    /// 試作 `ENOMOTO_MIP_ALNS` の `b`: 1 スレッドの木の大近傍探索の割合 = `LNS_TIME_MIN` + (`HEUR_ROLE_FRAC` − `LNS_TIME_MIN`) × σ(ln(r_lns / r_tree))
+    /// = 下限 + 幅 × r_lns / (r_lns + r_tree)。新しい閾値はなく、両端は今の木の大近傍探索の下限 (0.02) と 4 スレッドのヒューリスティクス役の割合 (0.25)。
+    /// - r_tree: 測り始めからの主ギャップ (暫定解 − 下界) / max(|暫定解|, 1) の減り (ALNS-CP の改善の分を除く) ÷ 木の手間 (大近傍探索の手間を除く)
+    /// - r_lns: ALNS-CP の相対改善の合計 ÷ 大近傍探索の手間。r_tree と同じ速さの仮の 1 回 (手間 `LNS_CALL_MIN`) を足しておく
+    ///   (呼ぶ前は σ(0) = 0.5 で真ん中から始め、効かなければ下がる)
+    /// どちらも 0 なら真ん中
+    pub(super) fn alns_budget_frac(&mut self) -> f64 {
+        let lo = tunable!("ENOMOTO_T_MIP_LNS_TIME_MIN", 0.02, f64);
+        let hi = tunable!("ENOMOTO_T_MIP_HEUR_ROLE_FRAC", 0.25, f64).max(lo);
+        let Some((r_lns, r_tree)) = self.alns_rates() else { return lo };
+        let share = if r_lns + r_tree > 0.0 { r_lns / (r_lns + r_tree) } else { 0.5 };
+        lo + (hi - lo) * share
+    }
+
+    /// 改善の大きさ / 手間 (1 手間 ≒ 1 ns) の (r_lns, r_tree) ([`Self::alns_budget_frac`] の説明のとおり)。暫定解がなければ None。
+    /// 初めて呼んだ時を測り始めにする。ほかの 1 スレッドの解探し (T1PRIMAL など) の効き目の入力にも使える
+    pub(super) fn alns_rates(&mut self) -> Option<(f64, f64)> {
+        let z = self.incumbent.as_ref().map(|(z, _)| *z)?;
+        let gap = ((z - self.global_lower_bound()) / z.abs().max(1.0)).max(0.0);
+        let tk = crate::ticks::total();
+        let (g0, t0, l0) = *self.alns_bud0.get_or_insert((gap, tk, self.lns_ticks));
+        let piece = tunable!("ENOMOTO_T_MIP_LNS_CALL_MIN", 0.3, f64) * 1e9;
+        let lns_tk = (self.lns_ticks - l0).max(0.0);
+        let tree_tk = (tk - t0 - lns_tk).max(piece);
+        let r_tree = ((g0 - gap) - self.alns_lns_gain).max(0.0) / tree_tk;
+        let r_lns = (self.alns_lns_gain + r_tree * piece) / (lns_tk + piece);
+        Some((r_lns, r_tree))
+    }
+
     /// 試作 `ENOMOTO_MIP_HEUR_ADAPT` ([`heur_adapt`]) の f_t (1 スレッドの外側の木、64 ノードおきに測り直す)。`cur` は今のノード
     fn adapt_tree_f(&mut self, cur: Option<&OpenNode>) -> f64 {
         if self.nodes < self.heur_adapt_ft.0 + 64 && self.heur_adapt_ft.0 > 0 {
@@ -30763,6 +30829,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: NODECNT degenerate duals (tid {}): nodes {}, candidates {}, btran {}, fixed by theta >= gap {}, fixed by theta = inf {}, nodes changed {}, sign mismatch {}", self.pool_tid, c[0], c[1], c[2], c[3], c[4], c[5], c[6]);
             }
             eprintln!("MIP: branching: {} selections, {} without strong branching for dual degeneracy; sb LPs {} iters {}", self.sb_degen_stats[0], self.sb_degen_stats[1], self.sb_lps, self.sb_iters);
+            if sbdegen_on() {
+                eprintln!("MIP: SBDEGEN: strong-branching nodes {}, changed the pseudocost pick {} (s = {:.3})", self.sbdg_stats[0], self.sbdg_stats[1], (self.sbdg_stats[1] + 1) as f64 / (self.sbdg_stats[0] + 2) as f64);
+            }
             if feat_diag().is_some() {
                 eprintln!("{}", self.feat_line("end"));
             }
@@ -31502,6 +31571,13 @@ pub(super) fn cutoff_user_tree() -> bool {
 pub(super) fn sb_adapt_on() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_str!("ENOMOTO_MIP_SB_ADAPT").is_some_and(|v| v != "0"))
+}
+
+/// 試作 `ENOMOTO_MIP_SBDEGEN` (analysis/sbdegen_20261126、既定では使わない、`=1` で使う): 強分枝の予算を、強分枝の効き目 (選び方を
+/// 変えた割合) のシグモイドで既定と HiGHS・SCIP の大きさの間に置く (`select_branch_inner`)。主の木だけ (サブ MIP では使わない)
+pub(super) fn sbdegen_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_MIP_SBDEGEN").is_some_and(|v| v != "0"))
 }
 
 /// 試作 `ENOMOTO_MIP_SB_ADAPT` の確率の判定に使う [0, 1) の擬似乱数 (ノード番号 `k` と用途 `salt` から決まる。同じ種なら同じ値)

@@ -146,3 +146,13 @@
   fuzz の問題は小さく、LP プロービングの子の LP (= d の使い回し) を通る回は少ない見込み (正しさの確かめは主に 1.4 節の検査の形と、
   P の 1 スレッドの道筋の一致に拠る)。
 - `cargo test --release` (d を付けて、取り込み後の 25e8d53a1 のソース): 425 通過・0 失敗。
+
+## 5. d の既定化 (2026-11-26、利用者の承認)
+
+- `ENOMOTO_MIP_LPPROBE_FIX` の未設定を `d` にした (`lpprobe_fix`、src/mip/mod.rs)。`=0`・`off` で切る。`c` は試作のまま (既定オフ)。
+- 確かめ (取り込み後の 8e1e7d670 + 既定化):
+  - `check_default.py` (環境変数なし): 6 問一致 (1 スレッドの道筋は変わらない)。
+  - 既定で使い回しが働くこと (cvs16r128-89 の診断で「dse reuse 1 built 1」)、`=0` で切れることをログで見た。
+  - fuzz 7 本 (`fuzz_def.sh` → `fuzz_def.out`、環境変数なし): tiny 0/400・highs 0/300・objint 0/1000・slack 0/1000・tiny2 0/400・
+    objint2 0/1000・slack2 0/1000。
+  - `cargo test --release`: 425 通過・0 失敗。
