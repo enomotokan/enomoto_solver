@@ -762,8 +762,6 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// ALNS の腕ごとの報酬の合計と試した回数。
     pub(super) alns_reward: [f64; 6],
     pub(super) alns_count: [u32; 6],
-    /// 試作 `ENOMOTO_MIP_ALNS` ([`super::alns_cp`]) の近傍ごとの難しさ・選び方の状態
-    pub(super) alns_cp: super::alns_cp::AlnsCp,
     /// `ENOMOTO_MIP_SUBB_DIV` (試作): 近傍の多様化の状態 ([`super::subb::DivState`])
     pub(super) subb: super::subb::DivState,
     /// `ENOMOTO_MIP_MEMBQ_LNSGROW` (試作、analysis/membq_path_20261105.md): ALNS の腕ごとの、サブ MIP の時間の上限の倍率。
@@ -5138,12 +5136,19 @@ pub fn solve(p: &MipProblem, params: MipParams) -> MipResult {
     if !params.submip {
         let _ = super::heuristics::frag_t0();
     }
+    // 試作 `ENOMOTO_MIP_ALNS`: 外側の求解の始め (再スタートの後の求解は除く) で、全スレッドで共有する近傍の状態を初めに戻す
+    if !params.submip && params.restarts == 0 {
+        super::alns_cp::reset();
+    }
     // ヒューリスティクスのサブ MIP は小さいことが多いので、基底のない求解も二段解法だけで解く (同時実行しない)
     let prev_race = params.submip.then(|| crate::simplex::mip_lp::set_cold_race_threads(1));
     // LP の実装は傾き・切片二段解法
     let run = || solve_with::<crate::simplex::mip_lp::TwoStageLp>(p, params, None, None);
     // サブ MIP の経過は利用者向けのログに出さない
     let r = if params.submip { crate::log::suspend(run) } else { run() };
+    if !params.submip && params.restarts == 0 && super::alns_cp::on() && env_str!("ENOMOTO_MIP_LOG").is_some() {
+        super::alns_cp::summary();
+    }
     super::wc_mark("tree (or the rest of the solve)", params.submip);
     if let Some(k) = prev_race {
         crate::simplex::mip_lp::set_cold_race_threads(k);
@@ -5820,7 +5825,6 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         improve_turn: 0,
         alns_reward: [0.0; 6],
         alns_count: [0; 6],
-        alns_cp: Default::default(),
         subb: Default::default(),
         lns_grow: [1.0; 6],
         submip_nosol_timeout: false,

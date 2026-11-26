@@ -27,11 +27,14 @@ pub(crate) struct Adaptive {
 
 impl Default for Adaptive {
     fn default() -> Self {
-        Adaptive { value: 0.5, changes: 0 }
+        Adaptive::new()
     }
 }
 
 impl Adaptive {
+    pub const fn new() -> Self {
+        Adaptive { value: 0.5, changes: 0 }
+    }
     fn factor(&mut self) -> f64 {
         self.changes += 1;
         1.0 + 1.0 / ((self.changes + 1) as f64).sqrt()
@@ -48,8 +51,36 @@ impl Adaptive {
 
 pub(crate) const NAMES: [&str; 3] = ["rins", "random", "graph"];
 
-/// 近傍ごとの状態 (スレッドごとの `Solver` に持つ)
-#[derive(Default, Clone)]
+/// 共有の状態 (プロセスに 1 つ。求解の始めに [`reset`] で初めに戻す)
+static STATE: std::sync::Mutex<AlnsCp> = std::sync::Mutex::new(AlnsCp::new());
+
+/// 次に使う近傍 (CP-SAT の UCB1)
+pub(crate) fn pick() -> usize {
+    state().pick()
+}
+
+/// 全スレッドの合計を 1 行で出す (`ENOMOTO_MIP_LOG`、外側の求解の終わり)
+pub(crate) fn summary() {
+    let s = state().clone();
+    eprintln!(
+        "ALNS-CP summary: calls {:?} solved {:?} improved {:?} d [{:.3}, {:.3}, {:.3}] avg gain [{:.2e}, {:.2e}, {:.2e}]",
+        s.calls, s.solved, s.improved, s.d[0].value, s.d[1].value, s.d[2].value, s.avg[0], s.avg[1], s.avg[2]
+    );
+}
+
+/// 外側の求解の始めに呼ぶ (サブ MIP の中では呼ばない)
+pub(crate) fn reset() {
+    if let Ok(mut s) = STATE.lock() {
+        *s = AlnsCp::new();
+    }
+}
+
+fn state() -> std::sync::MutexGuard<'static, AlnsCp> {
+    STATE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// 近傍ごとの状態。CP-SAT と同じく、外側の求解の全スレッド・再スタートの後の求解で 1 つを共有する ([`STATE`])
+#[derive(Clone)]
 pub(crate) struct AlnsCp {
     pub d: [Adaptive; 3],
     pub calls: [u64; 3],
@@ -59,6 +90,9 @@ pub(crate) struct AlnsCp {
 }
 
 impl AlnsCp {
+    pub const fn new() -> Self {
+        AlnsCp { d: [Adaptive::new(); 3], calls: [0; 3], avg: [0.0; 3], solved: [0; 3], improved: [0; 3] }
+    }
     /// CP-SAT の `GetUCBScore`
     pub fn ucb(&self, k: usize, total: u64) -> f64 {
         if self.calls[k] <= 10 {
@@ -167,7 +201,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if free.is_empty() {
             return false;
         }
-        let d = self.alns_cp.d[k].value;
+        let d = state().d[k].value;
         let target = ((d * free.len() as f64).ceil() as usize).clamp(1, free.len());
         let relax = self.alns_cp_relax(k, &free, target, x, &inc);
         let mut keep = vec![false; p.n];
@@ -192,7 +226,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let z1 = self.incumbent.as_ref().map_or(z0, |(z, _)| *z);
         let Some((st, acc)) = r else { return false };
         let solved = matches!(st, MipStatus::Optimal | MipStatus::Infeasible);
-        let s = &mut self.alns_cp;
+        let mut s = state();
         if solved {
             s.d[k].increase();
             s.solved[k] += 1;
@@ -204,10 +238,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             s.improved[k] += 1;
         }
         s.add_gain(k, gain);
+        let s = s.clone();
         if self.params.verbose {
-            let s = &self.alns_cp;
             eprintln!(
-                "MIP:   ALNS-CP {} d {d:.3} -> {:.3} relaxed {}/{} {st:?} improved {acc} z {z0:.6e} -> {z1:.6e} dtick {dt:.3} ({:.2}s) calls {:?} solved {:?} improved {:?}",
+                "MIP:   ALNS-CP tid {} {} d {d:.3} -> {:.3} relaxed {}/{} {st:?} improved {acc} z {z0:.6e} -> {z1:.6e} dtick {dt:.3} ({:.2}s) calls {:?} solved {:?} improved {:?}",
+                self.pool_tid,
                 NAMES[k],
                 s.d[k].value,
                 relax.len(),
