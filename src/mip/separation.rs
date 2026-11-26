@@ -4727,7 +4727,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         self.pool_start.push(self.pool_idx.len() as u32);
         // 木を分け合う: 新しいカットをほかのスレッドにも渡す (取り込み中のものは渡し返さない)
-        // 試作 `ENOMOTO_MIP_PAR4` の `m` ([`super::solver::par4`]): 主 (写しを持たない) の木の中のカットも流す
+        // `ENOMOTO_MIP_PAR4` の `m` (既定、[`super::solver::par4`]): 主 (写しを持たない) の木の中のカットも流す
         let main_tree = self.snap.is_none() && self.nodes > 0 && !self.params.submip && super::solver::par4('m');
         if !self.importing && (self.snap.is_some() || main_tree) && super::solver::tree_share_cuts() {
             if let Some(pool) = &self.pool {
