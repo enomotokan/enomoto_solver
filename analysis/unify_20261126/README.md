@@ -159,3 +159,16 @@
   - 分担表: `python plan.py 4 shards.json` (4 分担、各 1.6 時間の見積り)。
   - 回し方: `python analysis/unify_20261126/run.py K` → res_sK.jsonl。
   - 集計: `python analysis/unify_20261126/summ.py`。
+
+### 4.1 fuzz (`ENOMOTO_MIP_UNIFY_FIX=1`、`FUZZ_VENV=/usr/local bash analysis/unify_20261126/fuzz.sh uf ENOMOTO_MIP_UNIFY_FIX=1` → fuzz_uf.out)
+
+- 7 本は誤答 0。
+  - fuzz_tiny 0/400・0/400
+  - fuzz_highs 0/300
+  - fuzz_objint 0/1000・0/1000
+  - fuzz_slack は mismatches 0 (1000・1000 回)
+- cargo test は 424 通過。
+- 新しく足した fuzz_bigact.py: 活動度の大きい行 (係数に 10^2〜10^4 を掛け、|act| が 1e3〜1e6) の小さな MIP で、HiGHS との突き合わせと、返した点の実行可能性 (`1e-6 + 1e-9|b|`) を見る。
+  - 2 節の 1 (旧 FJ の緩い許容誤差) の誤答の芽を見るためのもの。
+  - 結果は 0/300・0/300。
+  - seed 88 は、こちらが -15350.21 で HiGHS が -15310.65 だった。こちらの点は厳密に実行可能 (違反 0) で、HiGHS はギャップ 1e-12 でも同じ値なので、HiGHS の取りこぼし。既定でも直しでも同じ値。判定は「HiGHS より良く、点が実行可能なら印字だけ」にした。

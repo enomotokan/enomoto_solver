@@ -3760,7 +3760,7 @@ impl EtaFile {
     fn push_scaled_dense(&mut self, key: usize, pivot: f64, src: &[f64], skip: usize, scale: f64, dense_fraction: f64) -> usize {
         let len = src.len();
         // この絶対値未満は格納しない (0 なら厳密な 0 だけ落とす)
-        let tiny = tiny_drop();
+        let tiny = tiny_out();
         let k = self.key.len();
         self.key.push(key as u32);
         self.pivot.push(pivot);
@@ -3828,7 +3828,7 @@ impl EtaFile {
     #[allow(clippy::too_many_arguments)]
     fn push_scaled_list(&mut self, key: usize, pivot: f64, src: &[f64], list: &[usize], skip: usize, scale: f64, dense_fraction: f64) -> usize {
         debug_assert!(list.windows(2).all(|w| w[0] < w[1]));
-        let tiny = tiny_drop();
+        let tiny = tiny_out();
         // 格納する値か (密版の判定と同じ)
         let keep = |i: usize, v: f64| i != skip && if tiny > 0.0 { v.abs() >= tiny } else { v != 0.0 };
         let nnz = list.iter().filter(|&&i| keep(i, scale * src[i])).count();
@@ -3928,11 +3928,27 @@ pub(crate) fn tiny_drop() -> f64 {
     tunable!("ENOMOTO_TINY", TINY_DROP, f64)
 }
 
+/// 試作 `ENOMOTO_LU_TINY_HS` (既定では使わない。analysis/lpgap_20261126/README.md): FTRAN・BTRAN の結果と新しい eta の
+/// 絶対値 1e-14 (HiGHS の `kHighsTiny`) 未満の値を 0 にする。[`tiny_drop`] (`ENOMOTO_TINY`) と違って超疎の経路
+/// ([`FtLu::u_hyper_ok`]・BTRAN の超疎) を切らず、書き出す点 (置換の最終段・非ゼロ一覧) と `U` 段の走査の起点の判定でだけ落とす
+/// (analysis/dense_scan_audit_20260924_150502.md 6 節の方針)。uccase12 の LP 緩和では FTRAN の列の非零の 3 分の 2 が 1e-14 未満だった。
+#[inline]
+pub(crate) fn tiny_hs() -> f64 {
+    static V: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| if env_str!("ENOMOTO_LU_TINY_HS").is_some_and(|v| v != "0") { 1e-14 } else { 0.0 })
+}
+
+/// 書き出す点で使う切り捨ての閾値 ([`tiny_drop`] と [`tiny_hs`] の大きいほう)。
+#[inline]
+fn tiny_out() -> f64 {
+    tiny_drop().max(tiny_hs())
+}
+
 /// BTRAN の最終段: ステップ空間の `w` を元の行順 `y[row_perm[s]] = w[s]` に戻す
 /// ([`tiny_drop`] 未満は 0 にする)。
 #[inline]
 fn permute_btran_out(row_perm: &[usize], w: &[f64], y: &mut [f64]) {
-    let tiny = tiny_drop();
+    let tiny = tiny_out();
     if tiny > 0.0 {
         for (s, &v) in w.iter().enumerate() {
             y[row_perm[s]] = if v.abs() < tiny { 0.0 } else { v };
@@ -4427,7 +4443,7 @@ fn finish_b_scratch(scratch_b: &mut [f64], b_list: Option<&[usize]>, track: Opti
 /// `ZERO_W` なら同じパスで `w` を全 0 に戻す ([`UnitBtranWork`] 用)。
 #[inline]
 fn permute_btran_out_capture<const ZERO_W: bool>(row_perm: &[usize], w: &mut [f64], y: &mut [f64], cap: &mut StepCapture) {
-    let tiny = tiny_drop();
+    let tiny = tiny_out();
     // 記録できる非ゼロ数の上限
     let limit = (cap.limit_frac * w.len() as f64) as usize;
     cap.steps.clear();
@@ -4463,7 +4479,7 @@ fn btran_full_out(row_perm: &[usize], w: &mut [f64], y: &mut [f64], cap: Option<
 /// 同じパスで `w` を全 0 に戻す [`permute_btran_out`]。
 #[inline]
 fn permute_btran_out_zeroing(row_perm: &[usize], w: &mut [f64], y: &mut [f64]) {
-    let tiny = tiny_drop();
+    let tiny = tiny_out();
     for (s, wv) in w.iter_mut().enumerate() {
         let v = *wv;
         *wv = 0.0;
@@ -5618,6 +5634,7 @@ impl FtLu {
     /// 付きで散布する。非ゼロ数を返す。`u_zero_skip` on かつ微小値切捨てなしのときのみ使う。
     fn permute_list(&self, scratch: &[f64], out: &mut [f64], list: &[usize]) -> usize {
         out.fill(0.0);
+        let tiny = tiny_hs();
         let mut nnz = 0usize;
         let col_perm = &self.base.col_perm;
         let piv = &self.single_piv;
@@ -5626,6 +5643,9 @@ impl FtLu {
             let d = piv[s];
             if d != 0.0 && v != 0.0 {
                 v /= d;
+            }
+            if v.abs() < tiny {
+                v = 0.0;
             }
             out[col_perm[s]] = v;
             nnz += (v != 0.0) as usize;
@@ -5636,6 +5656,7 @@ impl FtLu {
     /// 前回の位置を消してから書き、書いた位置を `t` に記録する [`Self::permute_list`] (策1)。
     fn permute_list_tracked(&self, scratch: &[f64], out: &mut [f64], list: &[usize], t: &mut NzTrack) -> usize {
         t.reset(out);
+        let tiny = tiny_hs();
         let mut nnz = 0usize;
         let col_perm = &self.base.col_perm;
         let piv = &self.single_piv;
@@ -5644,6 +5665,9 @@ impl FtLu {
             let d = piv[s];
             if d != 0.0 && v != 0.0 {
                 v /= d;
+            }
+            if v.abs() < tiny {
+                v = 0.0;
             }
             let i = col_perm[s];
             out[i] = v;
@@ -6666,7 +6690,7 @@ impl FtLu {
     #[inline]
     fn permute_out(&self, scratch: &[f64], out: &mut [f64]) -> usize {
         let mut nnz = 0usize;
-        let tiny = tiny_drop();
+        let tiny = tiny_out();
         let m = self.base.m;
         let col_perm = &self.base.col_perm[..m];
         let scratch = &scratch[..m];
