@@ -110,3 +110,11 @@
 - 磨いた所: 違反量の合計は経過を出すときだけ計算する。
 - 動き: 同じ。
 - 確かめ: cargo test 424 通過、check_default 全部一致。
+
+### 3.5 カットの貯めの伝播の全部を回す道を `cutpool_prop_cut` に寄せる (1 節の 2 のうち純粋な写し)
+
+- 対象は `propagate_cut_pool_inner` (`ENOMOTO_MIP_CUTPOOL_PROP_FULL`、既定では通らない)。差分版の `cutpool_prop_cut` と一字一句同じ 50 行の写しを持っていたので、呼び出しに置き換えた。
+- 締めたカットの年齢を 0 に戻すのは、前から差分版だけだった。これを引数 `reset_age` で残した。
+- 消したもの: 写しの中にあった、特定のカット 1 本 (`k + 738 == 本数`) を出す診断の行 (`ENOMOTO_MIP_DEBUG_CPP`)。入口の診断の行は残した。
+- 動き: 同じ (既定の道は変わらない)。
+- 確かめ: cargo test 424 通過、check_default 全部一致。

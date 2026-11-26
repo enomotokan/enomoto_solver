@@ -23979,7 +23979,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     };
                     self.dom.set_cut_tag(idx);
                 }
-                let r = self.cutpool_prop_cut(k as usize, cont_frac);
+                let r = self.cutpool_prop_cut(k as usize, cont_frac, true);
                 if super::cutconf::mode().is_some() && !self.params.submip {
                     let kk = k as usize;
                     super::cutconf::note_range(&self.dom, cc_pos0, &mut None, || (self.cut_pool[kk].0.clone(), self.cut_pool[kk].1));
@@ -24273,7 +24273,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.lit_conflicts.propagate_tag(p, &mut self.dom, start, Some(&mut tagger))
     }
 
-    fn cutpool_prop_cut(&mut self, k: usize, cont_frac: f64) -> Result<bool, ()> {
+    /// カットの貯めの `k` 本目 (`sum c_j x_j <= rhs`) で定義域の境界を締める (最小活動度の無限の項が 2 つ以上なら何もしない)。
+    /// 連続列は幅の `cont_frac` 倍以上縮むときだけ締める。締めたら真。矛盾 (最小活動度が右辺を越える、締めて空になる) なら `Err`。
+    /// `reset_age` なら、締めたカットの年齢を 0 に戻す (HiGHS と同じく、使われたとみなす)
+    fn cutpool_prop_cut(&mut self, k: usize, cont_frac: f64, reset_age: bool) -> Result<bool, ()> {
         let p = self.p;
         let (s0, e0) = (self.pool_start[k] as usize, self.pool_start[k + 1] as usize);
         let rhs = self.cut_pool[k].1;
@@ -24324,7 +24327,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 return Err(());
             }
         }
-        if changed {
+        if changed && reset_age {
             // HiGHS と同じく、境界を締めたカットは使われたとして年齢を戻す
             self.pool_age[k] = 0;
         }
@@ -24346,55 +24349,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         'outer: for _ in 0..passes {
             let mut changed = false;
             for k in 0..self.cut_pool.len() {
-                let (s0, e0) = (self.pool_start[k] as usize, self.pool_start[k + 1] as usize);
-                let rhs = self.cut_pool[k].1;
-                let mut minact = 0.0f64;
-                let mut ninf = 0usize;
-                let mut infj = usize::MAX;
-                for t in s0..e0 {
-                    let (j, c) = (self.pool_idx[t] as usize, self.pool_val[t]);
-                    let b = if c > 0.0 { self.dom.lo[j] } else { self.dom.up[j] };
-                    if b.is_finite() {
-                        minact += c * b;
-                    } else {
-                        ninf += 1;
-                        infj = j;
-                    }
-                }
-                if env_str!("ENOMOTO_MIP_DEBUG_CPP").is_some() && !self.params.submip && self.cutpool_prop_stats[0] < 12 && k + 738 == self.cut_pool.len() {
-                    eprintln!("CPP call {} cut {k} minact {minact} rhs {rhs} ninf {ninf} vals {:?}", self.cutpool_prop_stats[0], (s0..e0).map(|t| (self.pool_idx[t], self.pool_val[t], self.dom.lo[self.pool_idx[t] as usize], self.dom.up[self.pool_idx[t] as usize])).collect::<Vec<_>>());
-                }
-                if ninf >= 2 {
-                    continue;
-                }
-                if ninf == 0 && minact > rhs + 1e-6 * (1.0 + rhs.abs()) {
-                    bad = Some(k);
-                    break 'outer;
-                }
-                let gap = rhs - minact;
-                for t in s0..e0 {
-                    let (j, c) = (self.pool_idx[t] as usize, self.pool_val[t]);
-                    if ninf == 1 && j != infj {
-                        continue;
-                    }
-                    let (lo, up) = (self.dom.lo[j], self.dom.up[j]);
-                    if ninf == 0 && c.abs() * (up - lo) <= gap + 1e-9 * (1.0 + gap.abs()) {
-                        continue;
-                    }
-                    let tight = if c > 0.0 {
-                        let v = if ninf == 0 { lo + gap / c } else { gap / c };
-                        let need = if p.is_int[j] { 1e-6 * (1.0 + up.abs().min(1e6)) } else { (cont_frac * (up - lo)).max(1e-6 * (1.0 + up.abs().min(1e6))) };
-                        v < up - need && self.dom.tighten_upper(p, j, v)
-                    } else {
-                        let v = if ninf == 0 { up + gap / c } else { gap / c };
-                        let need = if p.is_int[j] { 1e-6 * (1.0 + lo.abs().min(1e6)) } else { (cont_frac * (up - lo)).max(1e-6 * (1.0 + lo.abs().min(1e6))) };
-                        v > lo + need && self.dom.tighten_lower(p, j, v)
-                    };
-                    if tight {
-                        changed = true;
-                        self.cutpool_prop_stats[2] += 1;
-                    }
-                    if self.dom.infeasible {
+                // 年齢は戻さない (この全部を回す道は前からそうだった)
+                match self.cutpool_prop_cut(k, cont_frac, false) {
+                    Ok(c) => changed |= c,
+                    Err(()) => {
                         bad = Some(k);
                         break 'outer;
                     }
