@@ -200,3 +200,9 @@ pub fn with_bound<R>(bound: Option<SharedBound>, f: impl FnOnce() -> R) -> R {
     BOUND.with(|b| *b.borrow_mut() = prev);
     r
 }
+
+/// 秒 `secs` の `Duration`。[0, 1e6] 秒に押さえる (負・NaN は 0、無限・大きすぎる値は 1e6 秒)。
+/// `Duration::from_secs_f64` は負・NaN・無限・大きすぎる値で落ちるので、時間の上限から期限を作るときはこれを使う
+pub fn secs(secs: f64) -> std::time::Duration {
+    std::time::Duration::from_secs_f64(if secs > 0.0 { secs.min(1e6) } else { 0.0 })
+}

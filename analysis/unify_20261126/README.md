@@ -110,3 +110,33 @@
 - 磨いた所: 違反量の合計は経過を出すときだけ計算する。
 - 動き: 同じ。
 - 確かめ: cargo test 424 通過、check_default 全部一致。
+
+### 3.5 カットの貯めの伝播の全部を回す道を `cutpool_prop_cut` に寄せる (1 節の 2 のうち純粋な写し)
+
+- 対象は `propagate_cut_pool_inner` (`ENOMOTO_MIP_CUTPOOL_PROP_FULL`、既定では通らない)。差分版の `cutpool_prop_cut` と一字一句同じ 50 行の写しを持っていたので、呼び出しに置き換えた。
+- 締めたカットの年齢を 0 に戻すのは、前から差分版だけだった。これを引数 `reset_age` で残した。
+- 消したもの: 写しの中にあった、特定のカット 1 本 (`k + 738 == 本数`) を出す診断の行 (`ENOMOTO_MIP_DEBUG_CPP`)。入口の診断の行は残した。
+- 動き: 同じ (既定の道は変わらない)。
+- 確かめ: cargo test 424 通過、check_default 全部一致。
+
+### 3.6 安全の直し (2 節の 3・10・11、親の指示でまとめのついでに直す)
+
+- `crate::cancel::secs(x)` を置いた。秒を [0, 1e6] に押さえた `Duration` を返す (`Duration::from_secs_f64` は負・NaN・無限で落ちる)。
+  - 次の 4 か所の期限の作り方をこれにした。
+    - `Solver::deadline_in`
+    - heuristics.rs の `local_search` と `fj_search_old` (前は押さえなし、2 節の 11)
+    - fj.rs と localmip.rs (前は `.max(0.0)` だけで、無限で落ちた)
+- `max_violation` (mod.rs): NaN の違反を無限として扱う (2 節の 10)。前は `f64::max` が NaN を捨てて、NaN を含む点の違反が 0 になり、研磨の採否で通りえた。
+- 動き: 有限の値では同じ。
+- 確かめ: cargo test 424 通過、check_default 全部一致。
+
+### 3.7 履歴で確かめたこと (2 節の 4・7、親の指示)
+
+- 2 節の 4 (`try_lp_solution` が費用を戻さず、反復を累計に入れない):
+  - `try_lp_solution` は 2026-10-06 の分枝限定法の骨組み (008552d28) からある。
+  - 費用を元に戻す処理と、反復を累計に入れない処理は、2026-10-15 に `resolve_continuous` を足したとき (9ba979b42) に、そちらにだけ入った。そのとき `try_lp_solution` は見直されていない。意図した違いではない。
+  - 揃えると動きが変わるので、4 節の切り替え (`t`) に入れて P で測る。
+- 2 節の 7 (lp_probe の ROOTCAP の道で `ROOT_BASIS_SAVED` を置かない、DSE を条件なしで渡す):
+  - 試作 `ENOMOTO_MIP_ROOTCAP` の `p`・`q` (e3fd57dc3、既定では切) の道で、コメントに「止まった LP の基底 (行の状態・DSE 重みつき) を捨てずに根の LP に渡す (根の LP はここから続きを解く)」とある。
+  - DSE を渡すのは意図的。`ROOT_BASIS_SAVED` は別の試作 (`ROOT_BASIS_FIX`) の置き場で、この道には関わらない。
+  - 写し違いではないので、直さない。

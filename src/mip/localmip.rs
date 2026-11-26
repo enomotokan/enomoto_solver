@@ -21,7 +21,7 @@
 //! `ENOMOTO_MIP_LOCALMIP_PAIR` (試作): 違反行を満たす列 `j` の tight move が別の行 `r` を新たに破るとき、`r` を元に戻す
 //! 2 本目の列 `k` (`r` に現れ、違反行には現れない) を同時に動かす組の手も候補に入れる (1 列ずつの探索では抜けられない形への手当て)。
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use super::problem::MipProblem;
 
@@ -1212,7 +1212,7 @@ impl<'a> LocalMip<'a> {
 /// [`local_mip`] で、連鎖の手を使うかを `chain` で決めるもの。
 #[allow(clippy::too_many_arguments)]
 pub(super) fn local_mip_opts(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64, seed: u64, stop: Option<&std::sync::atomic::AtomicBool>, on_sol: &dyn Fn(&[f64]), chain: bool) -> LocalMipResult {
-    let t_end = Instant::now() + Duration::from_secs_f64(time_cap.max(0.0));
+    let t_end = Instant::now() + crate::cancel::secs(time_cap);
     let Some(mut lm) = LocalMip::new(p, lo, up, seed, chain) else {
         return LocalMipResult { best: None, least_viol: usize::MAX, first_time: None, steps: 0, pair_moves: 0, chain_len: 0 };
     };
