@@ -4660,6 +4660,22 @@ impl Drop for LmboostBg {
     }
 }
 
+/// 試作 `ENOMOTO_MIP_UNIFY_FIX` (既定では使わない。analysis/unify_20261126/ の 2 節・4 節): 重複の洗い出しで見つけた写し違いを、
+/// 正しい側にそろえる。文字ごとに入れる (`1` は全部)。
+/// - `f`: 旧 FJ (`fj_search_old`)・`local_search` の違反の許容誤差を、活動度に比例する `1e-6 (1 + min(|act|, 1e6))` から、
+///   [`super::problem::MipProblem::is_feasible`] より少し狭い `0.5e-6 + 1e-10 |b|` (Local-MIP と同じ) にする
+/// - `r`: Repair の「違反なし」の判定を `1e-6 (1 + |b|)` から `is_feasible` と同じ `1e-6 + 1e-9 |b|` にする
+/// - `s`: FIXMORE の目的の行の伝播 (`obj_row_pass`) で、整数列には丸めの余裕を足さない ([`Solver::global_obj_prop_ex`] と同じ)
+/// - `m`: 対称な列の併合 (`add_symmetry_rows` の `sum_ub`) の丸めの余裕を 1e-9 から 1e-6 にする (`FZ2_FIX` の `m` と同じ)
+/// - `l`: LMBOOST の Local-MIP に、元の問題がないとき問題の境界ではなく大域の境界 (根で締めたもの) を渡す
+/// - `t`: `try_lp_solution` の整数を固定した LP を、元の費用で解き、反復を累計に入れない ([`Solver::with_fixed_int_lp`]、
+///   `resolve_continuous` と同じ)
+pub(crate) fn unify_fix(c: char) -> bool {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let v = V.get_or_init(|| env_def!("ENOMOTO_MIP_UNIFY_FIX", "").map_or(String::new(), |v| v.to_string()));
+    v == "1" || v.contains(c)
+}
+
 /// 試作 `ENOMOTO_MIP_LMBOOST` (COMP07、既定では使わない): [`Solver::lmip_boost`]。
 fn lmboost_on() -> bool {
     env_def!("ENOMOTO_MIP_LMBOOST", "1").is_some()
@@ -8594,6 +8610,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return false;
         }
         // 整数を固定して連続変数を解き直す (`try_incumbent` が偽なら LP には触れていないので、LP の値は上と同じ)
+        // `ENOMOTO_MIP_UNIFY_FIX` の `t`: [`Self::with_fixed_int_lp`] で解く (元の費用で解き、反復を累計に入れない。連続列はノードの境界のまま)
+        if unify_fix('t') {
+            let x = self.lp.col_values();
+            let cost = self.lp.costs();
+            let (_, _, ok) = self.with_fixed_int_lp(&x, true, cost, |s, j| s.lp.col_bounds(j), self.deadline, |s, y| s.try_incumbent(y));
+            return ok.unwrap_or(false);
+        }
         let saved = self.lp.save_state();
         for j in 0..self.p.n {
             if self.p.is_int[j] {
@@ -27210,6 +27233,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let Some((_, x0)) = self.incumbent.clone() else { return };
         let q: std::sync::Arc<MipProblem> = std::sync::Arc::new(match &self.orig {
             Some(o) => (**o).clone(),
+            // `ENOMOTO_MIP_UNIFY_FIX` の `l`: 元の問題がなければ、大域の境界 (根で締めたもの) を渡す (ほかの FJ・Local-MIP の呼び手と同じ)
+            None if unify_fix('l') => {
+                let mut q = self.p.clone();
+                q.col_lo.clone_from(&self.dom.global_lo);
+                q.col_up.clone_from(&self.dom.global_up);
+                q
+            }
             None => self.p.clone(),
         });
         if q.n != x0.len() {
