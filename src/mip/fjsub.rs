@@ -96,7 +96,7 @@ fn run(p: &MipProblem, inc: Option<Vec<f64>>, seed: u64, sh: &FjSubShared) {
                 sh.n_subsol.fetch_add(1, Ordering::Relaxed);
                 let z = p.objective(&x);
                 push(&x, true);
-                if z < best - 1e-9 * best.abs().max(1.0) {
+                if super::solver::better_obj(z, best, best) {
                     best = z;
                     last_imp = Instant::now();
                 }
@@ -114,7 +114,7 @@ fn run(p: &MipProblem, inc: Option<Vec<f64>>, seed: u64, sh: &FjSubShared) {
             };
             if let Some(x) = got {
                 let z = p.objective(&x);
-                if z < best - 1e-9 * best.abs().max(1.0) {
+                if super::solver::better_obj(z, best, best) {
                     best = z;
                     last_imp = Instant::now();
                     push(&x, false);

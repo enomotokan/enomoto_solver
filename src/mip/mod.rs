@@ -447,7 +447,7 @@ pub(crate) fn record_incumbent(z: f64) {
         if s.first_sol.is_none() {
             s.first_sol = Some((t, z));
         }
-        if z < s.best_z - 1e-9 * z.abs().max(1.0) {
+        if solver::better_obj(z, s.best_z, z) {
             s.best_z = z;
             s.last_sol = Some(t);
         }
@@ -1309,7 +1309,7 @@ fn solve_permrace(p: &MipProblem, params: MipParams) -> solver::MipResult {
         (Some(b), Some(_)) => {
             let z = b.objective.unwrap();
             let sb = shared.best();
-            if sb < z - 1e-9 * z.abs().max(1.0) {
+            if solver::better_obj(sb, z, z) {
                 eprintln!("MIP: WARNING: PERMRACE: the shared best value {sb:.10e} is better than the best returned solution {z:.10e}; not reporting optimality");
                 return solver::MipResult { status: MipStatus::NotSolved, x: b.x.clone(), objective: Some(z), best_bound: tree_bound.min(z), nodes, lp_iterations };
             }
@@ -1422,7 +1422,7 @@ fn solve_portfolio(p: &MipProblem, params: MipParams) -> solver::MipResult {
             let z = b.objective.unwrap();
             // 共有の最良値の解がどのスレッドの結果にもない (届かなかった) なら、この解を最適とは言えない
             let sb = shared.best();
-            if sb < z - 1e-9 * z.abs().max(1.0) && env_str!("ENOMOTO_MIP_NO_FINAL_SHARED_CHECK").is_none() {
+            if solver::better_obj(sb, z, z) && env_str!("ENOMOTO_MIP_NO_FINAL_SHARED_CHECK").is_none() {
                 eprintln!("MIP: WARNING: the shared best value {sb:.10e} is better than the best returned solution {z:.10e}; not reporting optimality");
                 return solver::MipResult { status: MipStatus::NotSolved, x: b.x.clone(), objective: Some(z), best_bound: sb, nodes, lp_iterations };
             }

@@ -255,3 +255,24 @@
   - separation.rs (Gm3w の作業中) と、形の違うものは残した。
   - 動き: 読む値と判定は同じ。
 - 確かめ: cargo test 424 通過、check_default 全部一致。
+
+## 5. 写し違いの直しの第 2 弾 (`ENOMOTO_MIP_UNIFY_FIX` の `z`・`p`、既定オフ、P で測る)
+
+親の指示 (2026-11-26) で、1 節の 14 (改善の判定) と、1 本の行の伝播の残り (`row_prop`・`apply_dual_proofs`) をそろえる。
+
+- 文字は既定では入らない。`1` にも含めず、文字で付けたときだけ入る (`1zp` = 第 1 弾の全部 + `z`・`p`)。
+
+| 文字 | 直し |
+|---|---|
+| `z` | 目的値の改善の判定 `z < b − 1e-9·max(\|·\|, 1)` を `solver::better_obj(z, b, scale)` にまとめた (23 か所)。切り替えなしでは以前の式のまま (尺度は呼び手ごとの `scale`)。`z` なら尺度をいつも比べる相手 `b` で取り、`b` = +∞ (暫定解なし) は先に分ける (以前は `b − 1e-9·∞` が NaN で偽になる所と、先に有限を確かめる所が割れていた) |
+| `p` | 1 本の行の伝播 (`Domain::tighten_le_row`・`tighten_le_row_rest`) で、無限の項を境界でなく積 `c·b` で見る (`recompute_activities` と同じ。境界が有限でも積があふれると最小活動度が ±∞ になり、矛盾と誤りうる)。`tc_global_pool_prop` の `row_prop` を `tighten_le_row` にする (自前の締め方は連続列を `1e-6 (1 + \|rhs\|) / a` も緩め、矛盾を絶対値 1e-6 で見ていた。この道は試作 `ENOMOTO_MIP_TC` の `l` の中だけ) |
+
+- `apply_dual_proofs` は変えなかった。整数列だけを `l + slack/a + 1e-6` まで締め、`tighten_*` がさらに許容誤差を足す。この締め方は `Domain` の標準より緩い (安全な) 側にあり、差分の積み上げで速くしてある。そろえると締めが強くなるだけで、正しさの得がない。
+- 比べの外にしたもの: `mine < lb0 − …` (下界どうしの比べ) と、`warm_raise` を引く最後の共有の確かめ。
+- 確かめ:
+  - 既定 (文字なし) で cargo test 424 通過、check_default 全部一致。
+  - `UNIFY_FIX=1zp` で fuzz 7 本と fuzz_bigact 2 本は誤答 0 (`fuzz_uf2.out`)。cargo test 424 通過。
+- P: 58 問 × 種 1〜3 × (def・uf2) × (1・4 スレッド)、60 秒、696 回。
+  - 分担表: `UNIFY_SET=2 python plan.py 4 shards2.json`。
+  - 回し方: `python analysis/unify_20261126/run.py K analysis/unify_20261126/shards2.json analysis/unify_20261126/res2_sK.jsonl`。
+  - 集計: `UNIFY_SET=2 python analysis/unify_20261126/summ.py 'analysis/unify_20261126/res2_s*.jsonl'`。
