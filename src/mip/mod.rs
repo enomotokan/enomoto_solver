@@ -3903,7 +3903,8 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
                 if !bound.is_finite() || !lo.is_finite() || inf > 0 {
                     continue;
                 }
-                ub = ub.min((bound - (v - a * lo * k)) / a + 1e-9);
+                // `ENOMOTO_MIP_UNIFY_FIX` の `m`: 丸めの余裕を `merge_twin_classes` (`FZ2_FIX` の `m`) と同じ 1e-6 にする
+                ub = ub.min((bound - (v - a * lo * k)) / a + if solver::unify_fix('m') { 1e-6 } else { 1e-9 });
             }
             ub.floor()
         };
