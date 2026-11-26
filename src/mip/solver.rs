@@ -1205,6 +1205,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     rph_bg: Option<(std::thread::JoinHandle<(super::WarmPolish, Vec<f64>)>, Vec<f64>, f64)>,
     /// 試作 `ENOMOTO_MIP_ROOTPAR_PH` の `i` ([`Solver::rph_inlp_polish`]): `resolve_continuous` の LP の中で続けて研磨した結果 (結果, 研磨した解, 研磨にかけた解)
     rph_inlp: Option<(super::WarmPolish, Vec<f64>, Vec<f64>)>,
+    /// `POLISH_FINAL`: 木の探索の終わりに、共有の最良値が主の暫定解より良かったときのその値 (求解の終わりの最後の研磨の確かめで、刈りに使った値として扱う)
+    rph_sb: Option<f64>,
     /// 診断用 `ENOMOTO_MIP_GAP4_RSS`: 生きている `Solver` の数に数えたか (サブ MIP か)。[`GAP4_LIVE`]
     gap4_live: Option<bool>,
     /// `ENOMOTO_MIP_GAP4` の `k`: 最後の locks の固定率と、根の並列の locks のサブ MIP が実行不能だったか ([`Self::locks_retry`])
@@ -6203,6 +6205,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         warm_verified: None,
         rph_bg: None,
         rph_inlp: None,
+        rph_sb: None,
         gap4_live: gap4_sub,
         gap4_locks: (0.0, false),
         mem2_keep: (true, true),
@@ -17142,7 +17145,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             // 共有の最良値を公表した解が主に届いていない (受信箱で拒まれた、など)。木はその値から作った打ち切り値で刈っているので、
             // 主の暫定解を最適とは言えない (以前は警告だけ出して最適と報告していた。analysis/h80x6320d_warning_20261021.md)
-            if better_obj(sb, z, z) {
+            // `POLISH_FINAL` (`e` の形): 従は暫定解を研磨せずに最良値に置くので、同じ解でも許容の中の違反の分だけ低い値が届き、主はそれを
+            // 「良くない」として受け取らないことがある (qiu の 4 スレッド、1.7e-7。README 5.12 節)。ここでは決めず、求解の終わりの最後の研磨の確かめで、
+            // 刈りに使った値 (研磨の前の値と共有の最良値の小さい方) から上がった幅が許容 (刈りの余裕・W_mip) の中かで決める
+            let defer = better_obj(sb, z, z) && super::polish_warm_mode() == 3 && polish_final('g') && !self.params.submip;
+            if defer {
+                if self.params.verbose {
+                    eprintln!("MIP: POLISH_FINAL: the shared best value {sb:.10e} is better than the main thread's incumbent {z:.10e} at the end of the tree search; deciding at the final polish");
+                }
+                self.rph_sb = Some(sb);
+            } else if better_obj(sb, z, z) {
                 eprintln!("MIP: WARNING: the shared best value {sb:.10e} is better than the main thread's incumbent {z:.10e} at the end of the tree search; not reporting optimality");
                 if !self.unresolved && env_str!("ENOMOTO_MIP_TREE_NO_END_CHECK").is_none() {
                     return self.finish(MipStatus::NotSolved, wlb.min(lim));
@@ -30581,7 +30593,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 warm_raise = (z - z0).max(0.0);
                 if warm == 3 && (rootpar_ph('f') || polish_final('g')) {
-                    rph_f_raise = Some((z0, z - z0, super::POLISH_TOL_LEAK.with(|c| c.get())));
+                    // 刈りに使った値: 研磨の前の値と、木の終わりに主に届かなかった共有の最良値 (`rph_sb`) の小さい方
+                    let zc = self.rph_sb.map_or(z0, |sb| z0.min(sb));
+                    rph_f_raise = Some((zc, z - zc, super::POLISH_TOL_LEAK.with(|c| c.get())));
                 }
                 self.incumbent = Some((z, x));
             }
@@ -31108,7 +31122,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 目的値を上げたときは、その幅 (`warm_raise`) を引いて比べる (上の研磨の前の値で共有しているため。qiu の 4 スレッドで
         // 研磨が 3e-6 上げ、最適を NotSolved と報告した: analysis/polishp_20261125)
         let (status, best_bound) = match (status, objective, self.shared.as_ref().map(|s| s.best())) {
-            (MipStatus::Optimal, Some(z), Some(sb)) if sb < z - warm_raise - 1e-9 * z.abs().max(1.0) && self.snap.is_none() && env_str!("ENOMOTO_MIP_NO_FINAL_SHARED_CHECK").is_none() => {
+            // `POLISH_FINAL` (`e` の形): 従は暫定解を研磨せずに共有の最良値に置くので、最良値は許容の中の違反の分だけ低く見えうる (W_mip の水準。
+            // 最適の定義と同じ)。その分は食い違いと見ない (qiu の 4 スレッドで、従の未研磨の値が研磨して返す値より 1e-7 低く、最適を NotSolved と
+            // 返した。README 5.12 節)
+            (MipStatus::Optimal, Some(z), Some(sb))
+                if sb < z - warm_raise - (1e-9 * z.abs().max(1.0)).max(rph_f_raise.map_or(0.0, |(_, _, (_, w))| w)) && self.snap.is_none() && env_str!("ENOMOTO_MIP_NO_FINAL_SHARED_CHECK").is_none() =>
+            {
                 eprintln!("MIP: WARNING: the shared best value {sb:.10e} is better than the returned solution {z:.10e} at the end; not reporting optimality");
                 (MipStatus::NotSolved, sb)
             }
