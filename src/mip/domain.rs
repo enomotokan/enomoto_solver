@@ -1093,9 +1093,12 @@ impl Domain {
         let mut minact = 0.0f64;
         let mut ninf = 0usize;
         let mut infj = usize::MAX;
+        // `ENOMOTO_MIP_UNIFY_FIX` の `p`: 無限の項を積 `c b` で見る ([`Self::recompute_activities`] と同じ。境界が有限でも積があふれると
+        // 最小活動度が ±∞ になり、矛盾と誤って判定しうる)
+        let prod = super::solver::unify_fix('p');
         for (j, c) in row.clone() {
             let b = if c > 0.0 { self.lo[j] } else { self.up[j] };
-            if b.is_finite() {
+            if if prod { (c * b).is_finite() } else { b.is_finite() } {
                 minact += c * b;
             } else {
                 ninf += 1;
@@ -1145,9 +1148,12 @@ impl Domain {
     /// `int_slack` なら整数列も同じだけ緩める (整数列は `tighten_*` が許容誤差を足して切り捨てる)。締めた数を返し、矛盾なら None
     pub fn tighten_le_row_rest(&mut self, p: &MipProblem, row: &[(usize, f64)], u: f64, int_slack: bool) -> Option<usize> {
         let (mut minact, mut ninf) = (0.0f64, 0usize);
+        // `ENOMOTO_MIP_UNIFY_FIX` の `p`: 無限の項を積 `c b` で見る ([`Self::tighten_le_row`] と同じ)
+        let prod = super::solver::unify_fix('p');
+        let fin = |c: f64, b: f64| if prod { (c * b).is_finite() } else { b.is_finite() };
         for &(j, c) in row {
             let b = if c > 0.0 { self.lo[j] } else { self.up[j] };
-            if b.is_finite() {
+            if fin(c, b) {
                 minact += c * b;
             } else {
                 ninf += 1;
@@ -1159,7 +1165,7 @@ impl Domain {
         let mut n = 0usize;
         for &(j, c) in row {
             let b = if c > 0.0 { self.lo[j] } else { self.up[j] };
-            let rest = if b.is_finite() {
+            let rest = if fin(c, b) {
                 if ninf > 0 {
                     continue;
                 }

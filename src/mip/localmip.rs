@@ -771,7 +771,7 @@ impl<'a> LocalMip<'a> {
                     done = true;
                     break;
                 }
-                if !best_obj.is_finite() || z < best_obj - 1e-9 * best_obj.abs().max(1.0) {
+                if !best_obj.is_finite() || super::solver::better_obj(z, best_obj, best_obj) {
                     best_obj = z;
                     *ot_since = 0;
                     res.best = Some(s.x.clone());
