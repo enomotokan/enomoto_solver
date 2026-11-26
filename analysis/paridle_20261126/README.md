@@ -90,3 +90,11 @@ neos-1582420 のように 21 倍になる問題がある (treeclose 9.77: 共有
 - `e` (従を早く始める) は上乗せがない (eh は h より悪い 1.012)。ヒューリスティクス役を強分枝の間に始めても、木の始まりの遊びを埋める得は出なかった。
 - `h` は区間の上端 1.015 で、解けた数の減りは道筋 (目安に数えない)、仕組みの遅れもない。noswot・10teams (4 スレッドで揺れの大きい問題) で 0.5 倍。
   ただしこの計測は `ENOMOTO_MIP_PAR4=fmr` が既定になる前の版 (345188a10)。新しい既定 (7d839da81 以降) に対して測り直す (4 節)。
+
+## 4. 新しい既定 (`ENOMOTO_MIP_PAR4=fmr`、7d839da81 以降) での h の測り直し
+
+- 版: c5170dfbe で `pip install -e .`。check_default は既定・`PARIDLE=h` とも 6 問一致 (1 スレッドの道筋は変わらない)。
+  `fuzz.sh h4 ENOMOTO_MIP_PARIDLE=h ENOMOTO_MIP_THREADS=4`: fuzz 7 本とも誤答 0、cargo test 424 通過・失敗 0。
+- 分担表 shards2.json (shards.json から eh を除いた 348 回、同じ順)、`python run.py 0 shards2.json res2_s0.jsonl`、集計 `python summ.py res2_s0.jsonl` (既定 = 新しい既定)。
+
+(結果は下に追記)
