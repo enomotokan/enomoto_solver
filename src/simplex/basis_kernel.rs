@@ -104,6 +104,8 @@ pub(super) struct BasisKernel {
     since_check: usize,
     /// 試作 `ENOMOTO_SIMPLEX_LUCLOCK=g` ([`luclock_mode`]): 今の分解の FT 更新ごとの eta の fill ([`sparse_lu::FtLu::fill_count`]) の和。
     fill_sum: u64,
+    /// 試作 `ENOMOTO_LU_REFAC_BAL` ([`refac_bal_due`]): 分解してから i 回目の更新の後の求解の手間の累計 (`synth_tick`)。
+    bal_hist: Vec<u64>,
     /// 周期検査の間隔 (既定 [`FT_CHECK_INTERVAL`]、[`Self::with_periodic_check`])。
     check_interval: usize,
     /// 分解自体が `bump_limit` より大きいとき、fill の上限を `bump_lu_ratio * nnz(LU)` まで広げる
@@ -192,6 +194,7 @@ impl BasisKernel {
             e_tilde_row: None,
             since_check: 0,
             fill_sum: 0,
+            bal_hist: Vec::new(),
             check_interval: FT_CHECK_INTERVAL,
             bump_lu_ratio: 0.0,
             bump_limit: tunable!("ENOMOTO_T_FT_BUMP_LIMIT_FACTOR", FT_BUMP_LIMIT_FACTOR, usize) * m.max(1),
@@ -523,7 +526,9 @@ impl BasisKernel {
             luclock_count(1);
             return RefactorDue::MaxUpdates;
         }
-        let clock = if luclock_mode() == b'g' {
+        let clock = if refac_bal_on() {
+            refac_bal_due(lu, &mut self.bal_hist)
+        } else if luclock_mode() == b'g' {
             if lu.update_count() <= 1 {
                 self.fill_sum = 0;
             }
@@ -939,6 +944,41 @@ fn luclock_count(k: usize) {
 /// FTRAN/BTRAN の本数 (`ENOMOTO_T_LUCLOCK_G_SOLVES`、既定 3) に係数 (`ENOMOTO_T_LUCLOCK_G_FACTOR`、既定 1) を掛けたもの。
 /// 道 (eta の大きさ) だけで決まり、求解の回数・密度 (下界の計算などの寄り道) によらない。更新が [`SYNTH_CLOCK_MIN_UPDATES`] 未満なら偽。
 #[inline]
+/// 試作 `ENOMOTO_LU_REFAC_BAL=1` (既定では使わない。analysis/lpgap_20261126/README.md 9 節) が有効か。
+#[inline]
+pub(super) fn refac_bal_on() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_LU_REFAC_BAL").is_some_and(|v| v != "0"))
+}
+
+/// 試作 `ENOMOTO_LU_REFAC_BAL`: 再分解するかを、分解 1 回の手間と更新で増える求解の手間の釣り合いで決める (係数・閾値なし)。
+/// 分解してから k 回の更新の間の 1 反復あたりの平均の手間 `(B + S_k) / k` (B = 分解の演算数 [`sparse_lu::FtLu::build_tick`]、
+/// `ENOMOTO_LU_REFAC_BAL` のときは m + nnz(L+U) + 消去の積和の数、S_k = 求解で触った非零の累計 `synth_tick`) は、直近の 1 反復の手間
+/// (後半 k/2 回の平均 `(S_k - S_{k/2}) / (k - k/2)`) が平均を上回った所で最小になる。そこで再分解する (古典的な再分解の周期の最適化)。
+/// 合成の時計 (`SYNTH_CLOCK_FACTOR` 16 × 見積り) は、疎な大きい LP で緩すぎ (uccase12: 更新が千回以上続く)、密な基底では見積りが
+/// 実際の分解 (k^3) より桁違いに軽く、分解し直しすぎる (cod105 のクロスオーバー: 5 回ごとに 1024 x 1024 の分解) という両側の外れがあった。
+fn refac_bal_due(lu: &sparse_lu::FtLu, hist: &mut Vec<u64>) -> bool {
+    let k = lu.update_count();
+    if k == 0 {
+        hist.clear();
+        return false;
+    }
+    if hist.len() >= k {
+        // 分解し直した後 (更新の数が戻った): 記録を始め直す
+        hist.clear();
+    }
+    hist.resize(k, lu.synth_tick());
+    hist[k - 1] = lu.synth_tick();
+    if k < 2 {
+        return false;
+    }
+    let s_k = lu.synth_tick() as f64;
+    let h = k / 2;
+    let s_h = hist[h - 1] as f64;
+    let recent = (s_k - s_h) / (k - h) as f64;
+    recent * k as f64 >= lu.build_tick() as f64 + s_k
+}
+
 fn luclock_growth_due(lu: &sparse_lu::FtLu, fill_sum: u64) -> bool {
     let k = lu.update_count() as f64;
     if (k as usize) < tunable!("ENOMOTO_T_SYNTH_CLOCK_MIN_UPDATES", SYNTH_CLOCK_MIN_UPDATES, usize) {
