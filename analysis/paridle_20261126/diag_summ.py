@@ -27,7 +27,8 @@ def parse(p, t):
         if m:
             d["th"].append(dict(tid=int(m[1]), ready=float(m[2]), first=float(m[3]), end=float(m[4]), idle=float(m[5]), waits=int(m[6]), lns=float(m[7]),
                                 tail=float(m[8]), sync=float(m[9]), nodes=int(m[10]), waste=int(m[11])))
-        if "new incumbent" in l: d["inc"] = float(w)
+        if l.startswith("MIP: new incumbent"): d["inc"] = float(w)
+        d["wall_end"] = float(w)
     return d
 def phases(d):
     """木の段のスレッド秒と A〜D (秒)"""
@@ -36,16 +37,18 @@ def phases(d):
     pre = max(0.0, d["ws"] - d["ts"]) if d["ws"] > 0 else T
     A = (n - 1) * pre
     work = [x for x in d["th"] if x["tid"] != 0]
-    B = sum((x["first"] if x["first"] > 0 else x["end"]) for x in work)
-    C = sum(x["idle"] for x in d["th"] if x["tid"] == 0) + sum(max(0.0, x["idle"] - max(0.0, x["first"] - x["ready"])) for x in work)
+    # 一度もノードを受け取らなかった従 (ノード 0) は、始まってから止まるまで (end) を全部 B に入れ、その待ち (tail) は D に入れない
+    B1 = sum(min(x["ready"], x["end"]) for x in work)
+    B2 = sum(max(0.0, x["first"] - x["ready"]) if x["nodes"] > 0 else max(0.0, x["end"] - x["ready"]) for x in work)
+    C = sum(x["idle"] for x in d["th"] if x["tid"] == 0) + sum(max(0.0, x["idle"] - max(0.0, x["first"] - x["ready"])) for x in work if x["nodes"] > 0)
     span = d["total"] - d["ws"] if d["ws"] > 0 else 0.0
-    Dd = sum(x["tail"] for x in d["th"]) + sum(max(0.0, span - x["end"]) for x in work)
-    return dict(cap=n * T, T=T, A=A, B=B, C=C, D=Dd)
+    Dd = sum(x["tail"] for x in d["th"] if x["tid"] == 0 or x["nodes"] > 0) + sum(max(0.0, span - x["end"]) for x in work)
+    return dict(cap=n * T, T=T, A=A, B=B1 + B2, B1=B1, B2=B2, C=C, D=Dd)
 R = {p: (parse(p, 1), parse(p, 4)) for p in PROBS}
 print("== 遊び (4 スレッド、種 1、60 秒。木の段に入った問題)\n")
-print("| 問題 | 状態 | 全体 秒 | 木の段 秒 | A 分かれる前 | B 最初のノードまで | C 途中 | D 終わり | 遊びの計 | 主のノード / 全体 |")
-print("|---|---|---:|---:|---:|---:|---:|---:|---:|---|")
-tot = dict(cap=0, A=0, B=0, C=0, D=0); fr = []
+print("| 問題 | 状態 | 全体 秒 | 木の段 秒 | A 分かれる前 | B1 写しの準備 | B2 最初の待ち | C 途中 | D 終わり | 遊びの計 | 主のノード / 全体 |")
+print("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|")
+tot = dict(cap=0, A=0, B=0, B1=0, B2=0, C=0, D=0); fr = []
 rows = []
 for p, (a, b) in R.items():
     if not b or b["total"] is None: continue
@@ -54,13 +57,13 @@ for p, (a, b) in R.items():
     for k in tot: tot[k] += ph[k]
     idle = ph["A"] + ph["B"] + ph["C"] + ph["D"]; fr.append(idle / ph["cap"])
     n0 = sum(x["nodes"] for x in b["th"] if x["tid"] == 0); nn = sum(x["nodes"] for x in b["th"])
-    rows.append((idle / ph["cap"], f"| {p} | {b['st']} | {b['time']:.1f} | {ph['T']:.1f} | " + " | ".join(f"{100 * ph[k] / ph['cap']:.0f}%" for k in "ABCD") + f" | {100 * idle / ph['cap']:.0f}% | {n0}/{nn} |"))
+    rows.append((idle / ph["cap"], f"| {p} | {b['st']} | {b['time']:.1f} | {ph['T']:.1f} | " + " | ".join(f"{100 * ph[k] / ph['cap']:.0f}%" for k in ("A", "B1", "B2", "C", "D")) + f" | {100 * idle / ph['cap']:.0f}% | {n0}/{nn} |"))
 for _, r in sorted(rows, reverse=True): print(r)
 c = tot["cap"]
-print(f"\n全問の合計 (スレッド秒の重み): A {100 * tot['A'] / c:.1f}% B {100 * tot['B'] / c:.1f}% C {100 * tot['C'] / c:.1f}% D {100 * tot['D'] / c:.1f}% 計 {100 * (tot['A'] + tot['B'] + tot['C'] + tot['D']) / c:.1f}% "
+print(f"\n全問の合計 (スレッド秒の重み): A {100 * tot['A'] / c:.1f}% B {100 * tot['B'] / c:.1f}% (B1 {100 * tot['B1'] / c:.1f}% B2 {100 * tot['B2'] / c:.1f}%) C {100 * tot['C'] / c:.1f}% D {100 * tot['D'] / c:.1f}% 計 {100 * (tot['A'] + tot['B'] + tot['C'] + tot['D']) / c:.1f}% "
       f"(問題 {len(fr)}、問題ごとの割合の平均 {100 * sum(fr) / max(1, len(fr)):.1f}%、木の段のスレッド秒の計 {c:.0f})")
 print("\n== 重複探索 (1 スレッドと 4 スレッドのノード数、種 1。両方とも木に入った問題を 4T / 1T の大きい順)\n")
-print("| 問題 | 1T 状態 秒 ノード | 4T 状態 秒 ノード | ノード 4T/1T | lb>=opt 1T | lb>=opt 4T | 最後の暫定解の時刻 1T | 4T |")
+print("| 問題 | 1T 状態 秒 ノード | 4T 状態 秒 ノード | ノード 4T/1T | lb>=opt 1T | lb>=opt 4T | 最後の暫定解の時刻 (全体の割合) 1T | 4T |")
 print("|---|---|---|---:|---:|---:|---:|---:|")
 L = []
 for p, (a, b) in R.items():
@@ -69,6 +72,6 @@ for p, (a, b) in R.items():
     L.append((b["nodes"] / a["nodes"], p, a, b, w1, w4))
 lr = [math.log(x[0]) for x in L if x[2]["st"] == "optimal" and x[3]["st"] == "optimal"]
 for r, p, a, b, w1, w4 in sorted(L, reverse=True):
-    inc = lambda d: f"{d['inc']:.1f}" if d["inc"] is not None else "—"
+    inc = lambda d: f"{d['inc'] / d['wall_end']:.2f}" if d["inc"] is not None else "—"
     print(f"| {p} | {a['st']} {a['time']:.1f} {a['nodes']} | {b['st']} {b['time']:.1f} {b['nodes']} | {r:.2f} | {w1} | {w4} | {inc(a)} | {inc(b)} |")
 print(f"\n両方とも最適で終えた {len(lr)} 問のノード 4T/1T の幾何平均 {math.exp(sum(lr) / max(1, len(lr))):.3f}")
