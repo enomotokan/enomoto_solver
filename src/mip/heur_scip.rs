@@ -400,23 +400,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let sub = super::problem::MipProblem::from_rows(col_lo, col_up, cost, 0.0, 1.0, is_int, rows, p.row_lo.clone(), p.row_up.clone());
         let remaining = self.secs_left();
-        let params = super::solver::MipParams {
-            time_limit: (tunable!("ENOMOTO_T_MIP_MINREL_TIME_FRAC", 0.1, f64) * remaining).min(10.0),
-            node_limit: 1000,
-            rel_gap: 0.0,
-            abs_gap: 1e-9,
-            verbose: false,
-            submip: true,
-            cutoff: f64::INFINITY,
-            restarts: 0,
-            skip_heurs: 0,
-            threads: 1,
-            distinguish: false,
-            fc_submip: false,
-            tl_base: f64::NAN,
-            // 乱数の種は親のものを渡す
-            seed: self.params.seed,
-        };
+        let params = super::solver::MipParams::submip_base((tunable!("ENOMOTO_T_MIP_MINREL_TIME_FRAC", 0.1, f64) * remaining).min(10.0), 1000, self.params.seed);
         let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());
         self.heur_iters += r.lp_iterations;
         let Some(xs) = r.x else {
@@ -704,23 +688,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let sub = super::problem::MipProblem::from_rows(col_lo, col_up, cost, 0.0, 1.0, is_int, rows, p.row_lo.clone(), p.row_up.clone());
         let remaining = self.secs_left();
-        let params = super::solver::MipParams {
-            time_limit: (0.07 * remaining).min(6.0),
-            node_limit: 500,
-            rel_gap: 0.0,
-            abs_gap: 1e-9,
-            verbose: false,
-            submip: true,
-            cutoff: f64::INFINITY,
-            restarts: 0,
-            skip_heurs: 0,
-            threads: 1,
-            distinguish: false,
-            fc_submip: false,
-            tl_base: f64::NAN,
-            // 乱数の種は親のものを渡す
-            seed: self.params.seed,
-        };
+        let params = super::solver::MipParams::submip_base((0.07 * remaining).min(6.0), 500, self.params.seed);
         let r = super::solve_problem(&sub, params, env_str!("ENOMOTO_MIP_SUBMIP_NO_PRESOLVE").is_none());
         self.heur_iters += r.lp_iterations;
         let Some(xs) = r.x else {
@@ -1011,23 +979,7 @@ pub(crate) fn vbounds01_on_problem(p: &MipProblem, verbose: bool, time_limit: f6
         let mut sub = p.clone();
         sub.col_lo = lo;
         sub.col_up = up;
-        let params = super::solver::MipParams {
-            time_limit,
-            node_limit: 500,
-            rel_gap: 0.0,
-            abs_gap: 1e-9,
-            verbose: false,
-            submip: true,
-            cutoff: best.as_ref().map_or(f64::INFINITY, |(z, _)| *z),
-            restarts: 0,
-            skip_heurs: 0,
-            threads: 1,
-            distinguish: false,
-            fc_submip: false,
-            tl_base: f64::NAN,
-            // 乱数の種は親のものを渡す
-            seed,
-        };
+        let params = super::solver::MipParams { cutoff: best.as_ref().map_or(f64::INFINITY, |(z, _)| *z), ..super::solver::MipParams::submip_base(time_limit, 500, seed) };
         let r = super::solve_problem(&sub, params, true);
         if let Some(x) = r.x {
             let z = p.objective(&x);

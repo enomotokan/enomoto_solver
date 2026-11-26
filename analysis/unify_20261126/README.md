@@ -90,3 +90,13 @@
   - `resolve_continuous` の期限の計算は、前は列の境界を置いた後、今は前。差はマイクロ秒で、期限の上限が効くのは試作の `INC_LP_CAP`・`FJ_P3` のときだけ。
 - `try_lp_solution` と RR は入れていない。`try_lp_solution` は費用を戻さず反復を累計に入れる (2 節の 4)。そろえると動きが変わるので、別に扱う。
 - 確かめ: cargo test 424 通過、check_default 全部一致。
+
+### 3.3 サブ MIP の設定の土台 `MipParams::submip_base` (1 節の 6)
+
+- `MipParams::submip_base(time_limit, node_limit, seed)` を置いた。中身は、ギャップ 0 (絶対 1e-9)、打ち切り値なし、1 スレッド、経過を出さない、`submip: true`、`tl_base: NaN`。
+- 全フィールドを書いていた 6 か所を、土台 + 違う所だけの形にした。
+  - heuristics.rs: `fp_stage3`、`solve_submip_problem`
+  - heur_scip.rs: `min_relaxation`、`repair`、vb01
+  - mod.rs: `clqprb_shadow_locks`
+- 動き: どのフィールドの値も前と同じ。
+- 確かめ: cargo test 424 通過、check_default 全部一致。

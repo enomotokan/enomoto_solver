@@ -91,6 +91,28 @@ pub fn default_seed() -> u64 {
 }
 
 impl MipParams {
+    /// サブ MIP (ヒューリスティクスの中で解く補助の MIP) の設定の土台: 時間の上限 `time_limit`、ノードの上限 `node_limit`、乱数の種 `seed`
+    /// (親のものを渡す)。ギャップ 0 (絶対 1e-9)、打ち切り値なし、再スタートの記録なし、1 スレッド、経過は出さない。
+    /// ほかの値は `MipParams { cutoff: .., ..MipParams::submip_base(..) }` の形で上書きする
+    pub fn submip_base(time_limit: f64, node_limit: u64, seed: u64) -> MipParams {
+        MipParams {
+            time_limit,
+            node_limit,
+            rel_gap: 0.0,
+            abs_gap: 1e-9,
+            verbose: false,
+            submip: true,
+            cutoff: f64::INFINITY,
+            restarts: 0,
+            skip_heurs: 0,
+            threads: 1,
+            distinguish: false,
+            fc_submip: false,
+            tl_base: f64::NAN,
+            seed,
+        }
+    }
+
     /// 割合で決める量 (時間の上限の x 倍) の基準。`ENOMOTO_MIP_TIMEDEP` の `b` (既定、analysis/timedep_20261114.md・det1t_20261120) なら外側の求解では
     /// 元の時間上限 `tl_base` (前処理・再スタートに使った壁時計の秒で変わらない)、それ以外は `time_limit` (残り時間)。期限は `time_limit` のまま
     pub fn frac_tl(&self) -> f64 {
