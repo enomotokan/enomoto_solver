@@ -854,13 +854,15 @@ fn exact_sum(it: impl Iterator<Item = f64>) -> f64 {
 
 /// 元の問題での点 `x` の境界・行の違反の最大値 (行の活動量は誤差補償つきの和)。
 fn max_violation(p: &MipProblem, x: &[f64]) -> f64 {
+    // NaN の違反は無限とする (`f64::max` は NaN を捨てるので、そのままでは NaN を含む点の違反が 0 になり、研磨の採否で通ってしまう)
+    let upd = |v: f64, d: f64| if d.is_nan() { f64::INFINITY } else { v.max(d) };
     let mut v = 0.0f64;
     for j in 0..p.n {
-        v = v.max(p.col_lo[j] - x[j]).max(x[j] - p.col_up[j]);
+        v = upd(upd(v, p.col_lo[j] - x[j]), x[j] - p.col_up[j]);
     }
     for (i, row) in p.rows.iter().enumerate() {
         let a = exact_sum(row.iter().map(|&(j, c)| c * x[j]));
-        v = v.max(p.row_lo[i] - a).max(a - p.row_up[i]);
+        v = upd(upd(v, p.row_lo[i] - a), a - p.row_up[i]);
     }
     v
 }
@@ -1001,6 +1003,19 @@ pub(super) enum WarmPolish {
 /// `ENOMOTO_MIP_POLISH_WARM=1` (試作): 暫定解 `x` (問題 `p` の空間、目的値 `z`) の整数列を固定した `p` を、B&B の LP の基底 `basis`
 /// (カットの行の分は捨てる) から温めて単体法で解く。前処理はしない。`deadline` を過ぎたら打ち切る。採り方は [`polish_in_problem`] と同じ
 pub(super) fn polish_in_problem_warm(p: &MipProblem, x: &mut Vec<f64>, z: f64, basis: Option<&lp::Basis>, deadline: Option<std::time::Instant>) -> WarmPolish {
+    polish_in_problem_warm_ext(p, x, z, basis, deadline, false)
+}
+
+/// 研磨の LP の反復の上限 (試作 `ROOTPAR_PH` の `j`): `ENOMOTO_T_MIP_G5SEQ_C` (0.5) × (行 + 列)。1 スレッドの基底のない求解の
+/// 二段解法 → 内点法 + クロスオーバーの切り替え (`G5SEQ`) と同じ物差し
+pub(super) fn polish_iter_cap(rows: usize, cols: usize) -> u64 {
+    (tunable!("ENOMOTO_T_MIP_G5SEQ_C", 0.5, f64) * (rows + cols) as f64).max(100.0) as u64
+}
+
+/// [`polish_in_problem_warm`] の本体。`cold` なら基底を使わず、基底のない求解の既存の入口 (`solve_cold_entry`: 空いたスレッドがあれば同時実行、
+/// なければ二段解法 → 内点法 + クロスオーバー) で解く。試作 `ROOTPAR_PH` の `j` ([`solver::rootpar_ph`]) では、温めた単体法に反復の上限
+/// [`polish_iter_cap`] を付け、上限に当たれば基底を捨てて同じ入口で解き直す (基底が当てにならない扱い)
+pub(super) fn polish_in_problem_warm_ext(p: &MipProblem, x: &mut Vec<f64>, z: f64, basis: Option<&lp::Basis>, deadline: Option<std::time::Instant>, cold: bool) -> WarmPolish {
     use std::sync::atomic::Ordering;
     if p.is_int.iter().all(|&b| b) {
         return WarmPolish::Kept;
@@ -1022,7 +1037,7 @@ pub(super) fn polish_in_problem_warm(p: &MipProblem, x: &mut Vec<f64>, z: f64, b
     // 基底の写し: 固定した整数列は基底から外し (非基底の下限)、カットの行の分は捨てる (行の数の過不足は `set_basis` の修復でスラックを足す・構造列を外す)
     let mut info = (0usize, 0usize, 0usize);
     // 診断 `ENOMOTO_MIP_POLISH_STATS` の `c`: 基底を写さずに解く (温める効き目の比べ)
-    let basis = basis.filter(|_| !env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('c')));
+    let basis = basis.filter(|_| !cold && !env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('c')));
     if let Some(b) = basis {
         let mut b = b.clone();
         for j in 0..p.n.min(b.col.len()) {
@@ -1039,7 +1054,26 @@ pub(super) fn polish_in_problem_warm(p: &MipProblem, x: &mut Vec<f64>, z: f64, b
     // 呼び出し元の手間の期限 ([`crate::ticks::push_budget`]) は外し、求解の期限 (壁時計) だけで止める。ヒューリスティクスの中で受け取った
     // 解の研磨が手間の期限で 3 反復で止まり、研磨しないまま見積り (その解を出した LP の双対値がなく、今の LP の双対値から取った小さな値) で
     // 受け取って、4 スレッドの nattai が最適値より 9.4e-5 良い値を返した (analysis/nattai_20261125 の 9 節)
-    let st = crate::ticks::without_budget(|| lp.solve(&lp::SolveLimits { deadline, ..Default::default() }));
+    let lim = lp::SolveLimits { deadline, ..Default::default() };
+    let jcap = solver::rootpar_ph('j');
+    let mut how = "";
+    let st = crate::ticks::without_budget(|| {
+        if cold {
+            how = " (cold entry)";
+            lp.solve_cold_entry(&lim)
+        } else if jcap && basis.is_some() {
+            let cap = polish_iter_cap(p.m, p.n);
+            let st = lp.solve(&lp::SolveLimits { iteration_limit: cap, ..lim });
+            if st == lp::LpStatus::IterationLimit {
+                how = " (warm hit the cap, then cold entry)";
+                lp.solve_cold_entry(&lim)
+            } else {
+                st
+            }
+        } else {
+            lp.solve(&lim)
+        }
+    });
     WARM_POLISH[0].fetch_add(1, Ordering::Relaxed);
     WARM_POLISH[5].fetch_add(lp.total_iterations(), Ordering::Relaxed);
     let mut out = WarmPolish::NotSolved;
@@ -1056,7 +1090,7 @@ pub(super) fn polish_in_problem_warm(p: &MipProblem, x: &mut Vec<f64>, z: f64, b
         let scale = z.abs().max(1.0);
         if env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('v')) {
             eprintln!(
-                "MIP: POLISH_WARM: {st:?} {} iters {:.3}s z {z:.10e} -> {zn:.10e} viol {vo:.3e} -> {vn:.3e} (basis: ints taken out {}, cut rows dropped {}, basic {} of {} rows)",
+                "MIP: POLISH_WARM: {st:?}{how} {} iters {:.3}s z {z:.10e} -> {zn:.10e} viol {vo:.3e} -> {vn:.3e} (basis: ints taken out {}, cut rows dropped {}, basic {} of {} rows)",
                 lp.total_iterations(),
                 t.elapsed().as_secs_f64(),
                 info.0,
@@ -1073,7 +1107,7 @@ pub(super) fn polish_in_problem_warm(p: &MipProblem, x: &mut Vec<f64>, z: f64, b
     } else {
         WARM_POLISH[2].fetch_add(1, Ordering::Relaxed);
         if env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('v')) {
-            eprintln!("MIP: POLISH_WARM: {st:?} {} iters {:.3}s", lp.total_iterations(), t.elapsed().as_secs_f64());
+            eprintln!("MIP: POLISH_WARM: {st:?}{how} {} iters {:.3}s", lp.total_iterations(), t.elapsed().as_secs_f64());
         }
     }
     WARM_POLISH[4].fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -3901,7 +3935,8 @@ fn add_symmetry_rows(prob: MipProblem, verbose: bool, postsolve: &mut Vec<crate:
                 if !bound.is_finite() || !lo.is_finite() || inf > 0 {
                     continue;
                 }
-                ub = ub.min((bound - (v - a * lo * k)) / a + 1e-9);
+                // `ENOMOTO_MIP_UNIFY_FIX` の `m`: 丸めの余裕を `merge_twin_classes` (`FZ2_FIX` の `m`) と同じ 1e-6 にする
+                ub = ub.min((bound - (v - a * lo * k)) / a + if solver::unify_fix('m') { 1e-6 } else { 1e-9 });
             }
             ub.floor()
         };
@@ -5249,21 +5284,13 @@ fn clqprb_shadow_locks(p: &MipProblem, params: MipParams, pre_submip: bool, lp_p
         }
     }
     let sp = MipParams {
-        time_limit: tunable!("ENOMOTO_T_MIP_CLQPRB_H_SECS", 30.0, f64).min(0.1 * params.time_limit),
-        node_limit: tunable!("ENOMOTO_T_MIP_CLQPRB_H_NODES", 500u64, u64),
         rel_gap: params.rel_gap.max(1e-4),
         abs_gap: params.abs_gap.max(1e-6),
-        verbose: false,
-        submip: true,
-        cutoff: f64::INFINITY,
-        restarts: 0,
-        skip_heurs: 0,
-        threads: 1,
-        distinguish: false,
-        fc_submip: false,
-        tl_base: f64::NAN,
-        // 乱数の種は親のものを渡す
-        seed: params.seed,
+        ..MipParams::submip_base(
+            tunable!("ENOMOTO_T_MIP_CLQPRB_H_SECS", 30.0, f64).min(0.1 * params.time_limit),
+            tunable!("ENOMOTO_T_MIP_CLQPRB_H_NODES", 500u64, u64),
+            params.seed,
+        )
     };
     let r = solve_problem(&sub, sp, true);
     let found = r.x.filter(|x| x.len() == q.n).map(|mut x| {
@@ -5285,7 +5312,35 @@ fn clqprb_shadow_locks(p: &MipProblem, params: MipParams, pre_submip: bool, lp_p
     found.filter(|_| ok)
 }
 
+/// 試作 `ENOMOTO_MIP_ENUM_ADAPT` の `t` (analysis/nrashare_20261126 7・8 節): 前処理を回すスレッドに ENUM_ADAPT の時計 (`ENUM_T0`、主のスレッドの
+/// 求解の始めに置く) がなければ、この前処理の始めを時計にし、見張りを捨てるときに元に戻す ([`presolve_mip`] の入口で作る。入れ子の呼び出しは時計が
+/// あるので何もしない)。時計がないと経過は無限大で「c = 0 で常に続ける」になり、主でないスレッドの前処理 (FJ のスレッドの FJ_P3、PRECHAIN・TPRE・
+/// 並列のサブ MIP など) で列挙とプロービングの繰り返し・かけ直しが止まらなかった (neos-631710 の 4 スレッドの FJ_P3 で 10.1 秒)
+struct EnumClockGuard(Option<Option<(usize, f64, f64)>>);
+
+impl EnumClockGuard {
+    fn new() -> Self {
+        let on = enum_adapt_on() && env_str!("ENOMOTO_MIP_ENUM_ADAPT").is_some_and(|v| v.contains('t')) && ENUM_T0.with(|c| c.get()).is_none();
+        if !on {
+            return EnumClockGuard(None);
+        }
+        let prev = ENUM_STEP_LAST.with(|c| c.replace(None));
+        ENUM_T0.with(|c| c.set(Some(std::time::Instant::now())));
+        EnumClockGuard(Some(prev))
+    }
+}
+
+impl Drop for EnumClockGuard {
+    fn drop(&mut self) {
+        if let Some(prev) = self.0 {
+            ENUM_T0.with(|c| c.set(None));
+            ENUM_STEP_LAST.with(|c| c.set(prev));
+        }
+    }
+}
+
 fn presolve_mip(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs: Option<f64>) -> Option<Presolved> {
+    let _enum_clock = EnumClockGuard::new();
     // 試作 `ENOMOTO_MIP_INTSING` の `h` (既定はオフ、[`crate::presolve::colsingleton::INTSING_HOLD`]): 最上段の呼び出しの間は INTSING を保留し、
     // 支配される 0-1 列の固定の後のかけ直しで消す。入れ子の呼び出し (かけ直し) は状態をそのまま受け継ぐ
     use crate::presolve::colsingleton::{intsing_domfirst, intsing_order, INTSING_HELD, INTSING_HOLD};
@@ -10173,20 +10228,7 @@ fn fj_p3_problem_inner(pc: &MipProblem) -> Option<(MipProblem, Vec<crate::presol
         eprint!("MIP:   FJ_P3 ");
     }
     crate::set_fj_p3_force(true);
-    // 試作 `ENOMOTO_MIP_ENUM_ADAPT` の `t` (analysis/nrashare_20261126 7 節): このスレッドに ENUM_ADAPT の時計 (`ENUM_T0`、主のスレッドの求解の始めに置く) が
-    // なければ、この前処理の始めを時計にする (前処理の後は元に戻す)。時計がないと経過は無限大で「c = 0 で常に続ける」になり、FJ のスレッドの FJ_P3 の前処理で
-    // 列挙とプロービングの繰り返し・かけ直しが止まらず、期限を過ぎて FJ・Local-MIP が回らなかった (neos-631710 の 4 スレッド、10.1 秒)
-    let enum_clock = enum_adapt_on() && env_str!("ENOMOTO_MIP_ENUM_ADAPT").is_some_and(|v| v.contains('t')) && ENUM_T0.with(|c| c.get()).is_none();
-    let step_prev = ENUM_STEP_LAST.with(|c| c.get());
-    if enum_clock {
-        ENUM_T0.with(|c| c.set(Some(std::time::Instant::now())));
-        ENUM_STEP_LAST.with(|c| c.set(None));
-    }
     let r = presolve_mip(pc, false, false, None);
-    if enum_clock {
-        ENUM_T0.with(|c| c.set(None));
-        ENUM_STEP_LAST.with(|c| c.set(step_prev));
-    }
     crate::set_fj_p3_force(false);
     if pt {
         pretime::report(pc.m, pc.n, pc.nnz, 0);

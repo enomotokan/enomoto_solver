@@ -1008,12 +1008,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // max(`ENOMOTO_T_MIP_TREE3_CLIQUECAP_MIN` (1 秒), `ENOMOTO_T_MIP_TREE3_CLIQUECAP_MULT` (2) x 根の LP の秒) を置く (超えたら使わない)。
         // neos-3216931-puriri ではこの LP 1 回が 285〜388 秒 (根の LP は 11.7 秒) かかり、伸びは 0 で使われなかった
         let deadline = if let Some((_, secs)) = cap.filter(|c| c.1.is_finite()) {
-            let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(secs.min(1e6));
-            Some(self.deadline.map_or(d, |g| g.min(d)))
+            Some(self.deadline_in(secs))
         } else if env_str!("ENOMOTO_MIP_TREE3_CLIQUECAP").is_some_and(|v| v != "0") {
             let secs = tunable!("ENOMOTO_T_MIP_TREE3_CLIQUECAP_MIN", 1.0, f64).max(tunable!("ENOMOTO_T_MIP_TREE3_CLIQUECAP_MULT", 2.0, f64) * self.root_lp_secs);
-            let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(secs.min(1e6));
-            Some(self.deadline.map_or(d, |g| g.min(d)))
+            Some(self.deadline_in(secs))
         } else {
             self.deadline
         };
@@ -3596,8 +3594,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             work_rounds += 1;
             let lp_deadline = if cap.is_finite() {
-                let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap);
-                Some(self.deadline.map_or(d, |g| g.min(d)))
+                Some(self.deadline_in(cap))
             } else {
                 self.deadline
             };
@@ -3658,8 +3655,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let it1 = self.lp.total_iterations();
                         let mult = tunable!("ENOMOTO_T_MIP_HO5_CUTLP_GAIN_TIME_MULT", 3.0, f64);
                         let d = if cap.is_finite() {
-                            let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(mult * cap);
-                            Some(self.deadline.map_or(d, |g| g.min(d)))
+                            Some(self.deadline_in(mult * cap))
                         } else {
                             self.deadline
                         };
@@ -3782,8 +3778,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // `d`: 上限 (反復・時間) に当たったら、上限を倍にして止まったところからもう 1 回だけ続ける
             if rob_d && matches!(st, LpStatus::IterationLimit | LpStatus::TimeLimit) && !self.time_up() && !stopped(&job) {
                 let it1 = self.lp.total_iterations();
-                let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(2.0 * cap);
-                let d = if cap.is_finite() { Some(self.deadline.map_or(d, |g| g.min(d))) } else { self.deadline };
+                let d = if cap.is_finite() { Some(self.deadline_in(2.0 * cap)) } else { self.deadline };
                 let st0 = st;
                 st = self.lp.solve(&SolveLimits { iteration_limit: 2 * solve_lim, cutoff: cut_cutoff, deadline: d });
                 if self.params.verbose {
@@ -3827,8 +3822,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if self.time_up() || stopped(&job) {
                         break;
                     }
-                    let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap);
-                    let d = Some(self.deadline.map_or(d, |g| g.min(d)));
+                    let d = Some(self.deadline_in(cap));
                     st = self.lp.solve(&SolveLimits { iteration_limit: lim, cutoff: cut_cutoff, deadline: d });
                     if self.params.verbose {
                         eprintln!("MIP: cut round {round}: LP continued after the time limit: {st:?}");
@@ -3848,8 +3842,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 retry = 4.0;
             }
             if st == LpStatus::TimeLimit && retry > 0.0 && cap.is_finite() && !self.time_up() {
-                let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(retry * cap);
-                let d = Some(self.deadline.map_or(d, |g| g.min(d)));
+                let d = Some(self.deadline_in(retry * cap));
                 st = self.lp.solve(&SolveLimits { iteration_limit: lim, cutoff: cut_cutoff, deadline: d });
                 if self.params.verbose {
                     eprintln!("MIP: cut round {round}: LP hit the time cap; continued for up to {:.2}s more: {st:?}", retry * cap);
@@ -3882,8 +3875,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         crate::simplex::mip_lp::PROGRESS_STOP_ONCE.with(|c| c.set(Some((lim as usize, w, frac, prev_lp_obj))));
                     }
                     let d = if cap.is_finite() {
-                        let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap);
-                        Some(self.deadline.map_or(d, |g| g.min(d)))
+                        Some(self.deadline_in(cap))
                     } else {
                         self.deadline
                     };
@@ -6854,8 +6846,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let cost2: Vec<f64> = (0..n).map(|j| p.cost[j] + eps * c2[j]).collect();
             f2.set_costs(&cost2);
             let deadline = if cap.is_finite() {
-                let d = std::time::Instant::now() + std::time::Duration::from_secs_f64(cap);
-                Some(self.deadline.map_or(d, |g| g.min(d)))
+                Some(self.deadline_in(cap))
             } else {
                 self.deadline
             };
@@ -7986,7 +7977,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let halt_ref = &halt_flag;
             let stop = std::sync::atomic::AtomicBool::new(false);
             let stop_ref = &stop;
-            // 試作 `ENOMOTO_MIP_ROOTPAR_CUT` ([`rootpar_cut`]): 1 行の 2 つの側 (集約行とその符号を変えた行) を別の仕事にし (`s`)、主も
+            // `ENOMOTO_MIP_ROOTPAR_CUT` ([`rootpar_cut`]、2026-11-26 から既定): 1 行の 2 つの側 (集約行とその符号を変えた行) を別の仕事にし (`s`)、主も
             // 待つ間に仕事を取って作る (`m`)。仕事は (番号, 集約行, 側: 0・1、2 は両方) で、行の候補は側 0・1 の順につなぐ
             // (側ごとに `keep_best` するので、つないだ候補は両方を 1 つの仕事で作ったときと同じ)
             let rpc_split = rootpar_cut('s');
@@ -9635,13 +9626,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 }
 
-/// 試作 `ENOMOTO_MIP_ROOTPAR_CUT` (既定では使わない、analysis/rootpar_cut_20261126/): 根の分離の tableau 行の並列の形
+/// `ENOMOTO_MIP_ROOTPAR_CUT` (analysis/rootpar_cut_20261126/。**2026-11-26 に既定にした: 値 `1`。`0`・`off` で前の形 (使わない)**。
+/// 根拠: P 58 問 × 種 1〜3 × 4 スレッド × 60 秒 (PAR4=fmr の上): 1.001 [0.991, 1.011]、解けた 138 → 137 (neos5 種 2 の境目の 1 回)、食い違い 0、
+/// physiciansched6-2 0.86。候補を変えない (決定的なまま速くするだけの) 直し): 根の分離の tableau 行の並列の形
 /// (`gen_cuts_parallel` と同じく主が行の BTRAN と集約を行い、作業のスレッドがカットを作る形) の詰まりを減らす。値は部品の文字 (`1` なら全部):
 /// - `s`: 1 行の 2 つの側 (集約行とその符号を変えた行) を別の仕事にする (行の少ない問題で最後の数行を待つ時間を減らす。nw04)
 /// - `m`: 主も、待ち行列が詰まっている間と残りを待つ間に仕事を取って作る (作業のスレッドが 1 本増えるのと同じ。physiciansched6-2)
 /// どちらも候補を番号の順につなぐので、候補は既定と同じ (道筋は変わらない)。1 スレッドではこの形を通らない
 pub(crate) fn rootpar_cut(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_ROOTPAR_CUT").is_some_and(|v| v == "1" || v.contains(c))
+    env_def!("ENOMOTO_MIP_ROOTPAR_CUT", "1").is_some_and(|v| v == "1" || v.contains(c))
 }
 
 fn sep_threads(threads: usize) -> usize {
