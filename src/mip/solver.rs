@@ -6467,6 +6467,7 @@ pub(super) fn pool_close_on() -> bool {
 /// `b`: 2 スレッド以上の外側の根では、研磨を別スレッドで回し、見積りの印で先に受け取って、根のヒューリスティクスの終わりと求解の終わりで待って受け取る。
 /// `i`: 研磨を、`resolve_continuous` の整数を固定して最適になった B&B の LP の中で、カットの行の境界を外して続けて解く (1 スレッドの道筋も変わる)。
 /// `f` (`ENOMOTO_MIP_POLISH_WARM=e` と組): 木の中は漏れの見積りだけで受け取り、研磨の LP は返す前に 1 回だけ解く。上がった幅が許容を越えれば最適と言わない。
+/// `g`: `f` の最後の研磨に期限を渡さない (時間切れで終わる回も研磨して、返す値を確かにする)。
 /// `j`: 研磨の LP (温めた単体法、`i` なら LP の中の研磨) に反復の上限 `G5SEQ_C` × (行 + 列) を付け、上限に当たれば基底を捨てて
 /// 基底のない求解の既存の入口 (空いたスレッドがあれば同時実行、なければ二段解法 → 内点法 + クロスオーバー) で解き直す
 pub(super) fn rootpar_ph(c: char) -> bool {
@@ -29696,7 +29697,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 let z0 = z;
                 let r = if mark == Some(WarmMark::Polished) {
                     super::WarmPolish::Kept
-                } else if warm == 3 && !rootpar_ph('f') {
+                } else if warm == 3 && !rootpar_ph('f') && !rootpar_ph('g') {
                     super::WarmPolish::NotSolved
                 } else {
                     let b = self.lp.basis();
@@ -29705,7 +29706,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     }
                     // 試作 `ROOTPAR_PH` の `f` (`POLISH_WARM=e` と組): 木の中は見積りだけで受け取り、研磨の LP は返す前のここで 1 回だけ解く。
                     // 期限は `d` と同じ求解の期限 (時間切れで終わるときは解かず、見積りを足して返す = `e` と同じ)
-                    let dl = if warm == 2 || (warm == 3 && rootpar_ph('f')) { self.deadline } else { None };
+                    // `g` (`f` の変形): 返す値を確かにするため、最後の 1 回の研磨には期限を渡さない (時間切れで終わる回も解く。上限を越える分はこの 1 回の LP)
+                    let dl = if warm == 3 && rootpar_ph('g') {
+                        None
+                    } else if warm == 2 || (warm == 3 && rootpar_ph('f')) {
+                        self.deadline
+                    } else {
+                        None
+                    };
                     let t = Instant::now();
                     let r = super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), dl);
                     if warm == 3 && self.params.verbose {
@@ -29773,7 +29781,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     },
                 }
                 warm_raise = (z - z0).max(0.0);
-                if warm == 3 && rootpar_ph('f') {
+                if warm == 3 && (rootpar_ph('f') || rootpar_ph('g')) {
                     rph_f_raise = Some((z0, z - z0));
                 }
                 self.incumbent = Some((z, x));
