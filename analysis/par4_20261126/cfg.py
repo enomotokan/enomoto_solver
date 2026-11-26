@@ -2,7 +2,8 @@
 どれも既定 (版 27a8f25eb 以降) に足す。試作は `ENOMOTO_MIP_PAR4` の文字 (src/mip/solver.rs `par4`)。"""
 P1 = {1: ("mr", {"ENOMOTO_MIP_PAR4": "mr"}, False, True, "par4_20261126"),
       2: ("f", {"ENOMOTO_MIP_PAR4": "f"}, False, True, "par4_20261126"),
-      3: ("m", {"ENOMOTO_MIP_PAR4": "m"}, False, True, "par4_20261126"), 4: ("r", {"ENOMOTO_MIP_PAR4": "r"}, False, True, "par4_20261126")}  # f は目的が 0 の問題で測る (shards_f.json)
+      3: ("m", {"ENOMOTO_MIP_PAR4": "m"}, False, True, "par4_20261126"), 4: ("r", {"ENOMOTO_MIP_PAR4": "r"}, False, True, "par4_20261126"),
+      5: ("def2", {}, False, True, "par4_20261126")}  # 既定をもう一度 (4 スレッドの揺れの大きさを見る)  # f は目的が 0 の問題で測る (shards_f.json)
 CFGS = {"def_t4": {}}
 for k, (name, env, t1, t4, _) in P1.items():
     if t1: CFGS[f"{name}_t1"] = env
