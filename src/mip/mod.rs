@@ -1003,6 +1003,19 @@ pub(super) enum WarmPolish {
 /// `ENOMOTO_MIP_POLISH_WARM=1` (試作): 暫定解 `x` (問題 `p` の空間、目的値 `z`) の整数列を固定した `p` を、B&B の LP の基底 `basis`
 /// (カットの行の分は捨てる) から温めて単体法で解く。前処理はしない。`deadline` を過ぎたら打ち切る。採り方は [`polish_in_problem`] と同じ
 pub(super) fn polish_in_problem_warm(p: &MipProblem, x: &mut Vec<f64>, z: f64, basis: Option<&lp::Basis>, deadline: Option<std::time::Instant>) -> WarmPolish {
+    polish_in_problem_warm_ext(p, x, z, basis, deadline, false)
+}
+
+/// 研磨の LP の反復の上限 (試作 `ROOTPAR_PH` の `j`): `ENOMOTO_T_MIP_G5SEQ_C` (0.5) × (行 + 列)。1 スレッドの基底のない求解の
+/// 二段解法 → 内点法 + クロスオーバーの切り替え (`G5SEQ`) と同じ物差し
+pub(super) fn polish_iter_cap(rows: usize, cols: usize) -> u64 {
+    (tunable!("ENOMOTO_T_MIP_G5SEQ_C", 0.5, f64) * (rows + cols) as f64).max(100.0) as u64
+}
+
+/// [`polish_in_problem_warm`] の本体。`cold` なら基底を使わず、基底のない求解の既存の入口 (`solve_cold_entry`: 空いたスレッドがあれば同時実行、
+/// なければ二段解法 → 内点法 + クロスオーバー) で解く。試作 `ROOTPAR_PH` の `j` ([`solver::rootpar_ph`]) では、温めた単体法に反復の上限
+/// [`polish_iter_cap`] を付け、上限に当たれば基底を捨てて同じ入口で解き直す (基底が当てにならない扱い)
+pub(super) fn polish_in_problem_warm_ext(p: &MipProblem, x: &mut Vec<f64>, z: f64, basis: Option<&lp::Basis>, deadline: Option<std::time::Instant>, cold: bool) -> WarmPolish {
     use std::sync::atomic::Ordering;
     if p.is_int.iter().all(|&b| b) {
         return WarmPolish::Kept;
@@ -1024,7 +1037,7 @@ pub(super) fn polish_in_problem_warm(p: &MipProblem, x: &mut Vec<f64>, z: f64, b
     // 基底の写し: 固定した整数列は基底から外し (非基底の下限)、カットの行の分は捨てる (行の数の過不足は `set_basis` の修復でスラックを足す・構造列を外す)
     let mut info = (0usize, 0usize, 0usize);
     // 診断 `ENOMOTO_MIP_POLISH_STATS` の `c`: 基底を写さずに解く (温める効き目の比べ)
-    let basis = basis.filter(|_| !env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('c')));
+    let basis = basis.filter(|_| !cold && !env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('c')));
     if let Some(b) = basis {
         let mut b = b.clone();
         for j in 0..p.n.min(b.col.len()) {
@@ -1041,7 +1054,26 @@ pub(super) fn polish_in_problem_warm(p: &MipProblem, x: &mut Vec<f64>, z: f64, b
     // 呼び出し元の手間の期限 ([`crate::ticks::push_budget`]) は外し、求解の期限 (壁時計) だけで止める。ヒューリスティクスの中で受け取った
     // 解の研磨が手間の期限で 3 反復で止まり、研磨しないまま見積り (その解を出した LP の双対値がなく、今の LP の双対値から取った小さな値) で
     // 受け取って、4 スレッドの nattai が最適値より 9.4e-5 良い値を返した (analysis/nattai_20261125 の 9 節)
-    let st = crate::ticks::without_budget(|| lp.solve(&lp::SolveLimits { deadline, ..Default::default() }));
+    let lim = lp::SolveLimits { deadline, ..Default::default() };
+    let jcap = solver::rootpar_ph('j');
+    let mut how = "";
+    let st = crate::ticks::without_budget(|| {
+        if cold {
+            how = " (cold entry)";
+            lp.solve_cold_entry(&lim)
+        } else if jcap && basis.is_some() {
+            let cap = polish_iter_cap(p.m, p.n);
+            let st = lp.solve(&lp::SolveLimits { iteration_limit: cap, ..lim });
+            if st == lp::LpStatus::IterationLimit {
+                how = " (warm hit the cap, then cold entry)";
+                lp.solve_cold_entry(&lim)
+            } else {
+                st
+            }
+        } else {
+            lp.solve(&lim)
+        }
+    });
     WARM_POLISH[0].fetch_add(1, Ordering::Relaxed);
     WARM_POLISH[5].fetch_add(lp.total_iterations(), Ordering::Relaxed);
     let mut out = WarmPolish::NotSolved;
@@ -1058,7 +1090,7 @@ pub(super) fn polish_in_problem_warm(p: &MipProblem, x: &mut Vec<f64>, z: f64, b
         let scale = z.abs().max(1.0);
         if env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('v')) {
             eprintln!(
-                "MIP: POLISH_WARM: {st:?} {} iters {:.3}s z {z:.10e} -> {zn:.10e} viol {vo:.3e} -> {vn:.3e} (basis: ints taken out {}, cut rows dropped {}, basic {} of {} rows)",
+                "MIP: POLISH_WARM: {st:?}{how} {} iters {:.3}s z {z:.10e} -> {zn:.10e} viol {vo:.3e} -> {vn:.3e} (basis: ints taken out {}, cut rows dropped {}, basic {} of {} rows)",
                 lp.total_iterations(),
                 t.elapsed().as_secs_f64(),
                 info.0,
@@ -1075,7 +1107,7 @@ pub(super) fn polish_in_problem_warm(p: &MipProblem, x: &mut Vec<f64>, z: f64, b
     } else {
         WARM_POLISH[2].fetch_add(1, Ordering::Relaxed);
         if env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('v')) {
-            eprintln!("MIP: POLISH_WARM: {st:?} {} iters {:.3}s", lp.total_iterations(), t.elapsed().as_secs_f64());
+            eprintln!("MIP: POLISH_WARM: {st:?}{how} {} iters {:.3}s", lp.total_iterations(), t.elapsed().as_secs_f64());
         }
     }
     WARM_POLISH[4].fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
