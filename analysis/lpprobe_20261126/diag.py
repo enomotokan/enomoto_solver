@@ -26,9 +26,13 @@ t0 = time.time()
 pr = subprocess.Popen([sys.executable, str(WT / "scripts/run_miplib_benchmark.py"), "--worker-ours", str(mps), "--time-limit", str(tl), "--threads", str(th)],
                       cwd=WT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
 lines = []
+STOP_TREE = os.environ.get("DIAG_STOP_TREE") == "1"  # 木に入ったところで止める (前処理と根だけを測る)
 for l in pr.stderr:
     if KEEP.match(l):
         lines.append([round(time.time() - t0, 3), l.rstrip("\n")])
+    if STOP_TREE and l.startswith("TRSTAT: tree start"):
+        pr.kill()
+        break
 out = pr.stdout.read()
 pr.wait()
 try:
@@ -38,5 +42,5 @@ except Exception:  # noqa: BLE001
 tree = next((t for t, l in lines if l.startswith("TRSTAT: tree start")), None)
 with open(OUT, "a") as f:
     f.write(json.dumps({"problem": p, "seed": seed, "threads": th, "tl": tl, "extra": extra, "result": res, "tree_start": tree, "wall": round(time.time() - t0, 2),
-                        "lines": lines, "at": time.strftime("%H:%M:%S")}) + "\n")
+                        "lines": lines, "stop_tree": STOP_TREE, "at": time.strftime("%H:%M:%S")}) + "\n")
 print(p, seed, th, extra, res.get("status"), res.get("time"), res.get("nodes"), "tree", tree, flush=True)
