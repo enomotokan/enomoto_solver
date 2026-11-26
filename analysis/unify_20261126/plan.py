@@ -5,7 +5,7 @@ import json, glob, sys
 from pathlib import Path
 D = Path(__file__).resolve().parent
 sys.path.insert(0, str(D)); sys.path.insert(0, str(D.parent / "cbcimpl_20261029"))
-from cfg import CFGS  # noqa: E402
+from cfg import CFGS, PLAN  # noqa: E402
 from probs import PROBS  # noqa: E402
 NS = int(sys.argv[1]) if len(sys.argv) > 1 else 8
 TL = 60
@@ -18,7 +18,7 @@ for f in glob.glob(str(D.parent / "final_20261118" / "res_P_s*.jsonl")):
             if r["cfg"] in ("def", "def_t1"):
                 T[(r["problem"], "t1" if r["cfg"] == "def_t1" else "t4", r["seed"])] = min(r["result"]["time"], TL) if solved(r) else TL
 def est(p, c, s): return T.get((p, "t1" if c.endswith("_t1") else "t4", s), TL) + 8
-CF = list(CFGS)
+CF = list(PLAN)
 groups = {(p, s): [(p, c, s) for c in CF[(i + s) % len(CF):] + CF[:(i + s) % len(CF)]] for i, p in enumerate(PROBS) for s in (1, 2, 3)}
 gl = sorted(groups.items(), key=lambda kv: -sum(est(*t) for t in kv[1]))
 load = [0.0] * NS; shards = [[] for _ in range(NS)]
