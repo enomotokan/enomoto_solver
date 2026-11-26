@@ -69,3 +69,24 @@
 - 動き: 有限で正の秒なら、前と同じ計算。`.min(1e6)` を付けていた所は、ヘルパの中の押さえで同じになる。
 - 直った所: 2 節の 3 (separation.rs:3785) が、秒を押さえるので落ちなくなった。
 - 確かめ: cargo test 424 通過、check_default 全部一致。
+
+### 3.2 整数を固定した LP を B&B の LP の上で解く `with_fixed_int_lp` (1 節の 5)
+
+- `resolve_continuous` (solver.rs) と `fixed_int_lp` (heuristics.rs) の共通部分を `Solver::with_fixed_int_lp` にまとめた。共通部分は次のとおり。
+  1. 状態を取っておく。
+  2. 費用を元に戻す。
+  3. 整数列を固定する。
+  4. 解く。
+  5. 整数列を固定値に置き直す。
+  6. 状態・費用・反復の累計を戻す。
+- 違いは引数で渡す。
+  - 丸めるか: `round`。`fixed_int_lp` は丸める。
+  - 連続列の範囲: `cont`。`resolve_continuous` は問題の境界、`fixed_int_lp` は大域の境界。
+  - 期限。
+  - 最適のときの処理: `on_opt`。LP が解けた状態のまま呼ぶので、`resolve_continuous` の漏れの見積りと基底の取り置きもその中でできる。
+- 磨いた所: `fixed_int_lp` は `x[j].round()` を 2 回計算していたが、`resolve_continuous` と同じ流れにそろえた。
+- 動き:
+  - LP の演算は同じ。
+  - `resolve_continuous` の期限の計算は、前は列の境界を置いた後、今は前。差はマイクロ秒で、期限の上限が効くのは試作の `INC_LP_CAP`・`FJ_P3` のときだけ。
+- `try_lp_solution` と RR は入れていない。`try_lp_solution` は費用を戻さず反復を累計に入れる (2 節の 4)。そろえると動きが変わるので、別に扱う。
+- 確かめ: cargo test 424 通過、check_default 全部一致。

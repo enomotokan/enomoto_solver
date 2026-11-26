@@ -8411,16 +8411,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             return;
         }
-        let saved = self.lp.save_state();
-        let it0 = self.lp.total_iterations();
-        let swap = cost != self.p.cost;
-        if swap {
-            self.lp.set_costs(&self.p.cost);
-        }
-        for j in 0..self.p.n {
-            let (lo, up) = if self.p.is_int[j] { (x[j], x[j]) } else { (self.p.col_lo[j], self.p.col_up[j]) };
-            self.lp.set_col_bounds(j, lo, up);
-        }
         // `ENOMOTO_MIP_INC_LP_CAP` (試作、既定では使わない): この LP の時間の上限を全体の `ENOMOTO_T_MIP_INC_LP_TIME_FRAC`
         // (0.02、最低 1 秒) にする。uccase12 で DUAL_UB + CS_OBJ_PIVOT のとき、根の LP の直後に FJ の解 (865106) を受け取り、
         // この LP が 8.4 秒から 56 秒まで止まらず、根のカット・ヒューリスティクスが 1 つも回らなかった
@@ -8431,39 +8421,76 @@ impl<'a, L: MipLp> Solver<'a, L> {
         } else {
             self.deadline
         };
-        let st = self.lp.solve(&SolveLimits { deadline, ..Default::default() });
+        let z0 = *z;
+        let (st, iters, r) = self.with_fixed_int_lp(x, false, cost, |s, j| (s.p.col_lo[j], s.p.col_up[j]), deadline, |s, y| {
+            let zy = s.p.objective(&y);
+            let better = zy < z0 - 1e-9 * z0.abs().max(1.0) && s.p.is_feasible(&y, FEASTOL);
+            if better && s.params.verbose {
+                eprintln!("MIP: fixed-integer LP improved incumbent {z0:.10e} -> {zy:.10e}");
+            }
+            // `ENOMOTO_MIP_POLISH_WARM`: 漏れはこの LP が許容誤差の範囲で行を破るところで入るので、この LP の最適の双対値で見積もり
+            // (取り替えるなら新しい点で)、基底も研磨の LP を温めるのに取っておく
+            if super::polish_warm_mode() > 0 {
+                s.warm_rc = Some((s.leak_estimate(if better { &y } else { x }), Some(s.lp.basis())));
+            }
+            better.then_some((y, zy))
+        });
+        if let Some((y, zy)) = r.flatten() {
+            *x = y;
+            *z = zy;
+        }
         if self.params.verbose && st != LpStatus::Optimal {
-            eprintln!("MIP: fixed-integer LP: {st:?} ({} iters)", self.lp.total_iterations() - it0);
+            eprintln!("MIP: fixed-integer LP: {st:?} ({iters} iters)");
         }
         if st == LpStatus::TimeLimit {
             self.gap4_inclp.0 += 1;
         }
-        if st == LpStatus::Optimal {
-            let mut y = self.lp.col_values();
-            for j in 0..self.p.n {
-                if self.p.is_int[j] {
-                    y[j] = x[j];
-                }
-            }
-            let zy = self.p.objective(&y);
-            if zy < *z - 1e-9 * z.abs().max(1.0) && self.p.is_feasible(&y, FEASTOL) {
-                if self.params.verbose {
-                    eprintln!("MIP: fixed-integer LP improved incumbent {z:.10e} -> {zy:.10e}");
-                }
-                *x = y;
-                *z = zy;
-            }
-            // `ENOMOTO_MIP_POLISH_WARM`: 漏れはこの LP が許容誤差の範囲で行を破るところで入るので、この LP の最適の双対値で見積もり、
-            // 基底も研磨の LP を温めるのに取っておく
-            if super::polish_warm_mode() > 0 {
-                self.warm_rc = Some((self.leak_estimate(x), Some(self.lp.basis())));
-            }
+    }
+
+    /// 今の B&B の LP の上で、整数列を `x` の値 (`round` なら丸めた値) に固定し、連続列 `j` を `cont(self, j)` の範囲にして、
+    /// 元の費用 (`self.p.cost`) で解く。`cost` は今の LP の費用 (`self.lp.costs()`。Feasibility Pump の距離の費用のこともある)。
+    /// 最適なら、整数列を固定値に置き直した点を `on_opt` に渡す (LP は解けた状態のままなので、双対値・基底を読める)。
+    /// 戻る前に LP の状態と費用を戻し、解き直しの反復は LP の反復の累計に入れない (累計を基準にするヒューリスティクスの予算などを
+    /// 動かさないため)。返り値は (LP の状態、解き直しの反復、`on_opt` の返り値)。
+    /// [`Self::resolve_continuous`] (連続列は問題の境界) と [`Self::fixed_int_lp`] (大域の境界) の共通部分
+    pub(super) fn with_fixed_int_lp<R>(
+        &mut self,
+        x: &[f64],
+        round: bool,
+        cost: Vec<f64>,
+        cont: impl Fn(&Self, usize) -> (f64, f64),
+        deadline: Option<Instant>,
+        on_opt: impl FnOnce(&mut Self, Vec<f64>) -> R,
+    ) -> (LpStatus, u64, Option<R>) {
+        let p = self.p;
+        let fixed = |j: usize| if round { x[j].round() } else { x[j] };
+        let saved = self.lp.save_state();
+        let it0 = self.lp.total_iterations();
+        let swap = cost != p.cost;
+        if swap {
+            self.lp.set_costs(&p.cost);
         }
+        for j in 0..p.n {
+            let (lo, up) = if p.is_int[j] { (fixed(j), fixed(j)) } else { cont(self, j) };
+            self.lp.set_col_bounds(j, lo, up);
+        }
+        let st = self.lp.solve(&SolveLimits { deadline, ..Default::default() });
+        let iters = self.lp.total_iterations() - it0;
+        let r = (st == LpStatus::Optimal).then(|| {
+            let mut y = self.lp.col_values();
+            for j in 0..p.n {
+                if p.is_int[j] {
+                    y[j] = fixed(j);
+                }
+            }
+            on_opt(self, y)
+        });
         if swap {
             self.lp.set_costs(&cost);
         }
         self.lp.restore_state(&saved);
         self.lp.set_total_iterations(it0);
+        (st, iters, r)
     }
 
     /// `ENOMOTO_MIP_POLISH_WARM` の漏れの見積り: 点 `x` (この問題の空間) の行・列の境界の違反に、今の LP の双対値・被約費用の

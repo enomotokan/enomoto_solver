@@ -3684,36 +3684,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 整数列を `x` の値 (丸めたもの) に固定し、連続列を元の費用の LP で解き直した点を暫定解の候補にする。
     /// LP の状態は戻す。
     pub(super) fn fixed_int_lp(&mut self, x: &[f64]) -> bool {
-        let p = self.p;
         if self.time_up() {
             return false;
         }
-        let saved = self.lp.save_state();
-        let it0 = self.lp.total_iterations();
         let cost = self.lp.costs();
-        let swap = cost != p.cost;
-        if swap {
-            self.lp.set_costs(&p.cost);
-        }
-        for j in 0..p.n {
-            let (lo, up) = if p.is_int[j] { (x[j].round(), x[j].round()) } else { (self.dom.global_lo[j], self.dom.global_up[j]) };
-            self.lp.set_col_bounds(j, lo, up);
-        }
-        let st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
-        let y = (st == LpStatus::Optimal).then(|| {
-            let mut y = self.lp.col_values();
-            for j in 0..p.n {
-                if p.is_int[j] {
-                    y[j] = x[j].round();
-                }
-            }
-            y
-        });
-        if swap {
-            self.lp.set_costs(&cost);
-        }
-        self.lp.restore_state(&saved);
-        self.lp.set_total_iterations(it0);
+        let (_, _, y) = self.with_fixed_int_lp(x, true, cost, |s, j| (s.dom.global_lo[j], s.dom.global_up[j]), self.deadline, |_, y| y);
         y.is_some_and(|y| self.try_incumbent(y))
     }
 
