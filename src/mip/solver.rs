@@ -4681,8 +4681,8 @@ impl Drop for LmboostBg {
     }
 }
 
-/// 試作 `ENOMOTO_MIP_UNIFY_FIX` (既定では使わない。analysis/unify_20261126/ の 2 節・4 節): 重複の洗い出しで見つけた写し違いを、
-/// 正しい側にそろえる。文字ごとに入れる (`1` は全部)。
+/// `ENOMOTO_MIP_UNIFY_FIX` (既定 `1` = 全部、2026-11-26 に既定にした。`=0`・`off` で前の形。analysis/unify_20261126/ の 2 節・4 節):
+/// 重複の洗い出しで見つけた写し違いを、正しい側にそろえる。文字ごとに入れる (`1` は全部)。
 /// - `f`: 旧 FJ (`fj_search_old`)・`local_search` の違反の許容誤差を、活動度に比例する `1e-6 (1 + min(|act|, 1e6))` から、
 ///   [`super::problem::MipProblem::is_feasible`] より少し狭い `0.5e-6 + 1e-10 |b|` (Local-MIP と同じ) にする
 /// - `r`: Repair の「違反なし」の判定を `1e-6 (1 + |b|)` から `is_feasible` と同じ `1e-6 + 1e-9 |b|` にする
@@ -4693,7 +4693,7 @@ impl Drop for LmboostBg {
 ///   `resolve_continuous` と同じ)
 pub(crate) fn unify_fix(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    let v = V.get_or_init(|| env_def!("ENOMOTO_MIP_UNIFY_FIX", "").map_or(String::new(), |v| v.to_string()));
+    let v = V.get_or_init(|| env_def!("ENOMOTO_MIP_UNIFY_FIX", "1").map_or(String::new(), |v| v.to_string()));
     v == "1" || v.contains(c)
 }
 
