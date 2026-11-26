@@ -50,44 +50,10 @@ fn propagate_all(p: &MipProblem, d: &mut Domain) -> bool {
 /// 目的関数の行 `sum c_j x_j <= u` (定数項を除いた打ち切り値) で 1 回締める (`Solver::global_obj_prop` と同じ)。
 /// 矛盾なら None、締めたら Some(真)。
 fn obj_row_pass(p: &MipProblem, d: &mut Domain, obj: &[(usize, f64)], u: f64) -> Option<bool> {
-    let (mut minact, mut ninf) = (0.0f64, 0usize);
-    for &(j, c) in obj {
-        let b = if c > 0.0 { d.lo[j] } else { d.up[j] };
-        if b.is_finite() {
-            minact += c * b;
-        } else {
-            ninf += 1;
-        }
-    }
-    if ninf > 1 {
-        return Some(false);
-    }
     let s0 = d.stack_len();
-    for &(j, c) in obj {
-        let b = if c > 0.0 { d.lo[j] } else { d.up[j] };
-        let rest = if b.is_finite() {
-            if ninf > 0 {
-                continue;
-            }
-            minact - c * b
-        } else {
-            minact
-        };
-        let lim = (u - rest) / c;
-        // 丸め誤差の分だけ緩める (整数列は `tighten_*` が切り捨てる前に許容誤差を足す)
-        // `ENOMOTO_MIP_UNIFY_FIX` の `s`: 整数列には足さない (`Solver::global_obj_prop_ex` と同じ)
-        let slack = if p.is_int[j] && super::solver::unify_fix('s') { 0.0 } else { 1e-9 * (1.0 + lim.abs()) };
-        if c > 0.0 {
-            if lim + slack < d.up[j] {
-                d.tighten_upper(p, j, lim + slack);
-            }
-        } else if lim - slack > d.lo[j] {
-            d.tighten_lower(p, j, lim - slack);
-        }
-        if d.infeasible {
-            return None;
-        }
-    }
+    // 丸め誤差の分だけ緩める (整数列は `tighten_*` が切り捨てる前に許容誤差を足す)。`ENOMOTO_MIP_UNIFY_FIX` の `s`: 整数列には足さない
+    // (`Solver::global_obj_prop_ex` と同じ)
+    d.tighten_le_row_rest(p, obj, u, !super::solver::unify_fix('s'))?;
     Some(d.stack_len() > s0)
 }
 

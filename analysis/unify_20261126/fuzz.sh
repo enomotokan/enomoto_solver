@@ -18,4 +18,4 @@ run fuzz_slack2 python3 analysis/wrongans_20261112/seed14/fuzz_slack.py 1000 500
 run fuzz_bigact env ENOMOTO_MIP_REL_GAP=1e-9 python3 analysis/unify_20261126/fuzz_bigact.py 300 0
 run fuzz_bigact2 env ENOMOTO_MIP_REL_GAP=1e-9 python3 analysis/unify_20261126/fuzz_bigact.py 300 5000
 export CARGO_TARGET_DIR=target/libtest RUSTFLAGS="-C link-arg=-L/usr/local/lib -C link-arg=-lpython3.13" LD_LIBRARY_PATH=/usr/local/lib
-echo "== cargo test ($2)"; cargo test --release --lib > $L/cargo.log 2>&1; echo "rc=$?"; grep "test result" $L/cargo.log
+echo "== cargo test (${2:-既定})"; cargo test --release --lib > $L/cargo.log 2>&1; echo "rc=$?"; grep "test result" $L/cargo.log
