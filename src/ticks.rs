@@ -299,6 +299,17 @@ pub fn with_budget<R>(budget: f64, f: impl FnOnce() -> R) -> R {
     r
 }
 
+/// 手間の期限を外して `f` を実行し、元に戻す (手間は数え続ける)。返す暫定解の研磨 (`crate::mip` の `polish_in_problem_warm`) の LP は、
+/// 呼び出し元 (ヒューリスティクスなど) の手間の期限で数反復で止まると、研磨しないまま見積りで受け取ることになるので、壁時計の期限だけで止める
+/// (analysis/nattai_20261125 の 9 節)
+pub fn without_budget<R>(f: impl FnOnce() -> R) -> R {
+    let prev = DEADLINE.with(|d| d.get());
+    DEADLINE.with(|d| d.set(f64::INFINITY));
+    let r = f();
+    DEADLINE.with(|d| d.set(prev));
+    r
+}
+
 /// 今から `budget` (重み付き) を手間の期限にする (今の期限より早いときだけ縮める)。戻り値の前の期限を [`pop_budget`] に渡して戻す。
 pub fn push_budget(budget: f64) -> f64 {
     let prev = DEADLINE.with(|d| d.get());

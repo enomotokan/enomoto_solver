@@ -576,6 +576,17 @@ enum BranchAction {
     Prune,
 }
 
+/// `ENOMOTO_MIP_POLISH_WARM`: 木の中の研磨 (`ENOMOTO_MIP_POLISH_STRICT=2`) で受け入れた暫定解の印
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(super) enum WarmMark {
+    /// 研磨した (目的値は整数を固定した LP の値)
+    Polished,
+    /// 研磨が間に合わず、その点を出した LP (`resolve_continuous` の整数を固定した LP) の双対値から取った見積り (目的値に足し済み) を持つ
+    Est(f64),
+    /// 研磨が間に合わず、見積りも今の LP の双対値からしか取れなかった (目的値に足し済みだが、当てにならない)
+    Unknown,
+}
+
 pub(super) struct Solver<'a, L: MipLp> {
     pub(super) p: &'a MipProblem,
     pub(super) params: MipParams,
@@ -1143,8 +1154,11 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// `ENOMOTO_MIP_POLISH_WARM`: 直前の [`Self::resolve_continuous`] が返した点の、漏れの見積り (その点を出した LP の双対値から) と、
     /// 整数を固定した LP を解いたならその最適の基底 (研磨の LP を温める)
     warm_rc: Option<(f64, Option<super::lp::Basis>)>,
-    /// `ENOMOTO_MIP_POLISH_WARM`: 最後に受け入れた暫定解 (この問題の空間) と、研磨が済んだか (`None`) / 未研磨で漏れの見積り (`Some`)
-    warm_mark: Option<(Vec<f64>, Option<f64>)>,
+    /// `ENOMOTO_MIP_POLISH_WARM`: 最後に受け入れた暫定解 (この問題の空間) と、その印 ([`WarmMark`])
+    warm_mark: Option<(Vec<f64>, WarmMark)>,
+    /// `ENOMOTO_MIP_POLISH_WARM`: 研磨で値を確かめた暫定解のうち最良のもの (目的値は整数を固定した LP の値)。返す暫定解の値が確かでない
+    /// ([`WarmMark::Unknown`]、または印がない) まま時間切れになったとき、こちらを返す (analysis/nattai_20261125 の 10 節)
+    warm_verified: Option<(f64, Vec<f64>)>,
     /// 診断用 `ENOMOTO_MIP_GAP4_RSS`: 生きている `Solver` の数に数えたか (サブ MIP か)。[`GAP4_LIVE`]
     gap4_live: Option<bool>,
     /// `ENOMOTO_MIP_GAP4` の `k`: 最後の locks の固定率と、根の並列の locks のサブ MIP が実行不能だったか ([`Self::locks_retry`])
@@ -5909,6 +5923,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         gap4_inclp: (0, 0),
         warm_rc: None,
         warm_mark: None,
+        warm_verified: None,
         gap4_live: gap4_sub,
         gap4_locks: (0.0, false),
         mem2_keep: (true, true),
@@ -8133,11 +8148,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let warm = super::polish_warm_mode();
                     if warm > 0 {
                         // 見積り: `resolve_continuous` の LP の双対値から (なければ今の LP の双対値から)。温める基底も、その LP の最適の基底があればそれ
-                        let (est, rb) = match self.warm_rc.take() {
-                            Some((e, b)) => (e, b),
-                            None => (self.leak_estimate(&x), None),
+                        // `rel`: 見積りがその点を出した LP の双対値から取れたか (取れなければ今の LP の双対値からで、当てにならない)
+                        let (est, rb, rel) = match self.warm_rc.take() {
+                            Some((e, b)) => (e, b, true),
+                            None => (self.leak_estimate(&x), None, false),
                         };
-                        let r = if warm == 3 {
+                        // 診断 `ENOMOTO_MIP_POLISH_STATS` の `u`: 木の中の研磨を解かず、見積りを当てにならない扱い (`Unknown`) にする
+                        // (返すときに確かめた解に戻す道・期限なしで解く道を通す確かめ用。analysis/nattai_20261125 の 10 節)
+                        let diag_u = env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('u'));
+                        let rel = rel && !diag_u;
+                        let r = if warm == 3 || diag_u {
                             super::WarmPolish::NotSolved
                         } else {
                             let b = if env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('n')) { Some(self.lp.basis()) } else { rb.or_else(|| Some(self.lp.basis())) };
@@ -8153,15 +8173,24 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let mark = match r {
                             super::WarmPolish::Replaced(zn) => {
                                 z = zn;
-                                None
+                                WarmMark::Polished
                             }
-                            super::WarmPolish::Kept => None,
+                            super::WarmPolish::Kept => WarmMark::Polished,
                             super::WarmPolish::NotSolved => {
                                 z += est;
                                 super::WARM_POLISH[3].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                Some(est)
+                                if rel {
+                                    WarmMark::Est(est)
+                                } else {
+                                    super::WARM_POLISH[6].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    WarmMark::Unknown
+                                }
                             }
                         };
+                        // 値を確かめた解は、今の暫定解より良くなくても控えておく (返す解の値が確かでないまま終わったときの代わり)
+                        if mark == WarmMark::Polished && self.warm_verified.as_ref().is_none_or(|(zv, _)| z < *zv) {
+                            self.warm_verified = Some((z, x.clone()));
+                        }
                         self.warm_mark = Some((x.clone(), mark));
                     } else if let Some(zn) = super::polish_in_problem(&self.p, &mut x, z) {
                         z = zn;
@@ -29342,34 +29371,76 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let warm = super::polish_warm_mode();
             let mut leak = 0.0;
             if let Some((mut z, mut x)) = self.incumbent.take() {
-                // 木の中の研磨 (`STRICT=2`) の印: `Some(None)` は研磨済み (返す前の研磨は要らない)、`Some(Some(e))` は未研磨で見積り `e`、
-                // `None` は印のない解 (`STRICT=1`、または木の中の研磨を通らずに受け取った解)
+                // 木の中の研磨 (`STRICT=2`) の印 ([`WarmMark`])。`None` は印のない解 (`STRICT=1`、または期限の後に受け取って木の中の研磨を
+                // 通らなかった解)
                 let mark = self.warm_mark.as_ref().filter(|(xm, _)| *xm == x).map(|(_, m)| *m);
-                let r = if mark == Some(None) {
+                let z0 = z;
+                let r = if mark == Some(WarmMark::Polished) {
                     super::WarmPolish::Kept
                 } else if warm == 3 {
                     super::WarmPolish::NotSolved
                 } else {
                     let b = self.lp.basis();
                     if env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('v')) {
-                        eprintln!("MIP: POLISH_WARM: final polish from the basis of the last LP (time up {})", self.time_up());
+                        eprintln!("MIP: POLISH_WARM: final polish from the basis of the last LP (time up {}, mark {mark:?})", self.time_up());
                     }
                     super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), if warm == 2 { self.deadline } else { None })
                 };
                 match r {
-                    super::WarmPolish::Replaced(zn) => {
-                        warm_raise = (zn - z).max(0.0);
-                        z = zn;
-                    }
+                    super::WarmPolish::Replaced(zn) => z = zn,
                     super::WarmPolish::Kept => {}
-                    super::WarmPolish::NotSolved => {
-                        leak = match mark {
-                            Some(Some(e)) => e,
-                            _ => self.leak_estimate(&x),
-                        };
-                        super::WARM_POLISH[3].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
+                    super::WarmPolish::NotSolved => match mark {
+                        // 見積りがその点を出した LP の双対値から取れている (7 節で実際の漏れと合うことを確かめた)
+                        Some(WarmMark::Est(e)) => {
+                            leak = e;
+                            super::WARM_POLISH[3].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        // 値が確かでない解 (見積りが今の LP の双対値からしか取れなかった、または印がない)。研磨で確かめた解
+                        // ([`Self::warm_verified`]) が、この解の (見積りを足した) 値より悪くなければ、そちらを返す (解の質は落ちない)。
+                        // そうでなければ、この解を返す前に研磨の LP を基底から 1 回だけ、期限なしで解く (上限を越える分はこの 1 回の LP の時間)。
+                        // 解けなければ (実行不能など)、確かめた解があればそれを、なければ今の LP の双対値の見積りを足して返す
+                        _ => {
+                            super::WARM_POLISH[7].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let tol = 1e-9 * z.abs().max(1.0);
+                            let verified = self.warm_verified.take();
+                            match verified {
+                                Some((zv, xv)) if zv <= z + tol => {
+                                    super::WARM_POLISH[8].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    z = zv;
+                                    x = xv;
+                                }
+                                verified => {
+                                    let t = Instant::now();
+                                    let b = self.lp.basis();
+                                    let r2 = super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), None);
+                                    super::WARM_POLISH[9].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    super::WARM_POLISH[10].fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+                                    match (r2, verified) {
+                                        (super::WarmPolish::Replaced(zn), _) => z = zn,
+                                        (super::WarmPolish::Kept, _) => z = self.p.objective(&x),
+                                        (super::WarmPolish::NotSolved, Some((zv, xv))) => {
+                                            super::WARM_POLISH[8].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                            z = zv;
+                                            x = xv;
+                                        }
+                                        (super::WarmPolish::NotSolved, None) => {
+                                            leak = match mark {
+                                                Some(WarmMark::Unknown) => z - self.p.objective(&x),
+                                                _ => self.leak_estimate(&x),
+                                            }
+                                            .max(0.0);
+                                            super::WARM_POLISH[3].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                    }
+                                }
+                            }
+                            if env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('v')) {
+                                eprintln!("MIP: POLISH_WARM: the value of the solution to return was not certain ({mark:?}); returning {z:.10e} (was {z0:.10e})");
+                            }
+                        }
+                    },
                 }
+                warm_raise = (z - z0).max(0.0);
                 self.incumbent = Some((z, x));
             }
             super::WARM_LEAK.store(leak.to_bits(), std::sync::atomic::Ordering::Relaxed);

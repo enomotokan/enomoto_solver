@@ -748,13 +748,18 @@ pub fn solve_mip(
                 }
                 if solver::end_diag() || params.verbose || env_str!("ENOMOTO_MIP_POLISH_STATS").is_some() {
                     eprintln!(
-                        "MIP: POLISH_WARM: LPs {} (replaced {}, not solved {}), leak estimates {}, {:.3}s, {} iters; final leak estimate {leak:.3e} ({})",
+                        "MIP: POLISH_WARM: LPs {} (replaced {}, not solved {}), leak estimates {}, {:.3}s, {} iters; uncertain estimates in the tree {}; uncertain at the end {} (returned the verified solution {}, polished without the deadline {} in {:.3}s); final leak estimate {leak:.3e} ({})",
                         WARM_POLISH[0].load(Ordering::Relaxed),
                         WARM_POLISH[1].load(Ordering::Relaxed),
                         WARM_POLISH[2].load(Ordering::Relaxed),
                         WARM_POLISH[3].load(Ordering::Relaxed),
                         WARM_POLISH[4].load(Ordering::Relaxed) as f64 / 1e9,
                         WARM_POLISH[5].load(Ordering::Relaxed),
+                        WARM_POLISH[6].load(Ordering::Relaxed),
+                        WARM_POLISH[7].load(Ordering::Relaxed),
+                        WARM_POLISH[8].load(Ordering::Relaxed),
+                        WARM_POLISH[9].load(Ordering::Relaxed),
+                        WARM_POLISH[10].load(Ordering::Relaxed) as f64 / 1e9,
                         if same { "added" } else { "not added: polished" }
                     );
                 }
@@ -978,8 +983,10 @@ pub(super) fn polish_warm_mode() -> u8 {
 pub(super) static WARM_LEAK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// `ENOMOTO_MIP_POLISH_WARM` の集計: 研磨の LP を解いた回数、取り替えた回数、間に合わなかった回数、見積りで正した回数、
-/// かかった時間 (ナノ秒)、単体法の反復の数
-pub(super) static WARM_POLISH: [std::sync::atomic::AtomicU64; 6] = [const { std::sync::atomic::AtomicU64::new(0) }; 6];
+/// かかった時間 (ナノ秒)、単体法の反復の数、
+/// 木の中で見積りが当てにならなかった回数 ([`solver::WarmMark::Unknown`])、返す解の値が確かでないまま終わった回数、
+/// そのとき研磨で確かめた解に戻した回数、期限なしで研磨の LP を解いた回数、その時間 (ナノ秒) (analysis/nattai_20261125 の 10 節)
+pub(super) static WARM_POLISH: [std::sync::atomic::AtomicU64; 11] = [const { std::sync::atomic::AtomicU64::new(0) }; 11];
 
 /// `ENOMOTO_MIP_POLISH_WARM` の研磨の結果
 pub(super) enum WarmPolish {
@@ -1029,7 +1036,10 @@ pub(super) fn polish_in_problem_warm(p: &MipProblem, x: &mut Vec<f64>, z: f64, b
         info.2 = b.col.iter().filter(|&&s| s == lp::VarStatus::Basic).count() + b.row.iter().filter(|&&s| s == lp::VarStatus::Basic).count();
         lp.set_basis(&b);
     }
-    let st = lp.solve(&lp::SolveLimits { deadline, ..Default::default() });
+    // 呼び出し元の手間の期限 ([`crate::ticks::push_budget`]) は外し、求解の期限 (壁時計) だけで止める。ヒューリスティクスの中で受け取った
+    // 解の研磨が手間の期限で 3 反復で止まり、研磨しないまま見積り (その解を出した LP の双対値がなく、今の LP の双対値から取った小さな値) で
+    // 受け取って、4 スレッドの nattai が最適値より 9.4e-5 良い値を返した (analysis/nattai_20261125 の 9 節)
+    let st = crate::ticks::without_budget(|| lp.solve(&lp::SolveLimits { deadline, ..Default::default() }));
     WARM_POLISH[0].fetch_add(1, Ordering::Relaxed);
     WARM_POLISH[5].fetch_add(lp.total_iterations(), Ordering::Relaxed);
     let mut out = WarmPolish::NotSolved;
