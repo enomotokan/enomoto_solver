@@ -1119,6 +1119,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) subfix_retry: Vec<f64>,
     /// 別スレッドの Feasibility Jump とその停止の印。
     fj_thread: Option<(std::thread::JoinHandle<Option<Vec<f64>>>, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
+    /// 試作 `ENOMOTO_MIP_T1PRIMAL` ([`super::t1primal`]): 1 スレッドの解探しの補助のスレッドと、その手間の勘定
+    pub(super) t1p: Option<Box<super::t1primal::T1Primal>>,
     /// 試作 `ENOMOTO_MIP_LMBOOST` (COMP07): Local-MIP の解で暫定解が良くなった時刻 (この求解の経過秒)
     lmip_imps: Vec<f64>,
     /// FJ のスレッドの Local-MIP (`ENOMOTO_MIP_FJ_LOCALMIP`・`ENOMOTO_MIP_FJ_LMIP_MIX`) が良くなった解を入れる箱
@@ -4846,16 +4848,16 @@ impl Drop for LmboostBg {
 /// - `t`: `try_lp_solution` の整数を固定した LP を、元の費用で解き、反復を累計に入れない ([`Solver::with_fixed_int_lp`]、
 ///   `resolve_continuous` と同じ)
 ///
-/// 第 2 弾 (既定では入らない。`1` にも含めない。文字で付ける。analysis/unify_20261126 の 5 節):
+/// 第 2 弾 (analysis/unify_20261126 の 5 節。2026-11-26 に既定 (`1` に含める) にした):
 /// - `z`: 目的値の改善の判定 ([`better_obj`]) の許容誤差の尺度を比べる相手の値で取り、相手が +∞ のときは先に分ける
 /// - `p`: 1 本の行の伝播 ([`Domain::tighten_le_row`]・`tighten_le_row_rest`) で無限の項を積で見る。`tc_global_pool_prop` の自前の
 ///   締め方を `tighten_le_row` にする
 pub(crate) fn unify_fix(c: char) -> bool {
-    // `1` は第 1 弾 (`frsmlt`) の全部。第 2 弾 (`z`・`p`) は文字で付けたときだけ
-    env_def!("ENOMOTO_MIP_UNIFY_FIX", "1").is_some_and(|v| (v.starts_with('1') && "frsmlt".contains(c)) || v.contains(c))
+    // `1` は第 1 弾 (`frsmlt`) と第 2 弾 (`zp`) の全部。文字だけを付ければその文字だけ
+    env_def!("ENOMOTO_MIP_UNIFY_FIX", "1").is_some_and(|v| (v.starts_with('1') && "frsmltzp".contains(c)) || v.contains(c))
 }
 
-/// 目的値 `z` が `b` より良いか (最小化、相対の許容誤差 1e-9)。`ENOMOTO_MIP_UNIFY_FIX` の `z` (既定では使わない) なら、許容誤差の尺度を
+/// 目的値 `z` が `b` より良いか (最小化、相対の許容誤差 1e-9)。`ENOMOTO_MIP_UNIFY_FIX` の `z` (既定) なら、許容誤差の尺度を
 /// いつも `b` で取り、`b` = +∞ (暫定解なし) は先に分けて `z < +∞` とする。切っていれば以前の形: 尺度は呼び手ごとの `scale` (`z` か `b`)、
 /// `b` = +∞ なら `b - 1e-9 ∞` が NaN になって偽 (呼び手によっては前で `b` の有限を確かめている)。analysis/unify_20261126 の 1 節の 14
 #[inline]
@@ -6156,6 +6158,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         last_submip_nodes: 0,
         subfix_retry: Vec::new(),
         fj_thread: None,
+        t1p: None,
         lmip_imps: Vec::new(),
         lmip_mailbox: None,
         fj_gate: None,
@@ -6674,6 +6677,12 @@ pub(super) fn pool_close_on() -> bool {
 /// 基底のない求解の既存の入口 (空いたスレッドがあれば同時実行、なければ二段解法 → 内点法 + クロスオーバー) で解き直す
 pub(super) fn rootpar_ph(c: char) -> bool {
     env_str!("ENOMOTO_MIP_ROOTPAR_PH").is_some_and(|v| v.contains(c))
+}
+
+/// `ROOTPAR_PH` の `g`・`j` (最後の 1 回の研磨とその速くし方): 文字を付けたとき、または既定の [`super::polish_final_on`]
+/// (`POLISH_WARM` を付けず `e` の形のとき) に使う
+pub(super) fn polish_final(c: char) -> bool {
+    rootpar_ph(c) || (super::polish_final_on() && env_str!("ENOMOTO_MIP_POLISH_WARM").is_none() && super::polish_warm_mode() == 3)
 }
 
 /// プールから戻すラウンドの伸びを測るか (`POOL_CLOSE` か、`NODEROWS_ADAPT` の `p`)
@@ -8468,7 +8477,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         // 試作 `ROOTPAR_PH` の `i`: `resolve_continuous` の LP の中で研磨できていれば、その結果を使う (この解のものだけ)
                         let inlp = if rootpar_ph('i') { self.rph_inlp.take().filter(|(_, _, xk)| *xk == x) } else { None };
                         // `i` と `j`: LP の中の研磨が反復の上限に当たった (印は解けず・解なし) ら、基底を捨てて基底のない求解の入口で解く
-                        let inlp_cold = rootpar_ph('j') && matches!(&inlp, Some((super::WarmPolish::NotSolved, xn, _)) if xn.is_empty()) && !self.time_up();
+                        let inlp_cold = polish_final('j') && matches!(&inlp, Some((super::WarmPolish::NotSolved, xn, _)) if xn.is_empty()) && !self.time_up();
                         let inlp = inlp.filter(|(r, _, _)| !matches!(r, super::WarmPolish::NotSolved));
                         let r = if warm == 3 || diag_u {
                             super::WarmPolish::NotSolved
@@ -8784,7 +8793,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             self.lp.set_row_bounds_many(&ch);
         }
         // `j` もあれば反復の上限 [`super::polish_iter_cap`] を付け、上限に当たれば研磨の所で基底のない求解の入口に回す (`rph_inlp` に印を置く)
-        let cap = if rootpar_ph('j') { super::polish_iter_cap(p.m, p.n) } else { u64::MAX };
+        let cap = if polish_final('j') { super::polish_iter_cap(p.m, p.n) } else { u64::MAX };
         let st = crate::ticks::without_budget(|| self.lp.solve_primal(&SolveLimits { deadline, iteration_limit: cap, ..Default::default() }));
         let stats = env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('v')) && self.params.verbose;
         let r = if st == LpStatus::Optimal {
@@ -12339,6 +12348,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // (並列なら FJ のスレッドを止める所) で本体が同じ組を回す ([`Self::t1_fj_lmip_mix`])
         if t1mix_on() && mip_threads() == 1 && !self.params.submip && self.snap.is_none() && self.params.restarts == 0 && !proof_only() && self.fj_thread.is_none() && !self.root_gap_closed() {
             self.t1_fj_lmip_mix();
+        }
+        // 試作 `ENOMOTO_MIP_T1PRIMAL` ([`super::t1primal`]): 1 スレッドで FJ + Local-MIP の組を補助のスレッドに持たせ、時間の取り分を
+        // 当たった率・改善の止まった時間の割合・ギャップのシグモイドで決めて、根の終わりと木のノードで少しずつ回す
+        if super::t1primal::enabled() && mip_threads() == 1 && !self.params.submip && self.snap.is_none() && self.params.restarts == 0 && !proof_only() && self.fj_thread.is_none() && !self.root_gap_closed() {
+            self.t1primal_start();
+            self.t1primal_tick(true);
         }
         // 試作 `ENOMOTO_MIP_LPBOX` (analysis/lpbox_20261122): 根のカットのループの後の LP 解のまわりに整数列を狭めて伝播した問題で
         // FJ・Local-MIP を回す ([`Self::lpbox_heur`])。FJ のスレッドはまだ止めない
@@ -16365,6 +16380,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         if self.params.verbose && env_str!("ENOMOTO_MIP_DEBUG_NOINC").is_some() && arm != NOINC_TREE_ARM {
                             eprintln!("MIP:   no-incumbent heuristic arm {arm}: close {close:.3} found {found} ({secs:.2}s, node {}, frac {time_frac:.2}, stall {})", self.nodes, self.noinc_stall);
                         }
+                    }
+                    // 試作 `ENOMOTO_MIP_T1PRIMAL` ([`super::t1primal`]): 貯えがたまっていれば FJ + Local-MIP の補助のスレッドを回す
+                    if self.t1p.is_some() && heur_ok && node.depth > 0 && plunge_depth == 0 {
+                        self.t1primal_tick(false);
                     }
                     xp("m_heur");
                     // ダイビング (SCIP の fracdiving / veclendiving: 深さ 10 ごと、ずらし 3 / 7)
@@ -30404,7 +30423,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 super::POLISH_TOL_LEAK.with(|c| c.set((0.0, 0.0)));
                 let r = if mark == Some(WarmMark::Polished) {
                     super::WarmPolish::Kept
-                } else if warm == 3 && !rootpar_ph('f') && !rootpar_ph('g') {
+                } else if warm == 3 && !rootpar_ph('f') && !polish_final('g') {
                     super::WarmPolish::NotSolved
                 } else {
                     let b = self.lp.basis();
@@ -30414,7 +30433,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // 試作 `ROOTPAR_PH` の `f` (`POLISH_WARM=e` と組): 木の中は見積りだけで受け取り、研磨の LP は返す前のここで 1 回だけ解く。
                     // 期限は `d` と同じ求解の期限 (時間切れで終わるときは解かず、見積りを足して返す = `e` と同じ)
                     // `g` (`f` の変形): 返す値を確かにするため、最後の 1 回の研磨には期限を渡さない (時間切れで終わる回も解く。上限を越える分はこの 1 回の LP)
-                    let dl = if warm == 3 && rootpar_ph('g') {
+                    let dl = if warm == 3 && polish_final('g') {
                         None
                     } else if warm == 2 || (warm == 3 && rootpar_ph('f')) {
                         self.deadline
@@ -30424,7 +30443,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let t = Instant::now();
                     // `j`: 求解の終わりでは従のスレッドは止まっている ([`Self::join_workers`] の後) ので、研磨の LP の同時実行にスレッド数を渡す
                     // (木の主のスレッドは 1 にしてある)
-                    let prev = (rootpar_ph('j') && self.params.threads > 1).then(|| crate::simplex::mip_lp::set_cold_race_threads(self.params.threads));
+                    let prev = (polish_final('j') && self.params.threads > 1).then(|| crate::simplex::mip_lp::set_cold_race_threads(self.params.threads));
                     let r = super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), dl);
                     if let Some(k) = prev {
                         crate::simplex::mip_lp::set_cold_race_threads(k);
@@ -30495,7 +30514,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     },
                 }
                 warm_raise = (z - z0).max(0.0);
-                if warm == 3 && (rootpar_ph('f') || rootpar_ph('g')) {
+                if warm == 3 && (rootpar_ph('f') || polish_final('g')) {
                     rph_f_raise = Some((z0, z - z0, super::POLISH_TOL_LEAK.with(|c| c.get())));
                 }
                 self.incumbent = Some((z, x));
