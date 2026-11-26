@@ -11437,6 +11437,10 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
   (`ENOMOTO_MIP_POLISH_FINAL=0` で前の基準と全部一致)。
 - 確かめ (既定、309092db8): fuzz 7 本と fuzz_bigact 2 本は誤答 0・not_solved 0 (tiny 0/400・0/400、vs HiGHS 0/300、objint 0/1000・0/1000、
   slack 0・0、bigact 0/300・0/300)。cargo test 425 通過。先端 (8d45e35b5) の check_default も新しい基準と全部一致。
+- 追記 (3f7265069): 従も暫定解を研磨せずに共有の最良値に置くので、同じ解の値が許容の中の違反の分だけ低く最良値に残り、木の終わりの守り
+  (共有の最良値が主の暫定解より良ければ最適と言わない、1e-9 |z|) で qiu の 4 スレッドが 12 回に 1 回 NotSolved になっていた。木の終わりでは決めず、
+  最後の研磨の確かめで刈りに使った値を min(研磨の前の値, 共有の最良値) として許容 (刈りの余裕・W_mip) で決める。求解の終わりの共有の最良値の守りも
+  許容に W_mip を使う。qiu 12 回とも最適、fuzz 9 本と 4 スレッドの objint・slack 各 2 本は誤答 0・not_solved 0 (analysis/rootpar_ph_20261126 の 5.12 節)。
 
 
 ## 2026-11-26: ENOMOTO_MIP_UNIFY_FIX の第 2 弾 (z・p) を既定に加える (採用、利用者の判断)
