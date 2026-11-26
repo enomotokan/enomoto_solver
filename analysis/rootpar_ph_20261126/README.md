@@ -293,4 +293,4 @@ fuzz_tiny 1/400・fuzz_tiny2 5/400・fuzz_objint 7/1000・fuzz_objint2 2/1000 (f
   POLISH_FINAL では許容に W_mip を使う。最適の定義 (MIP の実行可能性の許容の中) と同じ水準で、新しい閾値はない。
   本当に良い解が主に届かなかった場合 (差が W_mip を越える) は、今までどおり NotSolved。
 - 直しの後に 12 回 (q13〜q24): 12 回とも最適。q17 がこの道に入り (最良値 −132.87313692 / 主 −132.87313673)、最後の研磨の確かめで最適
-  (qiu の W_lp 7.7e-6・W_mip 6.0e-3。差 1.9e-7 は W_lp の水準でも中)。check_default は全部一致。fuzz: `fuzz_sbdefer.out`。
+  (qiu の W_lp 7.7e-6・W_mip 6.0e-3。差 1.9e-7 は W_lp の水準でも中)。check_default は全部一致。fuzz (`fuzz_sbdefer.out`): 7 本 + bigact 2 本と 4 スレッドの objint 1000 ×2・slack 1000 ×2 で誤答 0・not_solved 0、cargo test 425 通過。
