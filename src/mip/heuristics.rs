@@ -3791,6 +3791,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.incumbent.is_none() {
             return false;
         }
+        // 試作 `ENOMOTO_MIP_ALNS` ([`super::alns_cp`]): CP-SAT の難しさを合わせる 3 本の近傍 (rins・random・graph) を使う。
+        // 呼ぶ時期・予算の決め方が今の腕の成功率を使うので、腕 0〜2 の回数・報酬にも足す
+        if super::alns_cp::on() {
+            let k = self.alns_cp.pick();
+            let z0 = self.incumbent.as_ref().map(|(z, _)| *z).unwrap();
+            self.heur_label = ["tree ALNS-CP rins", "tree ALNS-CP random", "tree ALNS-CP graph"][k];
+            let ok = self.alns_cp_run(k, x);
+            self.heur_label = "";
+            let z1 = self.incumbent.as_ref().map(|(z, _)| *z).unwrap();
+            self.alns_count[k] += 1;
+            self.alns_reward[k] += if ok && z1 < z0 { 1.0 + ((z0 - z1) / z0.abs().max(1.0)).min(1.0) } else { 0.0 };
+            return ok;
+        }
         const ARMS: usize = 6;
         let total: f64 = self.alns_count.iter().sum::<u32>() as f64;
         let arm = match (0..ARMS).find(|&a| self.alns_count[a] == 0) {

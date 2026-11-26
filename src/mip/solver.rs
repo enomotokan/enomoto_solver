@@ -762,6 +762,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// ALNS の腕ごとの報酬の合計と試した回数。
     pub(super) alns_reward: [f64; 6],
     pub(super) alns_count: [u32; 6],
+    /// 試作 `ENOMOTO_MIP_ALNS` ([`super::alns_cp`]) の近傍ごとの難しさ・選び方の状態
+    pub(super) alns_cp: super::alns_cp::AlnsCp,
     /// `ENOMOTO_MIP_SUBB_DIV` (試作): 近傍の多様化の状態 ([`super::subb::DivState`])
     pub(super) subb: super::subb::DivState,
     /// `ENOMOTO_MIP_MEMBQ_LNSGROW` (試作、analysis/membq_path_20261105.md): ALNS の腕ごとの、サブ MIP の時間の上限の倍率。
@@ -5818,6 +5820,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         improve_turn: 0,
         alns_reward: [0.0; 6],
         alns_count: [0; 6],
+        alns_cp: Default::default(),
         subb: Default::default(),
         lns_grow: [1.0; 6],
         submip_nosol_timeout: false,
@@ -30050,7 +30053,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 研磨で上げた目的値の幅 (共有の最良値は研磨の前の値のままなので、最後の守りではこの幅を引いて比べる)
         let mut warm_raise = 0.0;
         // 試作 `ROOTPAR_PH` の `f`: 最後の研磨の前の値 (木で刈りに使った、見積りを足した値) と、研磨で上がった幅
-        let mut rph_f_raise: Option<(f64, f64, f64)> = None;
+        let mut rph_f_raise: Option<(f64, f64, (f64, f64))> = None;
         if super::polish_strict() && super::polish_warm_mode() > 0 && !self.params.submip && self.snap.is_none() {
             let warm = super::polish_warm_mode();
             let mut leak = 0.0;
@@ -30059,7 +30062,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 通らなかった解)
                 let mark = self.warm_mark.as_ref().filter(|(xm, _)| *xm == x).map(|(_, m)| *m);
                 let z0 = z;
-                super::POLISH_TOL_LEAK.with(|c| c.set(0.0));
+                super::POLISH_TOL_LEAK.with(|c| c.set((0.0, 0.0)));
                 let r = if mark == Some(WarmMark::Polished) {
                     super::WarmPolish::Kept
                 } else if warm == 3 && !rootpar_ph('f') && !rootpar_ph('g') {
@@ -30093,7 +30096,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             Some(WarmMark::Est(e)) => format!("{e:.3e}"),
                             _ => "-".into(),
                         };
-                        eprintln!("MIP: ROOTPAR_PH f: final polish {:.3}s, leak estimate {est} (already added), objective changed by the LP {got}", t.elapsed().as_secs_f64());
+                        let (w1, w2) = super::POLISH_TOL_LEAK.with(|c| c.get());
+                        eprintln!("MIP: ROOTPAR_PH f: final polish {:.3}s, leak estimate {est} (already added), objective changed by the LP {got}, tolerance leak bound LP {w1:.3e} MIP {w2:.3e}", t.elapsed().as_secs_f64());
                     }
                     r
                 };
@@ -30695,8 +30699,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let (status, best_bound) = match (status, rph_f_raise) {
             // 許容: 刈りの余裕 (abs_gap・rel_gap・1e-9 |z0|) と、研磨の LP の双対値での「許容の中で実行可能な点の漏れの最大」W
             // (`d` の返す研磨した解もこの大きさまでの漏れを含みうる。d と同じ許容の水準。README 5.7 節) の大きい方
-            (MipStatus::Optimal, Some((z0, dz, w))) if dz > self.params.abs_gap.max(self.params.rel_gap * (z0 + dz).abs()).max(1e-9 * z0.abs().max(1.0)).max(w) && !same_limit(z0, z0 + dz) => {
-                eprintln!("MIP: ROOTPAR_PH f: the final polish raised the objective by {dz:.3e} beyond the gap tolerance and the tolerance leak bound {w:.3e}; not reporting optimality (bound {z0:.10e})");
+            // W は W_mip (MIP の実行可能性の許容の水準)。e の木は研磨しない暫定解をこの許容で受け取って刈りに使うので、刈りの誤りもこの水準まである
+            // (W_lp = `d` の水準では fuzz_objint の 5 回が越えた。README 5.7 節)
+            (MipStatus::Optimal, Some((z0, dz, (w_lp, w)))) if dz > self.params.abs_gap.max(self.params.rel_gap * (z0 + dz).abs()).max(1e-9 * z0.abs().max(1.0)).max(w) && !same_limit(z0, z0 + dz) => {
+                eprintln!("MIP: ROOTPAR_PH f: the final polish raised the objective by {dz:.3e} beyond the gap tolerance and the tolerance leak bound {w:.3e} (LP level {w_lp:.3e}); not reporting optimality (bound {z0:.10e})");
                 (MipStatus::NotSolved, best_bound.min(z0))
             }
             (s, _) => (s, best_bound),

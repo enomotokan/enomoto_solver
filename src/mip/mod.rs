@@ -33,6 +33,7 @@ pub(crate) mod localmip;
 pub(crate) mod fjsub;
 mod heuristics;
 mod subb;
+mod alns_cp;
 pub(crate) mod sympre;
 mod sympre0;
 pub(crate) mod heur_subfix;
@@ -1008,29 +1009,33 @@ pub(super) fn polish_in_problem_warm(p: &MipProblem, x: &mut Vec<f64>, z: f64, b
 }
 
 thread_local! {
-    /// 試作 `ROOTPAR_PH` の `f`・`g` (README 5.7 節): このスレッドで最後に解けた研磨の LP で、許容の中で実行可能な点が持ちうる漏れの最大
-    /// W = Σ_行 |y_i| ε_i + Σ_連続列 |d_j| ε_j (ε = 1e-9 max(1, |境界|)、単体法の主の許容と同じ)。研磨して返す解 (`d`) もこの大きさまでの漏れを含みうる
-    pub(super) static POLISH_TOL_LEAK: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+    /// 試作 `ROOTPAR_PH` の `f`・`g` (README 5.7 節): このスレッドで最後に解けた研磨の LP の双対値で測った、許容の中で実行可能な点が持ちうる漏れの最大
+    /// W(ε) = Σ_行 |y_i| ε(b_i) + Σ_連続列 |d_j| ε(境界)。(W_lp, W_mip) の 2 つ: W_lp は ε = 1e-9 max(1, |b|) (単体法の主の許容。研磨した解 = `d` の水準)、
+    /// W_mip は ε = 1e-6 + 1e-9 |b| (MIP の実行可能性の許容 [`domain::FEASTOL`]、`is_feasible` と同じ。木が暫定解を受け取る水準)
+    pub(super) static POLISH_TOL_LEAK: std::cell::Cell<(f64, f64)> = const { std::cell::Cell::new((0.0, 0.0)) };
 }
 
-/// 研磨の LP の双対値から [`POLISH_TOL_LEAK`] の W を計算する
-fn tol_leak_bound(p: &MipProblem, lp: &crate::simplex::mip_lp::TwoStageLp) -> f64 {
-    let eps = |a: f64, b: f64| {
-        let m = [a, b].iter().filter(|v| v.is_finite()).fold(0.0f64, |m, v| m.max(v.abs()));
-        1e-9 * m.max(1.0)
-    };
+/// 研磨の LP の双対値から [`POLISH_TOL_LEAK`] の (W_lp, W_mip) を計算する
+fn tol_leak_bound(p: &MipProblem, lp: &crate::simplex::mip_lp::TwoStageLp) -> (f64, f64) {
+    let b = |a: f64, c: f64| [a, c].iter().filter(|v| v.is_finite()).fold(0.0f64, |m, v| m.max(v.abs()));
+    let e_lp = |bb: f64| 1e-9 * bb.max(1.0);
+    let e_mip = |bb: f64| domain::FEASTOL + 1e-9 * bb;
     let y = lp.row_duals();
     let d = lp.reduced_costs();
-    let mut w = 0.0;
+    let (mut w1, mut w2) = (0.0, 0.0);
     for i in 0..p.m.min(y.len()) {
-        w += y[i].abs() * eps(p.row_lo[i], p.row_up[i]);
+        let bb = b(p.row_lo[i], p.row_up[i]);
+        w1 += y[i].abs() * e_lp(bb);
+        w2 += y[i].abs() * e_mip(bb);
     }
     for j in 0..p.n.min(d.len()) {
         if !p.is_int[j] {
-            w += d[j].abs() * eps(p.col_lo[j], p.col_up[j]);
+            let bb = b(p.col_lo[j], p.col_up[j]);
+            w1 += d[j].abs() * e_lp(bb);
+            w2 += d[j].abs() * e_mip(bb);
         }
     }
-    w
+    (w1, w2)
 }
 
 /// 研磨の LP の反復の上限 (試作 `ROOTPAR_PH` の `j`): `ENOMOTO_T_MIP_G5SEQ_C` (0.5) × (行 + 列)。1 スレッドの基底のない求解の
