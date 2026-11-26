@@ -26650,6 +26650,59 @@ impl<'a, L: MipLp> Solver<'a, L> {
         ok
     }
 
+    /// 診断 `ENOMOTO_MIP_RR_DIAG` (analysis/rootrestart_20261126、既定では出さない。値に打ち切り値 U を書けば、その U でも数える
+    /// (例: 既知の最適値)): 根の再スタートの判定の時点で、根の LP の被約費用で固定できる整数列の数 (今の打ち切り値と U で)、
+    /// HiGHS の数え方の固定の割合 (分母は前処理の後に自由だった整数列) を出す
+    fn rr_diag(&self) {
+        let Some(v) = env_str!("ENOMOTO_MIP_RR_DIAG") else { return };
+        let p = self.p;
+        let free_now = (0..p.n).filter(|&j| p.is_int[j] && self.dom.global_lo[j] < self.dom.global_up[j]).count();
+        let fixed_now = p.nint - free_now;
+        let count = |u: f64| -> (usize, usize) {
+            let Some((z, list)) = &self.root_redcost else { return (0, 0) };
+            let gap = u - z;
+            if !(gap.is_finite() && gap >= 0.0) {
+                return (0, 0);
+            }
+            let (mut fix, mut tight) = (0usize, 0usize);
+            for &(j, at_lower, d, bound) in list {
+                if !p.is_int[j] || self.dom.global_lo[j] == self.dom.global_up[j] {
+                    continue;
+                }
+                let w = gap / d.abs();
+                let range = self.dom.global_up[j] - self.dom.global_lo[j];
+                if w < 1.0 - 1e-6 {
+                    fix += 1;
+                } else if w < range - 1e-6 {
+                    tight += 1;
+                }
+                let _ = (at_lower, bound);
+            }
+            (fix, tight)
+        };
+        let (f1, t1) = count(self.prune_limit());
+        let u2 = v.parse::<f64>().ok();
+        let (f2, t2) = u2.map_or((0, 0), count);
+        eprintln!(
+            "RRDIAG restarts {} nint {} fixed-at-root-start {} fixed-now {} free-now {} | HiGHS-style inactive {:.1}% of free-at-root-start | redcost: list {} root z {:.10e}; with cutoff {:.10e}: fixable {} tightenable {}; with U {:?}: fixable {} tightenable {} | root LP {:.2}s",
+            self.params.restarts,
+            p.nint,
+            self.root_fixed0,
+            fixed_now,
+            free_now,
+            100.0 * (fixed_now.saturating_sub(self.root_fixed0)) as f64 / (p.nint.saturating_sub(self.root_fixed0)).max(1) as f64,
+            self.root_redcost.as_ref().map_or(0, |r| r.1.len()),
+            self.root_redcost.as_ref().map_or(f64::NAN, |r| r.0),
+            self.prune_limit(),
+            f1,
+            t1,
+            u2,
+            f2,
+            t2,
+            self.root_lp_secs,
+        );
+    }
+
     fn maybe_restart(&mut self) -> Option<MipResult> {
         let p = self.p;
         if self.params.restarts == 0 && !self.params.submip {
@@ -26693,6 +26746,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP: restart check: newly fixed {newly}, integer columns {nint}, free at the root {}, threshold {:.1}, root LP {:.2}s", nint.saturating_sub(self.root_fixed0), fac * denom as f64, self.root_lp_secs);
         }
         self.rstcrit_diag("check");
+        self.rr_diag();
         // `ENOMOTO_MIP_TREE_RESTART` (試作): 木の中の再スタートは固定の数をここでは見ない ([`Self::tree_restart_due`] が見る。`force` なら
         // HiGHS と同じく見ない)
         // 試作 `ENOMOTO_MIP_RSTROB` ([`rstrob_band`]): 固定の数が閾値の帯の中なら、数の条件と RSTCRIT の縮みの条件を帯の向きで決める
