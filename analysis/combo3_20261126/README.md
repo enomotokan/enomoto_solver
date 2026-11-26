@@ -58,3 +58,12 @@ OOM 2 回で確定する決まりもそのまま。
 
 集計: `python analysis/combo3_20261126/s2/summ.py > analysis/combo3_20261126/s2/summ.txt`
 (スレッド別 × 集合別 (M・240 問全部・残り)。../kind.json の「道筋」「揺れ」の問題は遅れに数えない。kind.json は combo2 のものの写し)。
+
+## 1.1 c3 の誤答の確かめ (`fuzz_c3.out`、188008a5d)
+
+- fuzz 7 本: 誤答 0 (fuzz_tiny 0/400・0/400、fuzz_highs 0/300、fuzz_objint 0/1000・0/1000、fuzz_slack mismatches 0 (1000・1000 回))。
+- cargo test: 424 通過・**1 失敗**。失敗は `mip::alns_cp::tests::adaptive_moves_like_cpsat` (src/mip/alns_cp.rs:244 の
+  `(c.value - 0.5).abs() < 0.1`)。ほかの子が足した試作 ALNS (a6beb833d) の単体の試験で、環境変数を読まない (`Adaptive` の増減だけを試す) ので、
+  c3 とは関係がない。既定でも同じく失敗する見込み (計測中で作り直せないので、まだ確かめていない)。
+- 注: 計測中に、この試験を確かめるつもりで cargo test を走らせ、約 2 分ビルドが重なった (すぐ止めた)。重なったのは分担 0 の
+  mzzv42z の c3_t4・def_t1 (種 1、どちらも 60 秒の時間切れ)。この 2 行は消して回し直す。
