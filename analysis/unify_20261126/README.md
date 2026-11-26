@@ -232,3 +232,26 @@
   - fuzz_bigact 2 本 0/300・0/300。seed 88 は HiGHS の取りこぼしで、4.1 節と同じ。
 - fuzz.sh を環境変数なしで回すと、最後の cargo test の行が `$2` 未設定で止まっていたので直した (cargo test は上の確かめで別に回している)。
 - docs/improvement_history.md に記録した。
+
+### 3.9 局所探索の違反行の集合の出し入れ `idxset::set_member` (1 節の 8)
+
+- 新しいモジュール `src/mip/idxset.rs` に `set_member(set, pos, i, on)` を置いた。違反行の集合 (並びと位置) に入れる・除く処理で、次の 4 か所が同じ 15 行を写して持っていた。
+  - 旧 FJ・`local_search` (heuristics.rs)
+  - `shift_and_propagate` (heur_shift.rs)
+  - Local-MIP (localmip.rs)
+- 最初に集合を作る 2 か所 (heuristics.rs) も同じ関数にした。
+- 動き: 除くときに末尾と入れ替える並び方が同じなので、乱択で選ぶ行も変わらない。
+- 確かめ: cargo test 424 通過、check_default 全部一致。
+
+### 3.10 区切りの fuzz と、環境変数の二重のキャッシュ (1 節の 13)
+
+- 区切りの fuzz (unify 8・9 の後、`fuzz_u9.out`):
+  - fuzz 7 本と fuzz_bigact 2 本は誤答 0。
+  - cargo test 424 通過。
+- 環境変数の二重のキャッシュを 12 か所で除いた。
+  - `env_str!`・`env_def!` はそれ自体が呼び出し箇所ごとに `OnceLock` でキャッシュする。それをさらに `OnceLock<String>` に写していたので、`env_str!(..).is_some_and(|v| v.contains(c))` の形にした。
+  - 場所: solver.rs 11 か所、heuristics.rs 1 か所。
+  - `gap4` の生の `std::env::var` の手書きは `env_def!("ENOMOTO_MIP_GAP4", "rocn")` と同じ意味だったので、そうした。`unify_fix` も同じ形にした。
+  - separation.rs (Gm3w の作業中) と、形の違うものは残した。
+  - 動き: 読む値と判定は同じ。
+- 確かめ: cargo test 424 通過、check_default 全部一致。

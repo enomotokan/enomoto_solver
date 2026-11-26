@@ -9,6 +9,7 @@
 
 /// 分枝切除法の LP とやり取りする型 (基底・結果・打ち切り条件)。
 pub(crate) mod lp;
+pub(crate) mod idxset;
 /// `ENOMOTO_MIP_FOLD` (既定): 色の細分化で MIP を畳む。
 pub(crate) mod fold;
 /// 完全単模の判定 (fold と implint_tu で共通)。
@@ -6698,6 +6699,9 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
     let (mut n_lwin, mut it_lc, mut n_lc) = (0usize, 0u64, 0usize);
     let mut tried: std::collections::HashSet<(usize, i64)> = std::collections::HashSet::new();
     let mut ok = true;
+    if lpprobe_diag() {
+        eprintln!("LPPDIAG first: rows {} cols {} nnz {} iters {root_iters} secs {root_secs:.3} per_lp {per_lp} iter_budget {iter_budget} giveup {giveup} giveup_iters {giveup_iters} work {work} par {} threads {par_threads}", prob.m, prob.n, prob.nnz, lpool.is_some());
+    }
     for pass in 0..passes {
         let x = lp.col_values();
         let mut cands: Vec<(usize, f64)> = (0..prob.n)
@@ -6787,7 +6791,13 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
                                             } else {
                                                 w.set_col_bounds(j, col_lo[j], v.floor());
                                             }
-                                            c[side] = w.solve(&SolveLimits { iteration_limit: per_lp.min(rem), deadline, ..Default::default() }) == LpStatus::Infeasible && !lp_inf_untrusted(&*w, n_cols);
+                                            let (td, itd) = (std::time::Instant::now(), w.total_iterations());
+                                            let st = w.solve(&SolveLimits { iteration_limit: per_lp.min(rem), deadline, ..Default::default() });
+                                            c[side] = st == LpStatus::Infeasible && !lp_inf_untrusted(&*w, n_cols);
+                                            if lpprobe_diag() {
+                                                let zc = if st == LpStatus::Optimal || st == LpStatus::IterationLimit { w.objective() } else { f64::NAN };
+                                                eprintln!("LPPDIAG child: col {j} v {v:.4} {} {st:?} iters {} secs {:.4} obj {zc:.6e} (window)", if is_up { "up" } else { "down" }, w.total_iterations() - itd, td.elapsed().as_secs_f64());
+                                            }
                                             w.restore_state(saved_r);
                                         }
                                         (c[0], c[1], w.total_iterations() - it0, crate::ticks::total() - tk0)
@@ -6817,7 +6827,13 @@ fn lp_probe(prob: &mut MipProblem, verbose: bool, secs: f64, try_fix: bool) -> O
                     }
                     // `ENOMOTO_MIP_PRESOLVE_WORK`: 反復の上限 `lp_iter_cap` を越えない (時間の期限で途中で止まる分を手間で決める)
                     let lim = if work { per_lp.min(lp_iter_cap.saturating_sub(tot_it(&lp)).max(1)) } else { per_lp };
-                    cut[side] = lp.solve(&SolveLimits { iteration_limit: lim, deadline, ..Default::default() }) == LpStatus::Infeasible && !lp_inf_untrusted(&lp, prob.n);
+                    let (td, itd) = (std::time::Instant::now(), lp.total_iterations());
+                    let st = lp.solve(&SolveLimits { iteration_limit: lim, deadline, ..Default::default() });
+                    cut[side] = st == LpStatus::Infeasible && !lp_inf_untrusted(&lp, prob.n);
+                    if lpprobe_diag() {
+                        let zc = if st == LpStatus::Optimal || st == LpStatus::IterationLimit { lp.objective() } else { f64::NAN };
+                        eprintln!("LPPDIAG child: col {j} v {v:.4} {} {st:?} iters {} secs {:.4} obj {zc:.6e} (seq, lim {lim})", if is_up { "up" } else { "down" }, lp.total_iterations() - itd, td.elapsed().as_secs_f64());
+                    }
                     n_lps += 1;
                     lp.restore_state(&saved);
                 }
@@ -7951,6 +7967,10 @@ thread_local! {
 /// 試作 `ENOMOTO_MIP_LPPROBE_TICKS` (analysis/scipsym_20261120/ 14・15 節、既定では使わない): LP による固定 ([`lp_probe`]) で固定がまだ 0 のとき、
 /// 子の LP に使った決定的な手間 (`crate::ticks`、窓で並べた写しの分も足す) が最初の LP の手間の `ENOMOTO_T_MIP_LP_PROBE_GIVEUP_TIME_MULT` (既定 1) 倍を
 /// 越えたらあきらめる (手間の既定 `ENOMOTO_MIP_PRESOLVE_WORK` のときだけ)。反復 x (行 + 列) の数えは 1 反復の重い密な問題 (cod105) で軽く出る
+/// 診断 `ENOMOTO_MIP_LPPROBE_DIAG` (analysis/lpprobe_20261126): 前処理の LP プロービングの子の LP ごとに、状態・反復・秒・目的値を stderr に出す
+pub(crate) fn lpprobe_diag() -> bool {
+    env_str!("ENOMOTO_MIP_LPPROBE_DIAG").is_some()
+}
 pub(crate) fn lpprobe_ticks() -> bool {
     env_str!("ENOMOTO_MIP_LPPROBE_TICKS").is_some_and(|v| v != "0")
 }
