@@ -1,0 +1,32 @@
+== fuzz_tiny: env ENOMOTO_MIP_REL_GAP=1e-9 python3 benchmarks/equiv2_bug_20261022/fuzz_tiny.py 400 0
+rc=0
+tol 61 highs Optimal -26.50000005229 ours optimal -35.54 許容誤差の内の差 (1e-10 の HiGHS -16.32)
+tol 81 highs Optimal -30.36000030836 ours optimal -37.53 許容誤差の内の差 (1e-10 の HiGHS -10.95000030853)
+tol 139 highs Optimal 0.0 ours optimal -1.90027e-06 許容誤差の内の差 (1e-10 の HiGHS -1.90027e-06)
+tol 148 highs Optimal -25.430000239920002 ours optimal -29.700000000000003 許容誤差の内の差 (1e-10 の HiGHS -5.980000807390001)
+tol 201 highs Optimal 0.0 ours optimal -1.11891e-06 許容誤差の内の差 (1e-10 の HiGHS -1.11891e-06)
+tol 246 highs Optimal 0.0 ours optimal -1.0485700000000002e-06 許容誤差の内の差 (1e-10 の HiGHS -1.04857e-06)
+tol 260 highs Optimal -3.11 ours optimal -11.629999999999999 許容誤差の内の差 (1e-10 の HiGHS -1.8241e-07)
+tol 324 highs Optimal -3.49 ours optimal -9.77 許容誤差の内の差 (1e-10 の HiGHS -7.3704e-07)
+tol 350 highs Optimal -14.07 ours optimal -18.71 許容誤差の内の差 (1e-10 の HiGHS -9.6459e-07)
+bad 0 of 400 time 3.3 (strict 9: 値の一致だけの以前の判定)
+== fuzz_objint: python3 analysis/objint_20261112/fuzz_objint.py 1000 0
+rc=0
+bad 0 of 1000 status {'optimal': 967, 'infeasible': 33} with nodes>0 352 new step 74 new step and nodes>0 5 c range with width 27 c and nodes>0 6 time 103.4
+== fuzz_tiny2: env ENOMOTO_MIP_REL_GAP=1e-9 python3 benchmarks/equiv2_bug_20261022/fuzz_tiny.py 400 1000
+rc=0
+tol 1007 highs Optimal 0.0 ours optimal -1.24034e-06 許容誤差の内の差 (1e-10 の HiGHS -1.24034e-06)
+tol 1024 highs Optimal 0.0 ours optimal -1.27963e-06 許容誤差の内の差 (1e-10 の HiGHS -1.27963e-06)
+tol 1139 highs Optimal 0.0 ours optimal -1.01927e-06 許容誤差の内の差 (1e-10 の HiGHS -1.01927e-06)
+tol 1153 highs Optimal -5.84 ours optimal -6.34 許容誤差の内の差 (1e-10 の HiGHS -1.1279900000000002e-06)
+tol 1168 highs Optimal 0.0 ours optimal -1.47084e-06 許容誤差の内の差 (1e-10 の HiGHS -1.47084e-06)
+tol 1195 highs Optimal -18.20999999139 ours optimal -18.48 許容誤差の内の差 (1e-10 の HiGHS -1.06391e-06)
+tol 1240 highs Optimal -23.30999999014 ours optimal -36.49 許容誤差の内の差 (1e-10 の HiGHS -10.600000000000001)
+tol 1246 highs Optimal -9.51 ours optimal -17.88 許容誤差の内の差 (1e-10 の HiGHS -6.324e-08)
+tol 1288 highs Optimal 0.0 ours optimal -1.17665e-06 許容誤差の内の差 (1e-10 の HiGHS -1.17665e-06)
+tol 1337 highs Optimal -15.0 ours optimal -21.759999999999998 許容誤差の内の差 (1e-10 の HiGHS -4.08000081519)
+tol 1387 highs Optimal 0.0 ours optimal -1.4847300000000004e-06 許容誤差の内の差 (1e-10 の HiGHS -1.4847300000000001e-06)
+bad 0 of 400 time 3.5 (strict 12: 値の一致だけの以前の判定)
+== fuzz_objint2: python3 analysis/objint_20261112/fuzz_objint.py 1000 5000
+rc=0
+bad 0 of 1000 status {'optimal': 971, 'infeasible': 29} with nodes>0 337 new step 80 new step and nodes>0 7 c range with width 26 c and nodes>0 2 time 120.9
