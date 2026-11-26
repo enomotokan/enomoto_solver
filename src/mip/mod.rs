@@ -8051,14 +8051,15 @@ thread_local! {
 /// 試作 `ENOMOTO_MIP_LPPROBE_TICKS` (analysis/scipsym_20261120/ 14・15 節、既定では使わない): LP による固定 ([`lp_probe`]) で固定がまだ 0 のとき、
 /// 子の LP に使った決定的な手間 (`crate::ticks`、窓で並べた写しの分も足す) が最初の LP の手間の `ENOMOTO_T_MIP_LP_PROBE_GIVEUP_TIME_MULT` (既定 1) 倍を
 /// 越えたらあきらめる (手間の既定 `ENOMOTO_MIP_PRESOLVE_WORK` のときだけ)。反復 x (行 + 列) の数えは 1 反復の重い密な問題 (cod105) で軽く出る
-/// 試作 `ENOMOTO_MIP_LPPROBE_FIX=<文字>` (analysis/lpprobe_20261126、既定では使わない): 前処理の LP プロービング ([`lp_probe`]) の直し。
+/// `ENOMOTO_MIP_LPPROBE_FIX=<文字>` (analysis/lpprobe_20261126、未設定は `d`): 前処理の LP プロービング ([`lp_probe`]) の直し。
 /// - `d` (結果を変えない): 子の LP の厳密な DSE 重みを使い回す ([`crate::simplex::slope_intercept_dual::lpprobe_dse_scope`])
 /// - `c` (結果が変わりうる): 子の LP 1 本の反復の上限 `per_lp` に、ここまでの効き目 (試した列のうち固定が出た割合) のシグモイドを掛ける。
 ///   効き目の対数オッズ (ラプラスの数え方) L = ln((固定 + 1) / (試した列 − 固定 + 1)) で 2σ(L) = 2 (固定 + 1) / (試した列 + 2) (1 で頭打ち)。
 ///   まだ何も試していなければ 1 (今と同じ)、固定のないまま列を試すほど縮む (2 列で 1/2、6 列で 1/4)。窓では窓の始めの値を使う (数えた量だけで決まる)。
 ///   P では結果を生む子 (実行不能) は上限の 0.55 倍以内で終わり、上限まで走る子は何も生まない (analysis/lpprobe_20261126 1.2 節)
+/// **未設定は `d` で既定で使う** (2026-11-26 に利用者の承認で既定化、analysis/lpprobe_20261126 5 節)。`=0`・`off` で切る。`c` は試作 (既定オフ)
 pub(crate) fn lpprobe_fix(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_LPPROBE_FIX").is_some_and(|v| v.contains(c))
+    env_def!("ENOMOTO_MIP_LPPROBE_FIX", "d").is_some_and(|v| v.contains(c))
 }
 
 /// 試作 `ENOMOTO_MIP_LPPROBE_FIX` の `c` ([`lpprobe_fix`]): 子の LP の反復の上限 `per_lp` に、試した列 `tried` のうち固定 `fixed` の効き目の
