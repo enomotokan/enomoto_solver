@@ -1277,23 +1277,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let sub = super::problem::MipProblem::from_rows(lo, up, cost, offset, 1.0, p.is_int.clone(), rows, row_lo, row_up);
         // `SUBMIP_TICKS` の `f`: 時間の上限は手間の上限の 10 倍 (壁時計の残りで頭打ち) の安全網
         let time_limit = if tk_f { (10.0 * cap).min(wall_left) } else { cap };
-        let params = super::solver::MipParams {
-            time_limit,
-            node_limit: ((500.0 * fa).round() as u64).max(1),
-            rel_gap: 0.0,
-            abs_gap: 1e-9,
-            verbose: false,
-            submip: true,
-            cutoff: f64::INFINITY,
-            restarts: 0,
-            skip_heurs: 0,
-            threads: 1,
-            distinguish: false,
-            fc_submip: false,
-            tl_base: f64::NAN,
-            // 乱数の種は親のものを渡す
-            seed: self.params.seed,
-        };
+        let params = super::solver::MipParams::submip_base(time_limit, ((500.0 * fa).round() as u64).max(1), self.params.seed);
         let tk_prev = tk_f.then(|| crate::ticks::push_budget(cap.max(0.0) * 1e9));
         let res = super::solve_problem(&sub, params, true);
         if let Some(prev) = tk_prev {
@@ -2212,16 +2196,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             abs_gap: self.params.abs_gap.max(1e-6),
             // 診断用: `ENOMOTO_MIP_SUBMIP_VERBOSE` ならサブ MIP の経過も出す
             verbose: self.params.verbose && env_str!("ENOMOTO_MIP_SUBMIP_VERBOSE").is_some(),
-            submip: true,
             cutoff: cutoff.unwrap_or_else(|| self.prune_limit()),
-            restarts: 0,
-            skip_heurs: 0,
-            threads: 1,
-            distinguish: false,
             fc_submip: self.fc_submip,
-            tl_base: f64::NAN,
-            // 乱数の種は親のものを渡す
-            seed: self.params.seed,
+            // 時間・ノードの上限は上で与えた (土台の値は使わない)
+            ..super::solver::MipParams::submip_base(time_limit, 0, self.params.seed)
         };
         // 今の LP の基底 (列の状態) をサブ MIP の根の LP の初めの基底にする (HiGHS の `rootbasis`。`ENOMOTO_MIP_NO_SUBMIP_BASIS` で
         // 使わない)。停滞による打ち切り (`ENOMOTO_T_MIP_SUBMIP_STALL`) と合わせて 93 問 (4 スレッド・60 秒、2 回): 主ギャップの和

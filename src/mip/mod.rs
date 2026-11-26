@@ -5249,21 +5249,13 @@ fn clqprb_shadow_locks(p: &MipProblem, params: MipParams, pre_submip: bool, lp_p
         }
     }
     let sp = MipParams {
-        time_limit: tunable!("ENOMOTO_T_MIP_CLQPRB_H_SECS", 30.0, f64).min(0.1 * params.time_limit),
-        node_limit: tunable!("ENOMOTO_T_MIP_CLQPRB_H_NODES", 500u64, u64),
         rel_gap: params.rel_gap.max(1e-4),
         abs_gap: params.abs_gap.max(1e-6),
-        verbose: false,
-        submip: true,
-        cutoff: f64::INFINITY,
-        restarts: 0,
-        skip_heurs: 0,
-        threads: 1,
-        distinguish: false,
-        fc_submip: false,
-        tl_base: f64::NAN,
-        // 乱数の種は親のものを渡す
-        seed: params.seed,
+        ..MipParams::submip_base(
+            tunable!("ENOMOTO_T_MIP_CLQPRB_H_SECS", 30.0, f64).min(0.1 * params.time_limit),
+            tunable!("ENOMOTO_T_MIP_CLQPRB_H_NODES", 500u64, u64),
+            params.seed,
+        )
     };
     let r = solve_problem(&sub, sp, true);
     let found = r.x.filter(|x| x.len() == q.n).map(|mut x| {
