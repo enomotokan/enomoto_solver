@@ -2387,8 +2387,7 @@ fn flat_changes(n: &OpenNode) -> Vec<BoundChange> {
 ///
 /// n3div36 (4 スレッド・300 秒) は既定で子の変更の並びが平均 562 本 (深さ 90)、共有の待ち行列の変更が 254 MB、最大 RSS 3453 MB、`TC=0` は 1307 MB
 fn g5inh(c: char) -> bool {
-    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_str!("ENOMOTO_MIP_G5INH").map_or(String::new(), |v| v.to_string())).contains(c)
+    env_str!("ENOMOTO_MIP_G5INH").is_some_and(|v| v.contains(c))
 }
 
 /// `ENOMOTO_MIP_INHPOOL` (既定で使う。`=0` で従来の展開。analysis/biglp_20261121/ の 8 節): 共有の待ち行列へ出すノード ([`SnapNode`]) に
@@ -3034,16 +3033,14 @@ fn mem2(c: char) -> bool {
 /// `l`: カットの非零を 100 + 0.15 × 列 までに短くする (HiGHS の `postprocessCut`、[`super::separation`] の `finish_cut`)。
 /// `o`: 木のスレッドに渡す対称性の前の問題 (`orig`) の写しから含意を除く。`c`: 密なカットをカットのプールの伝播に入れない (HiGHS と同じ規則)。
 pub(super) fn gap4(c: char) -> bool {
-    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| std::env::var("ENOMOTO_MIP_GAP4").map(|v| if v == "0" || v == "off" { String::new() } else { v }).unwrap_or_else(|_| "rocn".to_string())).contains(c)
+    env_def!("ENOMOTO_MIP_GAP4", "rocn").is_some_and(|v| v.contains(c))
 }
 
 /// 試作 `ENOMOTO_MIP_G5POOL=<文字>` (既定では使わない。analysis/vsscip_slow_20261118/g5/README.md): カットのプールの持ち物を抑える。
 /// - `d`: 上限を見ずにプールに入れる経路 (`pool_nocap`: 双対証明の CMIR (`ENOMOTO_MIP_PROOF_CMIR_POOL` の既定 `nocap`) など) でも、密なカットは
 ///   非零の上限を見る。n3div36 (4 スレッド・600 秒) は双対証明の CMIR が 1996 本入り、主のプールが上限 (問題の非零の 20 倍) を越えて 1621 万非零になっていた
 pub(super) fn g5pool(c: char) -> bool {
-    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_str!("ENOMOTO_MIP_G5POOL").map_or(String::new(), |v| v.to_string())).contains(c)
+    env_str!("ENOMOTO_MIP_G5POOL").is_some_and(|v| v.contains(c))
 }
 
 /// 診断用 `ENOMOTO_MIP_GAP4_RSS=<秒>` (既定では出さない。analysis/gap4_rootstuck_mem_20261109.md): その秒おきに RSS と生きている
@@ -3419,8 +3416,7 @@ pub(super) fn proofcost(c: char) -> bool {
 /// (`l` (リテラルの衝突の伝播で、境界の変更と同じ向きのリテラルを持つ衝突だけを調べる) も試して取り下げた: リテラルの衝突の時間は減らず
 /// (noswot 1 スレッド 2.7 → 3.7 秒)、衝突の年齢の数え方が変わって道筋が変わるだけだった。analysis/proofprop_20261123 の 4 節)
 pub(crate) fn proofprop(c: char) -> bool {
-    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_str!("ENOMOTO_MIP_PROOFPROP").map_or(String::new(), |v| v.to_string())).contains(c)
+    env_str!("ENOMOTO_MIP_PROOFPROP").is_some_and(|v| v.contains(c))
 }
 
 fn prof_tree_par() -> bool {
@@ -3961,8 +3957,7 @@ pub(super) fn tree_share_cuts() -> bool {
 /// - `r`: 従が写しの根のカットプールを入れる間は取り込み中にして、学習の記録に流し直さない (根のプールが大きいと輪から
 ///   証明・衝突・カットを押し出す)
 pub(crate) fn par4(c: char) -> bool {
-    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_def!("ENOMOTO_MIP_PAR4", "fmr").map_or(String::new(), |v| v.to_string())).contains(c)
+    env_def!("ENOMOTO_MIP_PAR4", "fmr").is_some_and(|v| v.contains(c))
 }
 
 /// 学習の記録に加える (古いものから捨てて `ENOMOTO_T_MIP_TREE_LEARNED_MAX` 件まで残す)。
@@ -4129,8 +4124,7 @@ pub(super) fn suba_cut() -> bool {
 ///   `ENOMOTO_T_MIP_SUBA_NOIMP` (既定 100) ノードで止める (cod105 の根の RINS は 1 ノード 0.7 秒で、`SUBA_CUT` だと 238 秒走った)
 /// - `o`: 外側の根のサブ MIP の成果連動の打ち切りを使わない (ノード上限・時間・停滞だけ。HiGHS の `solveSubMip` に成果連動はない)
 pub(super) fn suba_stop(c: char) -> bool {
-    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_str!("ENOMOTO_MIP_SUBA_STOP").map_or(String::new(), |v| v.to_string())).contains(c)
+    env_str!("ENOMOTO_MIP_SUBA_STOP").is_some_and(|v| v.contains(c))
 }
 
 /// `ENOMOTO_MIP_SUBCAP=<文字>` (試作、既定では使わない。analysis/submip_cap_20261106.md): 1 ノードが重い外側の根のサブ MIP
@@ -4157,8 +4151,7 @@ pub(super) fn suba_stop(c: char) -> bool {
 ///   良くならなければやめる)。HiGHS は再スタートの後の根でもう一度 RENS を回し、良くなった暫定解からまたサブ MIP を回す
 ///   (neos-4722843-widden: 26340 → 25109 → 25009 (最適) を 172 秒までに根で)。ENOMOTO の根の RINS は成果連動の打ち切りで 54 ノードで止まり、木に入る
 pub(crate) fn incumb_on(c: char) -> bool {
-    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_str!("ENOMOTO_MIP_INCUMB").map_or(String::new(), |v| v.to_string())).contains(c)
+    env_str!("ENOMOTO_MIP_INCUMB").is_some_and(|v| v.contains(c))
 }
 
 /// 試作 `ENOMOTO_MIP_OBJDIVE` (analysis/objdive_20261121、既定では使わない): 木のダイビングの種類の巡回に目的を外したダイビング
@@ -4176,8 +4169,7 @@ pub(crate) fn objdive_on() -> bool {
 /// - `e`: 手間あたりの実績で配る: 種類ごとの割合を `ENOMOTO_T_MIP_DIVEQUOTA_FRAC` × (種類の解の数 + 1) / (種類の LP 反復 / ノードの LP 反復 + 1)
 ///   で決める (`s` の呼び出し回数の代わりに使った手間で割る。見つけるほど増え、使って見つけないほど減るが 0 にはならない)
 pub(crate) fn divequota(c: char) -> bool {
-    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_str!("ENOMOTO_MIP_DIVEQUOTA").map_or(String::new(), |v| v.to_string())).contains(c)
+    env_str!("ENOMOTO_MIP_DIVEQUOTA").is_some_and(|v| v.contains(c))
 }
 
 /// 試作 `ENOMOTO_MIP_HEUR1T=<文字の並び>` (既定では使わない、analysis/heur1t_20261123): 1 スレッドの外側の根のサブ MIP の扱いを 4 スレッドに揃える。
@@ -4194,8 +4186,7 @@ pub(crate) fn divequota(c: char) -> bool {
 /// - `d`: 外側が 1 スレッドのとき、外側の根で前に解いたサブ MIP と同じ問題 (列の境界・行の数・打ち切り値が同じ) のサブ MIP は解かない
 ///   (10teams では暫定解のない根の被約費用のサブ MIP と LP face が同じ固定になり、同じ計算を 2 回する)。
 pub(crate) fn heur1t(c: char) -> bool {
-    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_str!("ENOMOTO_MIP_HEUR1T").map_or(String::new(), |v| v.to_string())).contains(c)
+    env_str!("ENOMOTO_MIP_HEUR1T").is_some_and(|v| v.contains(c))
 }
 
 /// 試作 `ENOMOTO_MIP_HEUR_ADAPT=1` (既定では使わない。analysis/heuradapt_20261124/README.md): 1 スレッドの解探しの試作
@@ -4228,8 +4219,7 @@ pub(crate) fn heur_adapt() -> bool {
 /// - `m`: FP の第 3 段 (`fp_stage3`) を、外側の根から出したサブ MIP の中では回さない (analysis/comboharm_20261124/neos-1582420.md)
 /// - `k`: f_t ([`Solver::adapt_tree_f`]) の経過・残りを壁時計でなく手間の秒で数える (analysis/comboharm_20261124/README.md 10 節)
 pub(crate) fn heur_adapt_flag(c: char) -> bool {
-    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    heur_adapt() && V.get_or_init(|| env_str!("ENOMOTO_MIP_HEUR_ADAPT").map_or(String::new(), |v| v.to_string())).contains(c)
+    heur_adapt() && env_str!("ENOMOTO_MIP_HEUR_ADAPT").is_some_and(|v| v.contains(c))
 }
 
 fn adapt_sigmoid(z: f64) -> f64 {
@@ -4237,8 +4227,7 @@ fn adapt_sigmoid(z: f64) -> f64 {
 }
 
 pub(crate) fn subcap(c: char) -> bool {
-    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_str!("ENOMOTO_MIP_SUBCAP").map_or(String::new(), |v| v.to_string())).contains(c)
+    env_str!("ENOMOTO_MIP_SUBCAP").is_some_and(|v| v.contains(c))
 }
 
 /// 改良 (11-08) の文字 ([`subcap`]):
@@ -4694,9 +4683,7 @@ impl Drop for LmboostBg {
 /// - `t`: `try_lp_solution` の整数を固定した LP を、元の費用で解き、反復を累計に入れない ([`Solver::with_fixed_int_lp`]、
 ///   `resolve_continuous` と同じ)
 pub(crate) fn unify_fix(c: char) -> bool {
-    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    let v = V.get_or_init(|| env_def!("ENOMOTO_MIP_UNIFY_FIX", "1").map_or(String::new(), |v| v.to_string()));
-    v == "1" || v.contains(c)
+    env_def!("ENOMOTO_MIP_UNIFY_FIX", "1").is_some_and(|v| v == "1" || v.contains(c))
 }
 
 /// 試作 `ENOMOTO_MIP_LMBOOST` (COMP07、既定では使わない): [`Solver::lmip_boost`]。
@@ -6495,8 +6482,7 @@ pub(super) fn pool_close_on() -> bool {
 /// `j`: 研磨の LP (温めた単体法、`i` なら LP の中の研磨) に反復の上限 `G5SEQ_C` × (行 + 列) を付け、上限に当たれば基底を捨てて
 /// 基底のない求解の既存の入口 (空いたスレッドがあれば同時実行、なければ二段解法 → 内点法 + クロスオーバー) で解き直す
 pub(super) fn rootpar_ph(c: char) -> bool {
-    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_str!("ENOMOTO_MIP_ROOTPAR_PH").map_or(String::new(), |v| v.to_string())).contains(c)
+    env_str!("ENOMOTO_MIP_ROOTPAR_PH").is_some_and(|v| v.contains(c))
 }
 
 /// プールから戻すラウンドの伸びを測るか (`POOL_CLOSE` か、`NODEROWS_ADAPT` の `p`)
