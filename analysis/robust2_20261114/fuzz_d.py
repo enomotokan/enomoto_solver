@@ -3,7 +3,7 @@
 python fuzz_d.py 問題数 [開始seed]   (環境変数はそのまま渡る。ENOMOTO_MIP_ORDINV=edpq などを付けて回す)"""
 import random, sys, time
 import highspy
-from enomoto_solver import Model, Variable
+from enomoto_solver import Model
 inf = float("inf")
 def gen(seed):
     g = random.Random(seed)
@@ -74,7 +74,7 @@ def ours(lp, perm):
     n = len(lo); g = random.Random(perm); cp = list(range(n)); rp = list(range(len(rows)))
     if perm: g.shuffle(cp); g.shuffle(rp)
     M = Model(); xs = [None] * n
-    for j in cp: xs[j] = Variable(int if it[j] else float, lo[j], up[j])
+    for j in cp: xs[j] = M.add_variable(int if it[j] else float, lo[j], up[j])
     M.set_objective(sum(cc * x for cc, x in zip(c, xs)))
     for i in rp:
         r, l, u = rows[i], rlo[i], rup[i]

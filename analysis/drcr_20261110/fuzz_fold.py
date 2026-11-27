@@ -8,7 +8,7 @@ python analysis/drcr_20261110/fuzz_fold.py 問題数 [開始seed] [lp|mip]
 (供給・需要が同じ値の組、費用が同じ組) にする (整数の組の畳み、段階 3 用)。一部では 1 つの係数を変えて対称性を崩す。
 """
 import random, sys, time, highspy
-from enomoto_solver import Model, Variable
+from enomoto_solver import Model
 
 inf = float('inf')
 MODE = sys.argv[3] if len(sys.argv) > 3 else "mip"
@@ -98,7 +98,7 @@ def highs(lp):
 
 def ours(lp):
     lo, up, c, it, rows, rlo, rup = lp
-    M = Model(); xs = [Variable(int if it[j] else float, lo[j], up[j]) for j in range(len(lo))]
+    M = Model(); xs = [M.add_variable(int if it[j] else float, lo[j], up[j]) for j in range(len(lo))]
     M.set_objective(sum(cc * x for cc, x in zip(c, xs)))
     for r, l, u in zip(rows, rlo, rup):
         e = sum(v * xs[j] for j, v in r)

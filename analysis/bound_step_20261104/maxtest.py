@@ -1,7 +1,7 @@
 import random, sys
-from enomoto_solver import Model, Variable
+from enomoto_solver import Model
 g = random.Random(5); n = 60
-M = Model(); xs = [Variable(int, 0, 3) for _ in range(n)]
+M = Model(); xs = [M.add_variable(int, 0, 3) for _ in range(n)]
 w = [g.randint(20, 99) + 0.37 for _ in range(n)]; v = [g.randint(20, 99) for _ in range(n)]
 for k in range(4):
     M.add_constraint(sum(g.randint(20, 99) * x for x in xs) <= 2500 + 37 * k)
