@@ -1695,6 +1695,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     dive_succ: u64,
     /// 試作 `ENOMOTO_MIP_DIVEQUOTA` ([`divequota`]): 種類ごと ([`super::heuristics::DiveKind::idx`]) の (呼び出し回数, 解を見つけた回数, LP 反復数)。
     dive_k: [(u64, u64, u64); 9],
+    /// 試作 `ENOMOTO_MIP_DIVEBUDGET` ([`divebudget_on`]): 今のダイビングが木の中の SCIP の形 (LP 1 回に最低 `DIVE_MINLPITER` 反復、
+    /// LP を解く頻度 `lpsolvefreq` 0) か、木の中のダイビングに使った秒
+    pub(super) dive_scip: bool,
+    dive_secs: f64,
     /// 証明の段階の検出 (`ENOMOTO_MIP_PROOF_SWITCH`、[`Self::proof_phase_check`]): 木を分け合わないときの印、最初の
     /// 暫定解の目的値、最後に最良値が良くなった (と気づいた) 時刻とその値、前回調べた時刻。
     proof_phase: bool,
@@ -4189,6 +4193,24 @@ pub(crate) fn lsdive_on() -> bool {
     *V.get_or_init(|| env_str!("ENOMOTO_MIP_LSDIVE").is_some_and(|v| v != "0" && v != "off"))
 }
 
+/// 試作 `ENOMOTO_MIP_DIVEBUDGET` (analysis/divebudget_20261127、既定は切): 木の中のダイビングの LP 反復の上限を、種類ごとに独立に持つ
+/// (SCIP の `getDivesetIterLimit`、src/scip/heuristics.c)。
+/// - 上限 = 0.05 × (10 × 最良解の数 + 解の数 + 1) / (呼んだ数 + 1) × ノードの LP 反復 + 1000 − その種類が使った反復。
+///   0.05・1000 は SCIP のダイビングの既定 (`maxlpiterquot`・`maxlpiterofs`)、10 は `SCIPdivesetGetSolSuccess` の重み。
+///   当方のダイビングの解は暫定解を良くしたときだけ数える (最良解でもある) ので、成功 1 回を 11 と数える。
+/// - 上限が尽きた種類は回さない。残りが `DIVE_MINLPITER` (SCIP の `MINLPITER` 10000) より少なくても 1 回には `DIVE_MINLPITER` を許し、
+///   LP 1 回にも最低 `DIVE_MINLPITER` を許す (SCIP の `solveLP`)。
+/// - LP を解く頻度は SCIP の既定 (`lpsolvefreq` 0): 同じ LP 解の候補を点数の順に伝播しながら続けて固定し、変わった境界が列の数の
+///   0.15 倍 (`lpresolvedomchgquot`) を超えたら解き直す (線探索ダイビングの形を全種類に)。
+/// - 種類の選び方は今の巡回のまま (上限の尽きた種類は飛ばす)。全種類で共有の上限 (`dive_calls`・`dive_iters`) は使わない。
+pub(crate) fn divebudget_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_MIP_DIVEBUDGET").is_some_and(|v| v != "0" && v != "off"))
+}
+
+/// SCIP の `MINLPITER` (src/scip/heuristics.c): ダイビングの LP 1 回に許す最低の反復
+pub(crate) const DIVE_MINLPITER: u64 = 10_000;
+
 pub(crate) fn objdive_on() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_str!("ENOMOTO_MIP_OBJDIVE").is_some_and(|v| v != "0" && v != "off"))
@@ -6667,6 +6689,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         dive_calls: 0,
         dive_succ: 0,
         dive_k: [(0, 0, 0); 9],
+        dive_scip: false,
+        dive_secs: 0.0,
         proof_phase: false,
         proof_first_z: f64::INFINITY,
         proof_last_best: (f64::INFINITY, Instant::now()),
@@ -16573,7 +16597,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let quota = (0.05 * (self.dive_succ + 1) as f64 / (self.dive_calls + 1) as f64 * self.node_iters as f64) as u64 + 1000;
                         // 試作 `ENOMOTO_MIP_DIVEQUOTA` の `s`・`e` ([`divequota`]): 種類ごとの上限で選ぶ
                         let dq = divequota('s') || divequota('e');
-                        if (dq || self.dive_iters < quota) && env_str!("ENOMOTO_MIP_NO_NODE_DIVE").is_none() {
+                        let db = divebudget_on();
+                        if (dq || db || self.dive_iters < quota) && env_str!("ENOMOTO_MIP_NO_NODE_DIVE").is_none() {
                             // 種類を順に回す (SCIP の各ダイビングに相当。誘導は暫定解があるときだけ)
                             use super::heuristics::DiveKind as K;
                             let kinds: &[K] = if env_str!("ENOMOTO_MIP_DIVE_OLD_KINDS").is_some() {
@@ -16605,7 +16630,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 (r * frac_q * ni) as u64 + 1000
                             };
                             // (種類, 反復の上限)。`dq` なら巡回の順で、自分の上限に余裕のある最初の種類
-                            let sel: Option<(K, u64)> = if dq {
+                            // `ENOMOTO_MIP_DIVEBUDGET` ([`divebudget_on`]): SCIP の `getDivesetIterLimit` (種類ごと、成功 1 回 = 10 + 1)
+                            let sel: Option<(K, u64)> = if db {
+                                (0..kinds.len()).map(|i| kinds[(self.dive_calls as usize + i) % kinds.len()]).find_map(|k| {
+                                    let st = self.dive_k[k.idx()];
+                                    let lim = (0.05 * (11 * st.1 + 1) as f64 / (st.0 + 1) as f64 * ni) as u64 + 1000;
+                                    (st.2 < lim).then(|| (k, (lim - st.2).max(DIVE_MINLPITER)))
+                                })
+                            } else if dq {
                                 (0..kinds.len()).map(|i| kinds[(self.dive_calls as usize + i) % kinds.len()]).find_map(|k| {
                                     let st = self.dive_k[k.idx()];
                                     let q = kq(st);
@@ -16626,7 +16658,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 K::LineSearch => "tree line search diving",
                                 _ => "tree diving",
                             };
+                            self.dive_scip = db;
+                            let td = Instant::now();
                             let ok = self.dive(kind, budget, bound);
+                            self.dive_secs += td.elapsed().as_secs_f64();
+                            self.dive_scip = false;
                             if ok {
                                 self.dive_succ += 1;
                             }
@@ -31411,6 +31447,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP: branching: {} selections, {} without strong branching for dual degeneracy; sb LPs {} iters {}", self.sb_degen_stats[0], self.sb_degen_stats[1], self.sb_lps, self.sb_iters);
             if sbdegen_on() {
                 eprintln!("MIP: SBDEGEN: strong-branching nodes {}, changed the pseudocost pick {} (s = {:.3})", self.sbdg_stats[0], self.sbdg_stats[1], (self.sbdg_stats[1] + 1) as f64 / (self.sbdg_stats[0] + 2) as f64);
+            }
+            if divebudget_on() || env_str!("ENOMOTO_MIP_DIVEBUDGET_STAT").is_some() {
+                eprintln!("MIP: DIVEBUDGET: tree dives by kind (calls, found, iterations) {:?}, tree dive secs {:.2} of {:.2}, node iters {} (tid {})", self.dive_k, self.dive_secs, self.start.elapsed().as_secs_f64(), self.node_iters, self.pool_tid);
             }
             if lsdive_on() {
                 eprintln!("MIP: LSDIVE: tree dives by kind (calls, found, iterations) {:?} (tid {})", self.dive_k, self.pool_tid);
