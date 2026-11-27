@@ -2,8 +2,9 @@
 下界の積分は summ.py・summ2.py と同じ定義 (進みの行の lb と、djc では受け取った下界)。
 ただし進みの行の lb は、最後に報告される下界より高いことがある (lectsched-5-obj の既定は 292 秒で 23、最後は 15)。
 そのため、最後に報告された下界のギャップ g = (opt−lb)/max(|opt|,|lb|,1) も並べる (こちらが確かな値)。
-暫定解 (primal) は最後の値。証明の数は OBJSHAVE: tries の行から読む (proved = 示せた、time limit = 空振り)。"""
-import json, math, re
+暫定解 (primal) は最後の値。証明の数は logs3/ の試しの行 (「cutoff … -> 」) から数える (proved = 示せた、それ以外 = 空振り、FJ = 証明の前の FJ が解を見つけた)。
+「OBJSHAVE: tries」の要約の行は最後の一番外の求解の分しか出ない (milo-v12-6-r2-40-1 では再スタートの前に示した 3 回が入らない) ので使わない。"""
+import gzip, json, math, re
 from pathlib import Path
 D = Path(__file__).resolve().parent
 rows = [json.loads(l) for l in (D / "res3.jsonl").read_text().splitlines()]
@@ -18,7 +19,8 @@ def integral(r):
         t = min(t, end); acc += g(opt, cur) * (t - tprev); tprev = t; cur = max(cur, lb)
     return acc + g(opt, cur) * max(0.0, end - tprev)
 def stat(r, k):
-    m = re.search(k + r" (\d+)", r["summary"] or ""); return int(m[1]) if m else 0
+    ls = [l for l in gzip.decompress((D / "logs3" / f"{r['problem']}_{r['cfg']}.log.gz").read_bytes()).decode().splitlines() if "OBJSHAVE: L " in l and " -> " in l]
+    return {"tries": len(ls), "proved": sum(" proved (" in l for l in ls), "fj found": sum("FJ/Local-MIP found" in l for l in ls)}[k]
 by = {}
 for r in rows: by.setdefault(r["problem"], {})[r["cfg"]] = r
 print(f"TL {rows[0]['tl']} 秒、4 スレッド・種 1、ビルド a083189b8。積分は秒、g は最後の下界のギャップ (どちらも小さいほど良い)")
