@@ -2,7 +2,7 @@
 支配集合 (オービトープにならない対称性) を HiGHS の最適値と突き合わせる。
 python fuzz_of.py 問題数 [開始seed]"""
 import random, sys, itertools, highspy
-from enomoto_solver import Model, Variable
+from enomoto_solver import Model
 
 inf = float('inf')
 SCALE = int(sys.argv[3]) if len(sys.argv) > 3 else 1
@@ -77,7 +77,7 @@ def solve_highs(lo, up, c, rows, rlo, rup):
 
 
 def solve_ours(lo, up, c, rows, rlo, rup):
-    M = Model(); xs = [Variable(int, lo[j], up[j]) for j in range(len(lo))]
+    M = Model(); xs = [M.add_variable(int, lo[j], up[j]) for j in range(len(lo))]
     M.set_objective(sum(cc * x for cc, x in zip(c, xs)))
     for r, l, u in zip(rows, rlo, rup):
         e = sum(v * xs[j] for j, v in r)

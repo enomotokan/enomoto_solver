@@ -95,11 +95,11 @@ pip install dist/enomoto_solver-*.whl
 
 ```python
 import math
-from enomoto_solver import Model, Variable
+from enomoto_solver import Model
 
 M = Model()
-x = Variable(float, 0, 10)          # 連続変数 0 <= x <= 10
-y = Variable(float, 0, math.inf)    # 上下限は無限でもよい
+x = M.add_variable(float, 0, 10)          # 連続変数 0 <= x <= 10
+y = M.add_variable(float, 0, math.inf)    # 上下限は無限でもよい
 M.set_objective(x + 2 * y, sense="maximize")
 M.add_constraint(x + y <= 10)
 M.add_constraint(x - y >= -4)
@@ -109,7 +109,18 @@ print(sol.status, sol.objective)    # optimal 17.0
 print(x.value, y.value)             # 3.0 7.0
 ```
 
-- `Variable(型, 下限, 上限)` は，最後に作った `Model` に変数を作ります(`model=...` で明示することもできます)．型は `float`(連続)か `int`(整数)です．上下限には `±math.inf` を使えます(整数変数でもかまいません)．自由変数は `Variable(float, -math.inf, math.inf)` です．
+- `M.add_variable(型, 下限, 上限, name=None)` で，モデル `M` に変数を作ります．型は `float`(連続)か `int`(整数)です．上下限には `±math.inf` を使えます(整数変数でもかまいません)．自由変数は `M.add_variable(float, -math.inf, math.inf)` です．`Variable(...)` を直接呼ぶことはできません(どのモデルに入るかを明らかにするため)．
+- 変数を `for` で 1 つずつ作っても速さは問題ありません(1 個あたり約 2 マイクロ秒，100 万個で約 2 秒)．
+- 多くの項の和は `quicksum(...)` で作ってください．組み込みの `sum(...)` は途中の和を毎回複製するので，項の数の二乗の手間がかかります(1 万項で約 0.5 秒，10 万項で約 50 秒)．`f += 項` もその場で足し込むので速く書けます．
+
+  ```python
+  from enomoto_solver import quicksum
+  xs = [M.add_variable(int, 0, 1) for _ in range(n)]
+  M.set_objective(quicksum(c[i] * xs[i] for i in range(n)), sense="maximize")
+  M.add_constraint(quicksum(w[i] * xs[i] for i in range(n)) <= cap)
+  ```
+
+  `quicksum` には変数・式・数値を混ぜて渡せます．式が 1 つもなければ数値の和(空なら `0.0`)を返します．
 - 線型式は `+`，`-`，スカラー倍，数値での割り算で，制約は `<=`，`>=`，`==` で書きます．目的関数と制約は線型式に限ります．変数どうしの積(`x * y`)，べき乗(`x ** 2`)，式での割り算(`1 / x`)のように二次以上になる式を作ると，線型でないことを示す `TypeError` になります．
 - `set_objective(f, sense="minimize" | "maximize")` で目的関数を設定します(既定は最小化)．
 - `solve()` の引数(すべて省略可)：
@@ -144,7 +155,7 @@ print(x.value, y.value)             # 3.0 7.0
 
 ```python
 M = Model()
-z = Variable(float, -math.inf, math.inf)
+z = M.add_variable(float, -math.inf, math.inf)
 M.set_objective(z)                  # z を最小化
 M.add_constraint(z <= 5)
 
@@ -171,9 +182,9 @@ print(sol.status)                   # unbounded
 
 ```python
 M = Model()
-items = [(Variable(int, 0, 1), value, weight) for value, weight in [(60, 10), (100, 20), (120, 30)]]
-M.set_objective(sum(v * value for v, value, _ in items), sense="maximize")
-M.add_constraint(sum(v * weight for v, _, weight in items) <= 50)
+items = [(M.add_variable(int, 0, 1), value, weight) for value, weight in [(60, 10), (100, 20), (120, 30)]]
+M.set_objective(quicksum(v * value for v, value, _ in items), sense="maximize")
+M.add_constraint(quicksum(v * weight for v, _, weight in items) <= 50)
 sol = M.solve(time_limit=60)
 print(sol.objective, [round(v.value) for v, _, _ in items])   # 220.0 [0, 1, 1]
 print(sol.best_bound, sol.mip_gap, sol.nodes)                 # 220.0 0.0 0
