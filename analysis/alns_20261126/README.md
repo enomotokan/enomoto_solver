@@ -345,3 +345,22 @@ OR-Tools CP-SAT の LNS (ortools/sat/cp_model_lns.{h,cc}、ortools/util/adaptati
   - alnsb の 7.420 と同じで、良さは保たれた。def は 7.982。
   - 問題ごとの値: neos-1456979 0.322、lectsched 0.432、kakapo 0.909、trento1 0.966、comp21 0.850。
 - 次の P は、3f7265069 (qiu の not_solved の直し) と、既定になった ENOMOTO_SIMPLEX_RETRY_ZMAX を取り込んだ 0d84a7e1d のビルドで回す。分担表は shards_Pc.json・shards_Pc1.json。
+
+### 8.4 P (alnsc、6 分担、ビルド 0d84a7e1d (手伝いは 74eaae18f、src・python は同じ)、crash 0)
+
+- 分担表 shards_Pc.json・shards_Pc1.json。結果は res_Pc_s0〜5.jsonl・res_Pc1_s0〜5.jsonl (各 348 回)。
+- 分担 0 は私、1〜5 は手伝い (FcsJ・FKBv・HwBw・GU3WAp・GZRx)。
+
+| 組 | alnsc/def (95% 区間) | 解けた数 def / alnsc | 全回で 1.25 倍超の遅れ |
+|---|---|---|---|
+| 4 スレッド (`python ci.py 60 def alnsc res_Pc_s*.jsonl`) | **0.989 (0.960〜1.018)** | 138 / 139 | なし |
+| 1 スレッド (`python ci.py 60 def_t1 alnsc_t1 res_Pc1_s*.jsonl`) | **0.989 (0.972〜1.006)** | 118 / 120 | なし |
+
+- alnsb (1.037・1.024) の悪化はなくなった。どちらも区間に 1 を含み、わずかに良い向き。
+- 問題ごとの比 (ずらし 10 秒、種 1〜3 の幾何平均):
+  - 4 スレッド
+    - 良い: 10teams 0.57 (種 2 の def は時間切れ、alnsc は 3.9 秒)、pk1 0.83、timtab1 0.83、neos5 0.88。
+    - 悪い: noswot 1.75 (def 17.2・2.4・5.5 秒、alnsc 20.0・38.9・9.1 秒。4 スレッドの noswot は種で大きく揺れる)、roll3000 1.08。
+  - 1 スレッド
+    - 良い: noswot 0.68、rout 0.80、graph20-20-1rand・mc11・swath1 0.92。
+    - 悪い: neos-911970 1.15、mas76 1.09、markshare_4_0 1.08、eil33-2 1.07。
