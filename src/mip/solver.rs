@@ -1058,6 +1058,9 @@ pub(super) struct Solver<'a, L: MipLp> {
     pub(super) root_lp_iters: u64,
     /// 試作 `ENOMOTO_MIP_ROOTSB` の `f` で木の予算に数えなかった強分岐の反復
     pub(super) rootsb_iters: u64,
+    /// 試作 `ENOMOTO_MIP_RELPS` の数え (analysis/relps_20261127): [強分枝をした選び, そのうち強分枝していない信頼できない列を選んだ数,
+    /// `c` で観測に入れた反復上限の子, `r` で木の予算に数えなかった根の強分枝の反復]。選びの 2 つは試作がなくても数える (診断用)
+    pub(super) relps_stats: [u64; 4],
     /// 試作 `ENOMOTO_MIP_ROOTSB`: 強めた強分岐の反復の合計 (仕事量の上限と比べる) と、今の分枝の選択で強めたか
     pub(super) rootsb_used: u64,
     pub(super) rootsb_active: bool,
@@ -6335,6 +6338,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         submip_lpface_fb: None,
         root_lp_iters: 0,
         rootsb_iters: 0,
+        relps_stats: [0; 4],
         rootsb_used: 0,
         rootsb_active: false,
         dfsbb_start: 0,
@@ -20326,6 +20330,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             };
             eprintln!("SBTRACE {} {depth} {node_obj:.6} {} {} {} {out}", self.nodes, frac.len(), self.sb_lps - sb_lps0, self.sb_prop_stats[0]);
         }
+        // 試作 `ENOMOTO_MIP_RELPS` の `r`: 根の強分枝の反復を木の予算 (`sb_iters`) に数えない (SCIP と同じ)
+        if depth == 0 && relps_has('r') && !self.params.submip && !self.rootsb_active {
+            self.relps_stats[3] += self.sb_iters - sb_iters0;
+            self.sb_iters = sb_iters0;
+        }
         // 試作 `ENOMOTO_MIP_ROOTSB`: 強めた強分岐の反復の合計を数える。`f` なら木の強分岐の予算 (`sb_iters`) に数えない
         if self.rootsb_active {
             self.rootsb_used += self.sb_iters - sb_iters0;
@@ -20689,6 +20698,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut best: Option<(usize, f64, f64)> = None; // (列, 値, スコア)
         self.last_sb = None;
         let mut best_sb: Option<(usize, f64, f64)> = None; // best が強分岐で評価した列なら (列, 下の子の値, 上の子の値)
+        // best が「このノードで強分枝をした後に、強分枝していない信頼できない列を事前の点数で選んだ」ものか (`ENOMOTO_MIP_RELPS` の数え)
+        let mut best_uninit = false;
         let mut no_improve = 0.0f64;
         let mut tried = 0usize;
         let mut bound_changes = 0usize;
@@ -20736,9 +20747,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 Some(pn) => s.plsb_lookahead_stop(pn, no_improve, lookahead as f64, node_obj),
             };
             if is_reliable || !allow_sb || tried >= max_tried || la_stop(self, &mut plsb) || self.time_up() || (self.sb_iters as f64) > maxsb {
+                // 試作 `ENOMOTO_MIP_RELPS` の `u`: 強分枝をしたノードでは、強分枝していない信頼できない列の点数を信頼度の重みで弱める
+                let uninit = !is_reliable && tried > 0;
+                let pscore = if uninit && relps_has('u') && !self.params.submip {
+                    let n = self.pc.min_observations(j) as f64;
+                    pscore * n / (n + thr_of(self, j).max(1e-9))
+                } else {
+                    pscore
+                };
                 if best.is_none_or(|(_, _, s)| pscore > s) {
                     best = Some((j, v, pscore));
                     best_sb = None;
+                    best_uninit = uninit;
                 }
                 continue;
             }
@@ -21313,7 +21333,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         // 反復上限: 途中の目的値 (双対単体法なので下界) を弱い観測として使う
                         gains[side] = (self.lp.objective() + self.p.offset - node_obj).max(0.0);
                         sb_capped = true;
-                        self.pcl_capped_obs(j, v, is_up, gains[side]);
+                        // 試作 `ENOMOTO_MIP_RELPS` の `c`: SCIP と同じく、途中の値でも観測に数える
+                        if relps_has('c') && !self.params.submip {
+                            let delta = self.hnfbr_delta(j, v, is_up);
+                            if delta > 1e-9 {
+                                self.pc.add_observation(j, is_up, delta, gains[side]);
+                                self.relps_stats[2] += 1;
+                            }
+                        } else {
+                            self.pcl_capped_obs(j, v, is_up, gains[side]);
+                        }
                     }
                 }
                 self.lp.restore_state(saved);
@@ -21555,6 +21584,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if best.is_none_or(|(_, _, s)| score > s) {
                 best = Some((j, v, score));
                 best_sb = Some((j, child_obj[0], child_obj[1]));
+                best_uninit = false;
                 no_improve = 0.0;
             } else if sb_capped && super::pcl('a') && !self.params.submip {
                 // 試作 `ENOMOTO_MIP_PCL` の `a`: 途中の値で負けた候補は「改善なし」に数えない (本当の値はもっと高いかもしれない)
@@ -21566,6 +21596,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if sb_agree_on() && sb_eval.len() >= 2 {
             self.sb_agree_record(&sb_eval);
+        }
+        // `ENOMOTO_MIP_RELPS` の数え (試作がなくても数える): 強分枝をした選びと、そのうち強分枝していない信頼できない列を選んだ数
+        if tried > 0 && !self.params.submip {
+            self.relps_stats[0] += 1;
+            self.relps_stats[1] += best_uninit as u64;
         }
         // 試作 `ENOMOTO_MIP_SBDEGEN`: 強分枝をしたノードで、選んだ列が擬似費用だけの 1 位と違ったかを数える
         if sbdegen_on() && tried > 0 {
@@ -31592,6 +31627,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 eprintln!("MIP: NODECNT degenerate duals (tid {}): nodes {}, candidates {}, btran {}, fixed by theta >= gap {}, fixed by theta = inf {}, nodes changed {}, sign mismatch {}", self.pool_tid, c[0], c[1], c[2], c[3], c[4], c[5], c[6]);
             }
             eprintln!("MIP: branching: {} selections, {} without strong branching for dual degeneracy; sb LPs {} iters {}", self.sb_degen_stats[0], self.sb_degen_stats[1], self.sb_lps, self.sb_iters);
+            if env_str!("ENOMOTO_MIP_RELPS").is_some() || env_str!("ENOMOTO_MIP_RELPS_DIAG").is_some() {
+                eprintln!(
+                    "MIP: RELPS: selections with strong branching {}, picked an unreliable column without strong branching {}, capped children observed {}, root sb iters not counted {}",
+                    self.relps_stats[0], self.relps_stats[1], self.relps_stats[2], self.relps_stats[3]
+                );
+            }
             if sbdegen_on() {
                 eprintln!("MIP: SBDEGEN: strong-branching nodes {}, changed the pseudocost pick {} (s = {:.3})", self.sbdg_stats[0], self.sbdg_stats[1], (self.sbdg_stats[1] + 1) as f64 / (self.sbdg_stats[0] + 2) as f64);
             }
@@ -32347,6 +32388,19 @@ pub(super) fn cutoff_user_tree() -> bool {
 pub(super) fn sb_adapt_on() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_str!("ENOMOTO_MIP_SB_ADAPT").is_some_and(|v| v != "0"))
+}
+
+/// 試作 `ENOMOTO_MIP_RELPS` (analysis/relps_20261127、既定では使わない): 分枝の得点を SCIP の relpscost (branch_relpscost.c) に寄せる。
+/// 値の文字で部品を選ぶ。どれも主の木だけ (サブ MIP では使わない)。
+/// - `u`: 強分枝をしたノードでは、強分枝していない信頼できない列の事前の点数に、信頼度の重み w = n / (n + thr) を掛ける
+///   (n はその列の観測の少ない方の回数、thr は信頼度の閾値 1〜5)。w は ln(n / thr) のシグモイドで、観測 0 回なら 0 (SCIP の
+///   「強分枝した候補が 1 本でもあれば、強分枝していない信頼できない候補は選ばない」(relps の bestuninit の規則) に当たる)、
+///   閾値に近づくほど 1/2 に近づく。新しい閾値はない
+/// - `c`: 反復上限で止まった強分枝の子の途中の値 (双対単体法なので下界) も擬似費用の観測に数える (SCIP は数える。既定は数えない)
+/// - `r`: 根 (深さ 0) の強分枝の反復を木の強分枝の予算に数えない (SCIP は根の強分枝の反復を予算に足す = 数えない)
+pub(super) fn relps_has(c: char) -> bool {
+    static V: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    V.get_or_init(|| env_str!("ENOMOTO_MIP_RELPS").map(|v| v.to_string()).filter(|v| v != "0")).as_ref().is_some_and(|v| v.contains(c))
 }
 
 /// 試作 `ENOMOTO_MIP_SBDEGEN` (analysis/sbdegen_20261126、既定では使わない、`=1` で使う): 強分枝の予算を、強分枝の効き目 (選び方を
