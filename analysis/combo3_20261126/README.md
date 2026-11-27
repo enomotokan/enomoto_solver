@@ -70,24 +70,51 @@ OOM 2 回で確定する決まりもそのまま。
 - 問題: s2/problems.json (combo2 の第 2 段と同じ 240 問: M 186 問 + 残り 54 問)。s2/solu.json も同じ。
 - 分担: `python analysis/combo3_20261126/s2/plan.py` → s2/shards.json (11 分担、960 回、見積りは各 10.7 時間)。
   同じ (問題, スレッド) の def と c3 は、同じ分担で続けて回す。誰がどの分担を回すかは親が決める。
-- 版: **(空欄。egj・UNIFY_FIX の z・p・PARSB・RETRY_ZMAX・LPPROBE_FIX=d が既定になってから、親が決めて書く)**。
+- 版: **(空欄。PATHH_SLACK (Gm3w) の既定化が push された後の先端にする。親が知らせる)**。
+  (0afbb53b9 で一度確かめた: 4 節。版を決め直したら、その版でもう一度確かめる)
   決めた版で check_default と、今の c3 (nolp 入り) の fuzz 7 本・cargo test を回し直してから始める。
 
 ### 手伝いの子が回す手順 (分担 K)
 
-1. ブランチ ccr-1beed81b-ex0uhq を取り込み、決めた版のソースで `pip install -e .`
-   (先端が決めた版と違えば、`git checkout <版> -- src python Cargo.toml Cargo.lock pyproject.toml` してからビルドし、
-   `git checkout HEAD -- src python Cargo.toml Cargo.lock pyproject.toml` で作業ツリーを戻す)。
-2. `python -c "import highspy"`。なければ `pip install highspy==1.15.1`。
-3. `python analysis/protoscreen_20261124/check_default.py` が「全部一致」になることを確かめる。
-4. `python analysis/combo3_20261126/s2/run.py K` → `analysis/combo3_20261126/s2/res_sK.jsonl`。
-   - 止めても同じコマンドで続きから回る。2 時間の上限で止まったら、同じコマンドで回し直す。
-   - 計測の途中でビルドし直さない。src・python/ の変わる取り込みもしない。setsid・nohup は使わない。
-5. 進みは `python analysis/combo3_20261126/s2/prog.py`。
-6. 結果の行は区切りごとに commit し、push の前に `git fetch origin ccr-1beed81b-ex0uhq && git merge --no-edit FETCH_HEAD`。
+ほかの仕事と同じ入れ物で回すときは、計測専用の worktree を作る (`pip install -e .` はその入れ物の enomoto_solver をその worktree に向けるので、
+同じ入れ物で別の計測やビルドを同時にしない)。`<版>` は 3 節の冒頭の版。
+
+```bash
+# 1. worktree を作り、決めた版のソースにする
+cd /home/user/enomoto_solver
+git fetch origin ccr-1beed81b-ex0uhq
+git worktree add --detach /home/user/es_c3s2 FETCH_HEAD
+cd /home/user/es_c3s2
+git diff --stat <版> HEAD -- src python Cargo.toml Cargo.lock pyproject.toml   # 空なら次へ。空でなければ:
+#   git checkout <版> -- src python Cargo.toml Cargo.lock pyproject.toml
+ln -s /home/user/enomoto_solver/.miplib_cache .miplib_cache   # 問題のファイルを使い回す (なければ自動で取りに行く)
+# 2. ビルドと確かめ
+pip install -e .
+python -c "import highspy" || pip install highspy==1.15.1
+python analysis/protoscreen_20261124/check_default.py          # 「全部一致」になること
+# 3. 計測 (2 時間の上限で止まったら同じコマンドで回し直す。setsid・nohup は使わない)
+python analysis/combo3_20261126/s2/run.py K                   # → analysis/combo3_20261126/s2/res_sK.jsonl (worktree の中)
+python analysis/combo3_20261126/s2/prog.py                    # 進み
+```
+
+- 計測の途中でビルドし直さない。worktree の src・python/ を変える取り込みもしない。
+- 結果の取り込み (区切りごと): 本体のチェックアウトに写して commit し、取り込んでから push する。
+  ```bash
+  cd /home/user/enomoto_solver
+  cp /home/user/es_c3s2/analysis/combo3_20261126/s2/res_sK.jsonl analysis/combo3_20261126/s2/
+  git add analysis/combo3_20261126/s2/res_sK.jsonl && git commit -m "combo3 s2: 分担 K の途中の結果"
+  git fetch origin ccr-1beed81b-ex0uhq && git merge --no-edit FETCH_HEAD && git push -u origin ccr-1beed81b-ex0uhq
+  ```
+- 入れ物を計測だけに使うなら、worktree を作らず本体のチェックアウトで 1〜3 を回してもよい (そのときは 1 の `git checkout <版> -- ...` の後、
+  push の前に `git checkout HEAD -- src python Cargo.toml Cargo.lock pyproject.toml` で作業ツリーを戻す。.so は作り直さない)。
+- 行の `cpu` 欄に、回した機械の CPU の型とメモリが入る (前回との比べの注記に使う)。
 
 集計: `python analysis/combo3_20261126/s2/summ.py > analysis/combo3_20261126/s2/summ.txt`
 (スレッド別 × 集合別 (M・240 問全部・残り)。../kind.json の「道筋」「揺れ」の問題は遅れに数えない。kind.json は combo2 のものの写し)。
+
+前回 (combo2 の第 2 段、版 c8e468e25) との比べ: `python analysis/combo3_20261126/s2/vsold.py > analysis/combo3_20261126/s2/vsold.txt`。
+今の既定 / 前回の既定、今の c3 / 前回の既定、今の c3 / 前回の c2c を、スレッド別・集合別に出す。**前回と今回は回した入れ物 (機械) が違う**
+(前回の行には CPU の欄がなく、同じ型かは確かめられない。どちらも 4 コア・メモリ 15 GB)。版と機械の両方の差が混じった比として読む。
 
 ## 1.1 c3 の誤答の確かめ (`fuzz_c3.out`、188008a5d)
 
