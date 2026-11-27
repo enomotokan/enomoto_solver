@@ -6829,6 +6829,8 @@ thread_local! {
     /// 試作 `ENOMOTO_MIP_ROOTRESTART2` ([`rootrestart2`]): 根の再スタートを決めた時刻 (外側の経過秒) と、前の再スタートに実際にかかった秒
     /// (決めてから次の根の LP が解けるまで: 前処理のかけ直し + 根の LP の解き直し)
     static RR2_STATE: std::cell::Cell<(f64, f64)> = const { std::cell::Cell::new((f64::NAN, f64::NAN)) };
+    /// 試作 `ENOMOTO_MIP_ROOTRESTART2`: 今の根のカットのループの秒 (再スタートすると、効いているカット以外のこの仕事を次の根でやり直す)
+    static RR2_CUT_SECS: std::cell::Cell<f64> = const { std::cell::Cell::new(f64::NAN) };
 }
 
 pub(super) fn lp_int_bounds() -> bool {
@@ -12432,6 +12434,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.facecut_probe();
                 }
                 root_cut_secs = t_cut.elapsed().as_secs_f64();
+                if !self.params.submip && (rootrestart2('e') || rootrestart2('m')) {
+                    RR2_CUT_SECS.with(|c| c.set(root_cut_secs));
+                }
                 if root_warm_dse {
                     crate::simplex::slope_intercept_dual::WARM_DSE_ON.store(warm_prev, std::sync::atomic::Ordering::Relaxed);
                 }
@@ -27026,19 +27031,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 試作 `ENOMOTO_MIP_ROOTRESTART2` の判定: 縮む割合 `s` (新たに固定した列の非零 / 根の始めに自由だった列の非零) の分だけ次の段の手間
     /// `w` 秒が軽くなる見込み `w s` と、再スタートの手間 `C` 秒 (前の再スタートで実際にかかった秒、初回は同じ量の見積もり = 前処理の秒
     /// (外側の経過秒 − このソルバーの経過秒) + 根の LP の秒) を比べ、シグモイド σ(ln(w s / C)) が 1/2 以上 (w s >= C) なら真。
-    /// 初回を外側の経過秒にすると根のヒューリスティクス (satellites2-40 の RINS 174 秒) まで手間に入り、再スタートを見送る (cmp6)
+    /// 初回を外側の経過秒にすると根のヒューリスティクス (satellites2-40 の RINS 174 秒) まで手間に入り、再スタートを見送る (cmp6)。
+    /// `C` には今の根のカットのループの秒も足す (次の根でやり直す仕事。前処理 + 根の LP だけだと、h80x6320d で固定 3〜5% の再スタートを
+    /// 重ねてカットの仕事を捨て、ノードが 3 → 193 に増えた。P の分担の集計、README の 7 節)
     pub(super) fn rr2_value(&self, w: f64, s: f64, tag: &str) -> bool {
         let (_, last) = RR2_STATE.with(|c| c.get());
+        let cut = RR2_CUT_SECS.with(|c| c.get());
+        let cut = if cut.is_finite() { cut.max(0.0) } else { 0.0 };
         let c = if last.is_finite() && last > 0.0 {
-            last
+            last + cut
         } else {
             let pre = super::outer_elapsed().map_or(0.0, |o| (o - self.start.elapsed().as_secs_f64()).max(0.0));
-            (pre + self.root_lp_secs).max(1e-3)
+            (pre + self.root_lp_secs + cut).max(1e-3)
         };
         let g = if s > 0.0 && w > 0.0 { (w * s / c).ln() } else { f64::NEG_INFINITY };
         let sig = 1.0 / (1.0 + (-g).exp());
         if self.params.verbose {
-            eprintln!("MIP: ROOTRESTART2 {tag}: next stage {w:.2}s x shrink {s:.4} vs restart cost {c:.2}s{}: sigmoid {sig:.3} -> restart {}", if last.is_finite() { " (measured)" } else { " (estimated)" }, sig >= 0.5);
+            eprintln!("MIP: ROOTRESTART2 {tag}: next stage {w:.2}s x shrink {s:.4} vs restart cost {c:.2}s{} (cut loop {cut:.2}s): sigmoid {sig:.3} -> restart {}", if last.is_finite() { " (measured)" } else { " (estimated)" }, sig >= 0.5);
         }
         sig >= 0.5
     }
@@ -27054,9 +27063,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.params.submip || self.params.restarts == 0 {
             if !self.params.submip {
                 RR2_STATE.with(|c| c.set((f64::NAN, f64::NAN)));
+                RR2_CUT_SECS.with(|c| c.set(f64::NAN));
             }
             return;
         }
+        RR2_CUT_SECS.with(|c| c.set(f64::NAN));
         let (t0, _) = RR2_STATE.with(|c| c.get());
         if let (true, Some(now)) = (t0.is_finite(), super::outer_elapsed()) {
             RR2_STATE.with(|c| c.set((f64::NAN, now - t0)));
