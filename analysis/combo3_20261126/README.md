@@ -124,3 +124,11 @@ python analysis/combo3_20261126/s2/prog.py                    # 進み
   c3 とは関係がない。既定でも同じく失敗する見込み (計測中で作り直せないので、まだ確かめていない)。
 - 注: 計測中に、この試験を確かめるつもりで cargo test を走らせ、約 2 分ビルドが重なった (すぐ止めた)。重なったのは分担 0 の
   mzzv42z の c3_t4・def_t1 (種 1、どちらも 60 秒の時間切れ)。この 2 行は消して回し直す。
+
+## 4. 版 0afbb53b9 での確かめ (2026-11-27、版を PATHH_SLACK の後に決め直す前の分)
+
+- 0afbb53b9 は 81ad145f0 (RETRY_ZMAX)・3f7265069 (qiu の守り)・472c0e8cb (PARSB) を含む (`git merge-base --is-ancestor` で確かめた)。
+- check_default (`s2/check_default.out`): 6 問とも新しい基準 (egj 後、mik-250-20-75-4 は 6277 ノード) と一致。ほかの子の試作は既定オフのまま。
+- c3 (nolp 入り) の fuzz 7 本と cargo test (`s2/fuzz_c3.out`): 誤答 0。cargo test は 425 通過・0 失敗
+  (1.1 節の ALNS の試験の失敗は、この版では直っている)。
+- 版を決め直したら、その版で同じ確かめを回し直す。
