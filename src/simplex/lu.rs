@@ -3928,6 +3928,18 @@ pub(crate) fn tiny_drop() -> f64 {
     tunable!("ENOMOTO_TINY", TINY_DROP, f64)
 }
 
+/// 診断 `ENOMOTO_DEBUG_LU_CAL=1` (振る舞いは変えない。analysis/lpgap_20261126/README.md 9.6 節): 分解ごとに大きさ (m・nnz(L+U)・消去の積和・見積り
+/// `build_tick`) を残し、[`super::basis_kernel::factorize_basis`] が実際の秒と並べて `LU_CAL` の行を出す (ticks の分解の数え方の較正用)。
+pub(crate) fn lu_cal_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_DEBUG_LU_CAL").is_some())
+}
+
+thread_local! {
+    /// [`lu_cal_on`]: 直近の分解の [m, nnz(L+U), 消去の積和, build_tick]
+    pub(crate) static LU_CAL: std::cell::Cell<[u64; 4]> = const { std::cell::Cell::new([0; 4]) };
+}
+
 /// 試作 `ENOMOTO_LU_TINY_HS` (既定では使わない。analysis/lpgap_20261126/README.md): FTRAN・BTRAN の結果と新しい eta の
 /// 絶対値 1e-14 (HiGHS の `kHighsTiny`) 未満の値を 0 にする。[`tiny_drop`] (`ENOMOTO_TINY`) と違って超疎の経路
 /// ([`FtLu::u_hyper_ok`]・BTRAN の超疎) を切らず、書き出す点 (置換の最終段・非ゼロ一覧) と `U` 段の走査の起点の判定でだけ落とす
@@ -4826,9 +4838,20 @@ impl FtLu {
         }
         // 試作 `ENOMOTO_LU_REFAC_BAL` ([`super::basis_kernel`] の `refac_bal_due`): 構築の手間を見積りの係数でなく演算の数で数える
         // (行の走査 m + 因子の非零 + 消去の積和 Σ_s |L 列 s| · |U 行 s|。密なブロックも割り引かない)
-        if super::basis_kernel::refac_bal_on() {
+        if super::basis_kernel::refac_bal_on() || lu_cal_on() {
             let flops: u64 = (0..m).map(|s| base.l_col.seg(s).len() as u64 * owner_count[s] as u64).sum();
-            build_tick = m as u64 + l_nnz + u_off + flops;
+            if lu_cal_on() {
+                LU_CAL.with(|c| c.set([m as u64, l_nnz + u_off, flops, build_tick]));
+            }
+            if super::basis_kernel::refac_bal_ticks() {
+                // `k`: 実際の秒に合わせて較正した数え方 (密なブロックも割り引かない)。ticks の時計 ([`crate::ticks`] の LU) にもこの値が入る
+                use crate::params::lu::{CAL_BUILD_FLOP_COEF, CAL_BUILD_LU_COEF, CAL_BUILD_M_COEF};
+                build_tick = tunable!("ENOMOTO_T_CAL_BUILD_M_COEF", CAL_BUILD_M_COEF, u64) * m as u64
+                    + tunable!("ENOMOTO_T_CAL_BUILD_LU_COEF", CAL_BUILD_LU_COEF, u64) * (l_nnz + u_off)
+                    + tunable!("ENOMOTO_T_CAL_BUILD_FLOP_COEF", CAL_BUILD_FLOP_COEF, u64) * flops;
+            } else if super::basis_kernel::refac_bal_on() {
+                build_tick = m as u64 + l_nnz + u_off + flops;
+            }
         }
         // fill 基準は対角も含めた全格納要素数 (`factorize_reusing_order` の数え方と一致)。
         let fill_baseline = (l_nnz + u_off) as usize + m;
