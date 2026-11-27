@@ -104,7 +104,7 @@ M.set_objective(x + 2 * y, sense="maximize")
 M.add_constraint(x + y <= 10)
 M.add_constraint(x - y >= -4)
 
-sol = M.solve()
+sol = M.solve()                     # options go to solve (e.g. M.solve(threads=4, time_limit=60))
 print(sol.status, sol.objective)    # optimal 17.0
 print(x.value, y.value)             # 3.0 7.0
 ```
@@ -123,6 +123,7 @@ print(x.value, y.value)             # 3.0 7.0
   `quicksum` accepts any mix of variables, expressions and numbers. If it contains no expression, it returns the sum of the numbers (`0.0` if empty).
 - Linear expressions are written with `+`, `-`, scalar multiplication and division by numbers, and constraints with `<=`, `>=` and `==`. The objective and constraints are limited to linear expressions. Building an expression of degree two or higher, such as a product of variables (`x * y`), a power (`x ** 2`) or division by an expression (`1 / x`), raises a `TypeError` stating that it is not linear.
 - `set_objective(f, sense="minimize" | "maximize")` sets the objective function (the default is minimization).
+- All solver options, such as the number of threads and the time limit, are passed as arguments of `M.solve(...)` (not when creating `Model()`). Example: `sol = M.solve(threads=4, time_limit=60)`.
 - Arguments of `solve()` (all optional):
 
   | Argument | Meaning |
@@ -135,6 +136,22 @@ print(x.value, y.value)             # 3.0 7.0
   | `seed` | Random seed for integer programs (an integer in [0, 2**64); default `None`). See "Random seed (`seed`)" below. |
 
 - `solve()` always returns a `Solution` and raises no exception even when the problem is infeasible, unbounded or not solved. Judge the result by `Solution.status`. Only when `status` is `"optimal"` (for integer programs stopped at a limit, when there is an incumbent) does `objective` hold a value and can each variable's value be read with `.value`. Otherwise `objective` is `None` and reading `.value` raises `RuntimeError`.
+
+### Number of threads (`threads`)
+
+`solve(threads=...)` specifies the number of threads to use. If omitted, (number of CPUs available to this process + 1) / 2 threads are used, as in HiGHS (`enomoto_solver.default_threads()`; 2 with 4 logical cores, 4 with 8). A value above the number of CPUs available to this process (`enomoto_solver.max_threads()`) is capped there. The whole solve, including parallel sections such as presolve, runs on this number of threads.
+
+| `threads` | LP (`lp_solver="auto"`) | MIP |
+|---|---|---|
+| 1 | Solved by the slope–intercept dual two-phase method only. | Both the relaxations and the tree search are solved on 1 thread. |
+| k ≥ 2 | Solved at the same time by the two-phase method (1 thread) and the proximal interior-point method + crossover (k − 1 threads), adopting the side that reaches a conclusion first. | Relaxations that cannot be warm-started (the root, etc.) are solved at the same time in the same way as on the left, and after the root is processed the tree is shared among k threads for the search ("Parallel search" below). |
+
+In parallel execution, the threads are divided before starting into separate pools for the two-phase method (1 thread) and for the interior-point method + crossover (the rest), so the two methods never take each other's threads. If the two-phase method finishes first, its basic solution is used as it is; if the interior-point method + crossover finishes first, the optimal basis obtained in the crossover's finish (the main loop of the two-phase method) is used as it is. The losing side is stopped, and its termination is not waited for.
+
+```python
+import enomoto_solver
+sol = M.solve(threads=enomoto_solver.max_threads())   # use all available CPUs
+```
 
 ### Result status, and infeasible or unbounded problems
 
@@ -185,7 +202,7 @@ M = Model()
 items = [(M.add_variable(int, 0, 1), value, weight) for value, weight in [(60, 10), (100, 20), (120, 30)]]
 M.set_objective(quicksum(v * value for v, value, _ in items), sense="maximize")
 M.add_constraint(quicksum(v * weight for v, _, weight in items) <= 50)
-sol = M.solve(time_limit=60)
+sol = M.solve(time_limit=60, threads=4)   # solve with a 60 s limit on 4 threads
 print(sol.objective, [round(v.value) for v, _, _ in items])   # 220.0 [0, 1, 1]
 print(sol.best_bound, sol.mip_gap, sol.nodes)                 # 220.0 0.0 0
 ```
@@ -259,22 +276,6 @@ Unlike HiGHS:
 A file with no readable data (empty, only comments, or only `NAME`) raises `ValueError`; it is not read as a problem with no variables.
 
 Not supported (raise `ValueError`): quadratic terms (`QUADOBJ`, `QSECTION`, `QMATRIX`, `QCMATRIX`), `SOS`, `INDICATORS`, `GENCONS`, `PWLOBJ`, and semi-continuous / semi-integer bounds (`SC`, `SI`).
-
-### Number of threads (`threads`)
-
-`solve(threads=...)` specifies the number of threads to use. If omitted, (number of CPUs available to this process + 1) / 2 threads are used, as in HiGHS (`enomoto_solver.default_threads()`; 2 with 4 logical cores, 4 with 8). A value above the number of CPUs available to this process (`enomoto_solver.max_threads()`) is capped there. The whole solve, including parallel sections such as presolve, runs on this number of threads.
-
-| `threads` | LP (`lp_solver="auto"`) | MIP |
-|---|---|---|
-| 1 | Solved by the slope–intercept dual two-phase method only. | Both the relaxations and the tree search are solved on 1 thread. |
-| k ≥ 2 | Solved at the same time by the two-phase method (1 thread) and the proximal interior-point method + crossover (k − 1 threads), adopting the side that reaches a conclusion first. | Relaxations that cannot be warm-started (the root, etc.) are solved at the same time in the same way as on the left, and after the root is processed the tree is shared among k threads for the search ("Parallel search" above). |
-
-In parallel execution, the threads are divided before starting into separate pools for the two-phase method (1 thread) and for the interior-point method + crossover (the rest), so the two methods never take each other's threads. If the two-phase method finishes first, its basic solution is used as it is; if the interior-point method + crossover finishes first, the optimal basis obtained in the crossover's finish (the main loop of the two-phase method) is used as it is. The losing side is stopped, and its termination is not waited for.
-
-```python
-import enomoto_solver
-sol = M.solve(threads=enomoto_solver.max_threads())   # use all available CPUs
-```
 
 ### Log
 
