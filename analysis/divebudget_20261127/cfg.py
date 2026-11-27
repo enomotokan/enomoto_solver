@@ -6,4 +6,6 @@ DB = {"ENOMOTO_MIP_DIVEBUDGET": "1"}
 # u: 種類を UCB1 で選ぶだけ (上限は今の共有のまま)。ub: UCB1 と種類ごとの上限 (DIVEBUDGET と同じ)
 U = {"ENOMOTO_MIP_DIVESEL": "u"}
 UB = {"ENOMOTO_MIP_DIVESEL": "ub"}
-CFGS = {"def": ST, "db": DB, "def_t1": ST, "db_t1": DB, "u": U, "u_t1": U, "ub": UB, "ub_t1": UB}
+# ubg: ub に、上限の割合 0.05 へギャップの係数 σ(logit(laplace(ギャップ, n))) を掛ける (T1PRIMAL v2 の g と同じ式、src/mip/adapt.rs)
+UBG = {"ENOMOTO_MIP_DIVESEL": "ubg"}
+CFGS = {"def": ST, "db": DB, "def_t1": ST, "db_t1": DB, "u": U, "u_t1": U, "ub": UB, "ub_t1": UB, "ubg": UBG, "ubg_t1": UBG}

@@ -59,6 +59,7 @@ pub(crate) mod cmirdelta;
 pub(crate) mod seplearn;
 pub(crate) mod sepalloc;
 pub(crate) mod treedepth;
+pub(crate) mod adapt;
 pub(crate) mod cutmix;
 pub(crate) mod mcf;
 pub(crate) mod clique;
