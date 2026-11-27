@@ -5080,7 +5080,29 @@ pub(crate) fn better_obj(z: f64, b: f64, scale: f64) -> bool {
 /// - `m`: 根のカットのラウンドの頭でも判定する (被約費用で固定できる列も数える)。W = 残りのラウンドの見込みの秒
 /// - `a`: 根の内点法の丸めの初めに、費用 0 の内点法の双対で固定する (`ENOMOTO_MIP_HO4_ACFIX=d` と同じ。HiGHS の解析的中心による固定に当たる)
 pub(crate) fn rootrestart2(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_ROOTRESTART2").is_some_and(|v| v.contains(c))
+    rr2_letters(env_str!("ENOMOTO_MIP_ROOTRESTART2"), c)
+}
+
+/// [`rootrestart2`] の値の読み方: `none`・`0`・`off` (と空) は全部オフ、それ以外は文字の集合として読む
+/// (以前は「値に文字が含まれるか」だけだったので、`none`・`def` が文字 `e` を含んでしまっていた)。
+fn rr2_letters(v: Option<&str>, c: char) -> bool {
+    match v.map(str::trim) {
+        None | Some("" | "none" | "0" | "off") => false,
+        Some(v) => v.contains(c),
+    }
+}
+
+#[cfg(test)]
+mod rr2_letters_tests {
+    use super::rr2_letters;
+    #[test]
+    fn off_values_and_letters() {
+        for v in [None, Some(""), Some("none"), Some("0"), Some("off")] {
+            assert!(!rr2_letters(v, 'e') && !rr2_letters(v, 'a') && !rr2_letters(v, 'm'));
+        }
+        assert!(rr2_letters(Some("am"), 'a') && rr2_letters(Some("am"), 'm') && !rr2_letters(Some("am"), 'e'));
+        assert!(rr2_letters(Some("eam"), 'e'));
+    }
 }
 
 /// 試作 `ENOMOTO_MIP_LMBOOST` (COMP07、既定では使わない): [`Solver::lmip_boost`]。
