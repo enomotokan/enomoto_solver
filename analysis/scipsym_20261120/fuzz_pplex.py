@@ -6,7 +6,7 @@
  1. 巡回グラフ Z_n (n = 6〜40) の最大独立集合 (辺 x_u + x_v <= 1、または 3 点のクリーク行)。一部で 1 列の境界を変えて対称性を崩す。
  2. 同じ機械への割り当て (行 sum_m x_{i,m} <= 1 か = 1、容量の行)。オービトープを切って (ENOMOTO_MIP_NO_ORBITOPE=1 を外から) 回すと PPLEX に回る。"""
 import random, sys, time, highspy
-from enomoto_solver import Model, Variable
+from enomoto_solver import Model
 
 inf = float('inf')
 
@@ -75,7 +75,7 @@ def highs(lp):
 
 def ours(lp):
     lo, up, c, it, rows, rlo, rup = lp
-    M = Model(); xs = [Variable(int if it[j] else float, lo[j], up[j]) for j in range(len(lo))]
+    M = Model(); xs = [M.add_variable(int if it[j] else float, lo[j], up[j]) for j in range(len(lo))]
     M.set_objective(sum(cc * x for cc, x in zip(c, xs)))
     for r, l, u in zip(rows, rlo, rup):
         e = sum(v * xs[j] for j, v in r)

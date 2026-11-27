@@ -13,9 +13,9 @@ _ALIASES = {
     "i": "integer",
 }
 
-# 組み込み型 -> 正規名。Variable(float, ...) / Variable(int, ...) が基本の書き方
+# 組み込み型 -> 正規名。M.add_variable(float, ...) / M.add_variable(int, ...) が基本の書き方
 # (文字列 "continuous"/"integer" も受け付ける)。二値専用の型はなく、
-# 二値変数は境界 [0, 1] の整数変数 Variable(int, 0, 1) で表す。
+# 二値変数は境界 [0, 1] の整数変数 M.add_variable(int, 0, 1) で表す。
 _TYPE_ALIASES = {
     float: "continuous",
     int: "integer",

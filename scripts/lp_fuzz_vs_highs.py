@@ -1,7 +1,7 @@
 """乱数で小さな LP (実行不能・非有界を含む) を作り、HiGHS と状態・最適値を突き合わせる
 (python scripts/lp_fuzz_vs_highs.py 問題数 [simplex|auto|ipm_crossover])。"""
 import random, sys, highspy, os
-from enomoto_solver import Model, Variable
+from enomoto_solver import Model
 inf=float('inf')
 def gen(seed):
     g=random.Random(seed); n=g.randint(4,20); m=g.randint(2,14)
@@ -38,7 +38,7 @@ def highs(lp):
     h.run(); s=h.modelStatusToString(h.getModelStatus()); return s, h.getInfo().objective_function_value
 def ours(lp, solver):
     lo,up,c,rows,rlo,rup=lp
-    M=Model(); xs=[Variable(float,l,u) for l,u in zip(lo,up)]
+    M=Model(); xs=[M.add_variable(float,l,u) for l,u in zip(lo,up)]
     M.set_objective(sum(cc*x for cc,x in zip(c,xs)))
     for r,l,u in zip(rows,rlo,rup):
         if not r: continue

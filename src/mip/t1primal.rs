@@ -22,6 +22,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use super::adapt::{laplace, logit, sigmoid};
 use super::lp_api::MipLp;
 use super::problem::MipProblem;
 use super::solver::Solver;
@@ -39,15 +40,6 @@ fn role_frac() -> f64 {
 /// 1 回に回す最短の秒: Local-MIP の 1 切れ (`ENOMOTO_T_MIP_FJ_MIX_SLICE`、既定 0.2 秒、[`super::heuristics::fj_lmip_mix`] と同じ)。
 fn slice_min() -> f64 {
     tunable!("ENOMOTO_T_MIP_FJ_MIX_SLICE", 0.2, f64).max(0.01)
-}
-
-fn logit(p: f64) -> f64 {
-    let p = p.clamp(1e-6, 1.0 - 1e-6);
-    (p / (1.0 - p)).ln()
-}
-
-fn sigmoid(z: f64) -> f64 {
-    1.0 / (1.0 + (-z).exp())
 }
 
 enum Msg {
@@ -210,18 +202,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let Some(t) = self.t1p.as_ref() else { return (0.0, 0.0, 0.0, 0.0) };
         // h・f・g は同じ回数 n (切れ端の数) でラプラスの式 (x·n+1)/(n+2) にならす。外れが続くと logit h の下がりが
         // logit f・logit g の上がり (暫定解がすでに最適で g が 1 のまま、暫定解なしで f が 1 のまま) と打ち消し合い、取り分が下がる。
+        // 共通の関数 (super::adapt、FVbj の DIVESEL と同じ式)
         let n = t.slices as f64;
-        let lap = |x: f64| (x * n + 1.0) / (n + 2.0);
         let h = (t.hits as f64 + 1.0) / (n + 2.0);
-        let f = lap(if now > 0.0 { ((now - t.last_imp) / now).clamp(0.0, 1.0) } else { 1.0 });
-        // 暫定解なし (または下界なし) のギャップは 1 とみなす
-        let g = lap(match &self.incumbent {
-            None => 1.0,
-            Some((z, _)) => {
-                let lb = self.global_lower_bound();
-                if lb.is_finite() { ((z - lb) / z.abs().max(lb.abs()).max(1.0)).clamp(0.0, 1.0) } else { 1.0 }
-            }
-        });
+        let f = laplace(if now > 0.0 { (now - t.last_imp) / now } else { 1.0 }, n);
+        let g = laplace(self.gap_frac(), n);
         let s = role_frac() * sigmoid(logit(h) + logit(f) + logit(g));
         (s, h, f, g)
     }

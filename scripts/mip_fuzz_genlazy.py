@@ -3,7 +3,7 @@ HiGHS と最適値を突き合わせる (python scripts/mip_fuzz_genlazy.py 問�
 不等式の行を LP から外し、破られたら戻す) の確かめ用。木の探索に入る大きさ (列 30〜90) にし、範囲の無限な連続列も混ぜる。
 実行可能な点 x0 を先に決め、行の右辺は x0 での活動に余裕を足して決める (等式は少しだけ)。"""
 import random, sys, time, highspy
-from enomoto_solver import Model, Variable
+from enomoto_solver import Model
 inf = float('inf')
 
 
@@ -72,7 +72,7 @@ def highs(lp, presolve=True):
 
 def ours(lp):
     lo, up, c, it, rows, rlo, rup = lp
-    M = Model(); xs = [Variable(int if it[j] else float, lo[j], up[j]) for j in range(len(lo))]
+    M = Model(); xs = [M.add_variable(int if it[j] else float, lo[j], up[j]) for j in range(len(lo))]
     M.set_objective(sum(cc * x for cc, x in zip(c, xs)))
     for r, l, u in zip(rows, rlo, rup):
         e = sum(v * xs[j] for j, v in r)
