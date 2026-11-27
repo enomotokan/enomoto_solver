@@ -1,0 +1,33 @@
+
+running 1 test
+CUTLP: analysis/lpiter_20261127/dumps/root_bnatt400: n=3600 m=3974 nnz=16756 basis=0 x=3600 dse=0
+PROF_PHASES_EXT wall=222.164ms iters=1309 (169.7us/iter) accounted=88.4% of wall refactor_count=8 (verify=0 try_update=0 bump=0 drift=0 d_drift=0 illcond=0 max_updates=0 infeas_check=0 clock=8) max_update_streak=229
+  dse_ftran(unfused)=0.0us/iter chuzc1_heap=0.3us/iter
+  work/iter (m=3974): rho_nnz=137.4 price_entries=743.5 (nonbasic 378.2) touched=351.6 touched_nonbasic=351.6 cands=4.0 alpha_nnz=2143.9 tau_nnz=2438.4
+  avg_bfrt_flips/iter=0.268 avg_infeasible_pool/iter=593.2
+  pivot_order_reuse: attempts=6 accepted=5 (83.3%) attempt_time=4.487ms row_repicks=1116 fail(singular=0 fill=1) backoff_skips=2 nnz_reuse_avg=16215 nnz_full_avg=11649
+  lu_dense_switch: count=0 rows=0
+  density_gate_ftrans=991 final_expected_density col_aq=0.879 bfrt=0.419
+  btran_l scatter=1311 gather=8
+  pivot_search steps=11922 search_limit_hits=50 (0.4%) candidates=20784 (avg 1.74/step) scan=0.291ms
+  col_max_abs rescan_entries=891 pivot_threshold=0.25 (escalations=0)
+  m_exit(q_was_m)=0 harris_window_m_miss=0 m_enter_via_flip=0
+  degenerate_pivots=170 (13.0% of iters) avg_harris_window_size=1.378
+  pool_grew=626 (47.8%) pool_shrank=620 (47.4%) pool_same=62 (4.7%)
+  dse_rel_err: checked=1308 <1%=100.0% <10%=0.0% <100%=0.0% >=100%=0.0%
+  btran(rho_p)           24.673ms   11.1% of wall  18.849us/iter
+  price                   9.217ms    4.1% of wall  7.042us/iter
+  chuzr                   7.539ms    3.4% of wall  5.760us/iter
+  chuzc1                  6.280ms    2.8% of wall  4.797us/iter
+  bfrt                    3.662ms    1.6% of wall  2.798us/iter
+  ftran                  67.313ms   30.3% of wall  51.423us/iter
+  xb_update              43.767ms   19.7% of wall  33.435us/iter
+  dse_update              6.611ms    3.0% of wall  5.051us/iter
+  dual_update             1.341ms    0.6% of wall  1.024us/iter
+  ft_update              11.448ms    5.2% of wall  8.746us/iter
+  refactor               14.613ms    6.6% of wall  11.163us/iter
+CUTLP: rep=0 status=Optimal iters=1310 time=0.227s (173.1 us/iter) obj=0.0000000000e0
+test simplex::cut_lp_debug::cut_lp_debug ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 444 filtered out; finished in 0.24s
+
