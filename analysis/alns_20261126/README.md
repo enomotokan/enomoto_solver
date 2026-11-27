@@ -364,3 +364,40 @@ OR-Tools CP-SAT の LNS (ortools/sat/cp_model_lns.{h,cc}、ortools/util/adaptati
   - 1 スレッド
     - 良い: noswot 0.68、rout 0.80、graph20-20-1rand・mc11・swath1 0.92。
     - 悪い: neos-911970 1.15、mas76 1.09、markshare_4_0 1.08、eil33-2 1.07。
+
+## 9. 既定にする形 (alnsc) での確かめ直しと、4 スレッドの primal integral (ビルド 0d84a7e1d、種 1、120 秒)
+
+### 9.1 返した解と値の独立な確かめ (§7 と同じ 10 問・同じ手順)
+
+- `python check_sol.py 1 120 alnsc` と `python check_sol.py 4 120 alnsc` (同時に回した)。結果は check_t1.jsonl・check_t4.jsonl の alnsc の行。
+
+| | 実行可能 | 目的値の差 (最大) | 最適値より良い | 下界が最適値を越える | 足りない列 |
+|---|---|---|---|---|---|
+| 1 スレッド 10 問 | 10 / 10 | 1.3e-14 | 0 | 0 | 0 |
+| 4 スレッド 10 問 | 10 / 10 | 7.8e-16 | 0 | 0 | 0 |
+
+- 誤りは見つからなかった。10 問とも時間切れで、暫定解と下界を返している。
+- 例: neos-1456979 の下界 167 (1 スレッド)・168 (4 スレッド) は最適値 176 以下。comp07-2idx の 4 スレッドの下界は 6 で、最適値 6 と同じ。
+
+### 9.2 4 スレッドの primal integral (10 問、今の既定 def2 と alnsc)
+
+- `python pint.py 4 1 def2 alnsc`。結果は pint_t4.jsonl。def2 は env なしで、今の既定。
+- 4 スレッドでは予算 b は効かない (b は 1 スレッドだけ)。違いは、1 回を分けることと ALNS-CP を使うことから来る。
+
+| 問題 | def2 | alnsc | ALNS-CP の呼び出し |
+|---|---|---|---|
+| neos-1456979 | 0.335 | 0.367 | 29 |
+| comp07-2idx | 0.925 | 0.814 | 1 |
+| comp21-2idx | 0.607 | 0.597 | 11 |
+| map10 | 0.384 | 0.435 | 1 |
+| momentum1 | 0.605 | 0.605 | 1 |
+| neos-4532248-waihi | 0.209 | 0.317 | 1 |
+| neos-5107597-kakapo | 0.854 | 0.826 | 49 |
+| satellites2-40 | 1.000 | 1.000 | 1 |
+| trento1 | 0.966 | 0.964 | 34 |
+| lectsched-5-obj | 0.465 | 0.323 | 22 |
+| **合計** | **6.349** | **6.247** | |
+
+- 合計は alnsc が 1.6% 小さい (良い)。1 スレッド (§8.3: def 7.982、alnsc 7.419、7.1% 小さい) より差は小さい。
+- 良い: lectsched-5-obj、comp07-2idx、kakapo。悪い: waihi、map10、neos-1456979。
+- waihi と map10 は ALNS-CP の呼び出しが 1 回だけ。差は ALNS-CP の効き目ではなく、4 スレッドの揺れと見る (1 本ずつの計測)。
