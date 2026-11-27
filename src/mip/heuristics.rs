@@ -3793,7 +3793,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 試作 `ENOMOTO_MIP_ALNS` ([`super::alns_cp`]): CP-SAT の難しさを合わせる 3 本の近傍 (rins・random・graph) を使う。
         // 呼ぶ時期・予算の決め方が今の腕の成功率を使うので、腕 0〜2 の回数・報酬にも足す
-        if super::alns_cp::on() {
+        // サブ MIP (RENS などの中の木) では使わない: 中では手間の期限があるので分けたループが期限を使い切り、全スレッドで 1 つの近傍の状態も
+        // サブ MIP の呼び出しで汚れる (analysis/alns_20261126/README.md 8 節。0b4133149〜c99d75d20 はサブ MIP でも使っていた)
+        if super::alns_cp::on() && !self.params.submip {
             // 1 回の呼び出しの手間の期限 (木の大近傍探索の予算から決まる、[`crate::ticks::push_budget`]) があるときは、それを
             // `ENOMOTO_T_MIP_LNS_CALL_MIN` (既定 0.3 秒に当たる手間、今の 1 回の下限と同じ値) ずつに分けて近傍を続けて試す
             // (改善するか期限が尽きたら止める)。初めの近傍 (d = 0.5) が 1 回で期限を全部使って時間切れになり、d が下がる前に
@@ -3817,7 +3819,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.alns_reward[k] += if ok && z1 < z0 { 1.0 + ((z0 - z1) / z0.abs().max(1.0)).min(1.0) } else { 0.0 };
                 any |= ok;
                 if z1 < z0 {
-                    self.alns_lns_gain += (z0 - z1) / z0.abs().max(1.0);
+                    // Φ ([`Self::alns_rates`]) の減り: 主ギャップの減り × 未処理の重み (相対改善でなく、Φ と同じ式で測る)
+                    let lb = self.global_lower_bound();
+                    let gap = |z: f64| ((z - lb) / z.abs().max(1.0)).max(0.0);
+                    self.alns_lns_gain += (gap(z0) - gap(z1)).max(0.0) * self.alns_w;
                 }
                 if !split || ok || crate::ticks::left() <= 0.0 || self.time_up() || self.incumbent.is_none() {
                     break;

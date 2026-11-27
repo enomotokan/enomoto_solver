@@ -767,7 +767,12 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 試作 `ENOMOTO_MIP_ALNS` の `b` ([`super::alns_cp::budget_on`]): 測り始め (暫定解があって初めて予算を決めた時) の (主ギャップ, 手間, 大近傍探索の手間) と、
     /// その後に ALNS-CP が出した相対改善の合計
     pub(super) alns_bud0: Option<(f64, f64, f64)>,
+    /// ALNS-CP が出した Φ の減りの合計 (主ギャップの減り × その時の未処理の重み [`Self::alns_w`])
     pub(super) alns_lns_gain: f64,
+    /// 今のノードでの未処理の重み (Σ 0.5^深さ、[`Self::alns_rates`] が書く。ALNS-CP の改善の重み付けに使う)
+    pub(super) alns_w: f64,
+    /// r_lns の窓: (最後に見た暫定解の値, 1 つ前に暫定解が変わった時の (大近傍探索の手間, ALNS-CP の改善の合計), 最後に変わった時の同じ組)
+    pub(super) alns_win: (f64, (f64, f64), (f64, f64)),
     /// `ENOMOTO_MIP_SUBB_DIV` (試作): 近傍の多様化の状態 ([`super::subb::DivState`])
     pub(super) subb: super::subb::DivState,
     /// `ENOMOTO_MIP_MEMBQ_LNSGROW` (試作、analysis/membq_path_20261105.md): ALNS の腕ごとの、サブ MIP の時間の上限の倍率。
@@ -1142,6 +1147,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     find_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// 試作 `ENOMOTO_MIP_OBJSHAVE` の下界の専任スレッド ([`Solver::spawn_objshave`])
     shave: Option<ObjShave>,
+    /// 試作 `ENOMOTO_MIP_OBJSHAVE=d` の判定の状態 (主だけ、[`Solver::objshave_decide`])
+    shave_dec: ShaveDecide,
     /// RENS の固定率の記録 (成功したときの固定率の合計と回数、サブ MIP が実行不能だったときの合計と回数)。
     pub(super) rens_succ: (f64, u32),
     pub(super) rens_infeas: (f64, u32),
@@ -1205,6 +1212,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     rph_bg: Option<(std::thread::JoinHandle<(super::WarmPolish, Vec<f64>)>, Vec<f64>, f64)>,
     /// 試作 `ENOMOTO_MIP_ROOTPAR_PH` の `i` ([`Solver::rph_inlp_polish`]): `resolve_continuous` の LP の中で続けて研磨した結果 (結果, 研磨した解, 研磨にかけた解)
     rph_inlp: Option<(super::WarmPolish, Vec<f64>, Vec<f64>)>,
+    /// `POLISH_FINAL`: 木の探索の終わりに、共有の最良値が主の暫定解より良かったときのその値 (求解の終わりの最後の研磨の確かめで、刈りに使った値として扱う)
+    rph_sb: Option<f64>,
     /// 診断用 `ENOMOTO_MIP_GAP4_RSS`: 生きている `Solver` の数に数えたか (サブ MIP か)。[`GAP4_LIVE`]
     gap4_live: Option<bool>,
     /// `ENOMOTO_MIP_GAP4` の `k`: 最後の locks の固定率と、根の並列の locks のサブ MIP が実行不能だったか ([`Self::locks_retry`])
@@ -2838,6 +2847,8 @@ pub(crate) struct WorkPool {
     prof: std::sync::Mutex<Vec<TreeProf>>,
     /// ヒューリスティクス役 (`ENOMOTO_MIP_HEUR_ROLE`) のスレッドの数 (番号の大きい方から。0 なら役を分けない)。
     heur_k: usize,
+    /// 試作 `ENOMOTO_MIP_OBJSHAVE=d`: 下界の専任の共有の状態 (主が木に入るときに置く。役に就く木のスレッドが使う)
+    shave: std::sync::OnceLock<std::sync::Arc<ShaveShared>>,
     /// 全てのスレッドで最良の解 (目的値, 解)。ヒューリスティクス役のスレッドが近傍の中心に使う。`has_x` はそれがあるか。
     best_x: std::sync::Mutex<Option<(f64, std::sync::Arc<Vec<f64>>)>>,
     has_x: std::sync::atomic::AtomicBool,
@@ -4421,129 +4432,186 @@ impl TriggerEval {
 /// 主の暫定解が質の悪い FJ の解でなくなったら止める ([`Solver::poll_find_thread`])。40 問 + 16 問 (4 スレッド・60 秒、同じコンテナで
 /// 既定と続けて測る対を順番を入れ替えて 2 組): 40 問は解けた数 25/25 -> 25/25・SGM 18.53/20.41 -> 18.16/20.59 秒・不一致 0、
 /// 16 問は主ギャップの和 2.87/2.87 -> 2.41/2.41 (neos-950242 が 2 組とも 19 -> 6)
-/// 試作 `ENOMOTO_MIP_OBJSHAVE` (既定では使わない。`0`・`off` も使わない): 下界の専任スレッド ([`Solver::spawn_objshave`])
+/// 試作 `ENOMOTO_MIP_OBJSHAVE` (既定では使わない。`0`・`off` も使わない): 下界の専任 ([`Solver::spawn_objshave`])。
+/// `1` (ほかの値も) は、木に入るときから 1 本を専任のスレッドにする (木のスレッドを 1 本減らす)。`d` は、普段は全部のスレッドで木を探し、
+/// 木の下界の伸びが鈍ったときだけ木のスレッドの 1 本を専任の役に回す ([`Solver::objshave_decide`]・[`Solver::shave_role_run`])
 pub(super) fn objshave_on() -> bool {
     env_str!("ENOMOTO_MIP_OBJSHAVE").is_some_and(|v| v != "0" && v != "off")
 }
 
-/// 下界の専任スレッドとの受け渡し。`lb` は示した「この値未満の解はない」(f64 のビット)、`stats` は (試し, 実行不能, 時間切れ, 解あり)。
-/// 捨てるときは止める合図だけ立てる (写しの求解はノードの区切りで止まる。待たない)
-pub(super) struct ObjShave {
-    lb: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    stats: std::sync::Arc<[std::sync::atomic::AtomicU64; 4]>,
-    #[allow(dead_code)]
-    handle: Option<std::thread::JoinHandle<()>>,
+thread_local! {
+    /// 試作 `ENOMOTO_MIP_OBJSHAVE`: このスレッドの一番外の求解で、下界の専任が示した「この値未満の解はない」の最大。再スタートの後の求解が
+    /// `bisect_lb` の始めの値にする (目的値の空間は再スタートの前後で同じ)。一番外の求解の始めに -inf に戻す ([`super::solve_problem`])
+    pub(crate) static OBJSHAVE_CARRY: std::cell::Cell<f64> = const { std::cell::Cell::new(f64::NEG_INFINITY) };
 }
 
-impl ObjShave {
-    fn summary(&self) -> String {
-        let s: Vec<u64> = self.stats.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
-        format!("tries {} infeasible {} time limit {} solution {} lower bound {:.10e}", s[0], s[1], s[2], s[3], f64::from_bits(self.lb.load(std::sync::atomic::Ordering::Acquire)))
-    }
+/// `ENOMOTO_MIP_OBJSHAVE=d` (木が止まりかけたときだけ専任に回す形)
+pub(super) fn objshave_dynamic() -> bool {
+    env_str!("ENOMOTO_MIP_OBJSHAVE") == Some("d")
 }
 
-impl Drop for ObjShave {
-    fn drop(&mut self) {
-        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
-/// 下界の専任スレッドの本体 (試作 `ENOMOTO_MIP_OBJSHAVE`)。目的値は `off + m * step` (m は整数) にしか乗らない。
-/// 下界 L (自分が示した値・主の知らせた下界・始めの下界の最大) を格子に切り上げた点を `off + m0 * step` として、打ち切り値
-/// C = off + (m0 + k − 1/2) step で写しを解く。実行不能なら「C 未満の解はない」ので、格子の上では下界は off + (m0 + k) step。
-/// k (δ = k step) は CP-SAT の難しさの更新と同じく、成功 (実行不能を示した) で 2 倍、時間切れで半分 (1 のときは 1 回の時間を 2 倍) にする。
-/// 解が見つかった (C 未満の解がある) ときも半分にする。C は写しの `valid_below` (写しの大域の固定が成り立つ範囲) と、
-/// 共有の最良値より下の格子の点までに抑える。示した値は `Infeasible` で終わった求解からだけ取る (時間切れ・止めた求解の下界は使わない)
-#[allow(clippy::too_many_arguments)]
-fn objshave_loop(
-    snap: &std::sync::Arc<TreeSnapshot>,
+/// 下界の専任 (試作 `ENOMOTO_MIP_OBJSHAVE`) の共有の状態。専任のスレッド (`1`) か、役に就いた木のスレッド (`d`) が [`Self::try_once`] で
+/// 1 回ずつ試し、主は `lb` (示した「この値未満の解はない」、f64 のビット) と `out` (見つけた解) を受け取る
+pub(super) struct ShaveShared {
+    /// 根の写し (変更なしの根のノード 1 つ)。写しの求解は主と何も共有しない独立の求解
+    snap: std::sync::Arc<TreeSnapshot>,
     params: MipParams,
     step: f64,
     off: f64,
     l0: f64,
     deadline: Instant,
-    budget0: f64,
-    shared: &Portfolio,
-    lb: &std::sync::atomic::AtomicU64,
-    stop: &std::sync::atomic::AtomicBool,
-    stats: &[std::sync::atomic::AtomicU64; 4],
-    verbose: bool,
     t0: Instant,
-) {
-    use std::sync::atomic::Ordering;
-    let mut k = 1.0f64;
-    let mut budget = budget0.max(1e-3);
-    let mut proven = f64::NEG_INFINITY;
-    while !stop.load(Ordering::Relaxed) {
-        let left = deadline.saturating_duration_since(Instant::now()).as_secs_f64();
-        if left <= 0.0 {
-            break;
+    verbose: bool,
+    lb: std::sync::atomic::AtomicU64,
+    /// 主が数えた木全体の下界 ([`Solver::global_lower_bound`]、f64 のビット)。試しの L に使う (共有の `Portfolio::lb` は主の手持ちの待ち行列だけの
+    /// 最小で、木全体の下界より上になりうる)
+    tree_lb: std::sync::atomic::AtomicU64,
+    /// 止める合図 (写しの求解はノードの区切りで見る、`FIND_STOP`)
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// `d`: 主が決めた「専任の役に回す」
+    active: std::sync::atomic::AtomicBool,
+    /// 直前の試しで証明が当たったか (当たり続ける間は役を続ける)
+    hit: std::sync::atomic::AtomicBool,
+    /// (k, 1 回の時間の上限 [秒])
+    kb: std::sync::Mutex<(f64, f64)>,
+    /// (試し, 証明, 時間切れ, 解あり, 役に就いた回数, 主が受け取った解)
+    stats: [std::sync::atomic::AtomicU64; 6],
+    /// 写しの求解が見つけた解 (主の問題の空間。主が `try_incumbent` で検査してから受け取る)
+    out: std::sync::Mutex<Vec<Vec<f64>>>,
+}
+
+impl ShaveShared {
+    fn summary(&self) -> String {
+        let s: Vec<u64> = self.stats.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
+        format!(
+            "tries {} proved {} time limit {} solution {} role entries {} solutions accepted {} lower bound {:.10e}",
+            s[0],
+            s[1],
+            s[2],
+            s[3],
+            s[4],
+            s[5],
+            f64::from_bits(self.lb.load(std::sync::atomic::Ordering::Acquire))
+        )
+    }
+
+    /// 1 回試す。目的値は `off + m * step` (m は整数) にしか乗らない。下界 L (自分が示した値・`l_hint`・始めの下界の最大) を格子に切り上げた点を
+    /// `off + m0 * step` として、打ち切り値 C = off + (m0 + k − 1/2) step で写しを解く。探索を終えた (実行不能、または C 未満の解なしで最適) なら
+    /// 「C 未満の解はない」ので、格子の上では下界は off + (m0 + k) step。k (δ = k step) は CP-SAT の難しさの更新と同じく、証明で 2 倍、
+    /// 時間切れ・解ありで半分 (1 のときの時間切れは 1 回の時間を 2 倍) にする。C は写しの `valid_below` (写しの大域の固定が成り立つ範囲) と、
+    /// 最良値 `ub` より下の格子の点までに抑える。`interrupted` が試しの後に真なら (木が止まった・止める合図) 結果を捨てる。
+    /// 戻り値は (試したか, 証明したか)
+    fn try_once(&self, l_hint: f64, ub: f64, interrupted: &dyn Fn() -> bool) -> (bool, bool) {
+        use std::sync::atomic::Ordering;
+        let left = self.deadline.saturating_duration_since(Instant::now()).as_secs_f64();
+        if left <= 0.0 || self.stop.load(Ordering::Relaxed) {
+            if self.verbose && env_str!("ENOMOTO_MIP_OBJSHAVE_DEBUG").is_some() {
+                eprintln!("MIP: OBJSHAVE: not tried (left {left:.2}s, stop {})", self.stop.load(Ordering::Relaxed));
+            }
+            return (false, false);
         }
-        let l = proven.max(shared.lb()).max(l0);
+        let proven = f64::from_bits(self.lb.load(Ordering::Acquire));
+        let l = proven.max(l_hint).max(f64::from_bits(self.tree_lb.load(Ordering::Relaxed))).max(self.l0);
+        let (step, off) = (self.step, self.off);
         let m0 = ((l - off) / step - 1e-9).ceil();
-        // C = off + (m0 + kk − 1/2) step <= lim となる最大の kk
-        let lim = snap.valid_below.min(shared.best());
+        let lim = self.snap.valid_below.min(ub);
         let kmax = if lim.is_finite() { ((lim - off) / step + 0.5 - 1e-9).floor() - m0 } else { f64::INFINITY };
         if kmax < 1.0 {
-            // 間隙は閉じている (主が閉じる) か、写しの固定が成り立つ範囲を越えた: 待つ
-            std::thread::sleep(Duration::from_millis(50));
-            continue;
+            // 間隙は閉じている (主が閉じる) か、写しの固定が成り立つ範囲を越えた
+            if self.verbose && env_str!("ENOMOTO_MIP_OBJSHAVE_DEBUG").is_some() {
+                eprintln!("MIP: OBJSHAVE: nothing to try (L {l:.10e}, valid below {:.10e}, ub {ub:.10e})", self.snap.valid_below);
+            }
+            return (false, false);
         }
+        let (k, budget) = *self.kb.lock().unwrap();
         let kk = k.min(kmax);
         let c = off + (m0 + kk - 0.5) * step;
         let t = budget.min(left);
         let ts = Instant::now();
-        let r = solve_snapshot(snap.clone(), MipParams { time_limit: t, cutoff: c, ..params });
-        stats[0].fetch_add(1, Ordering::Relaxed);
-        if stop.load(Ordering::Relaxed) {
-            break;
+        // 写しの求解は、このスレッドの共有の値 (ポートフォリオ)・LP の止める合図・デバッグ解を持ち込まない (木のスレッドが役で試すとき)
+        let pf = thread_portfolio();
+        set_thread_portfolio(None);
+        let dbg = DEBUG_SOL.with(|d| d.borrow_mut().take());
+        // 止める合図はノードの区切りで見る (LP の途中では止めない。中断した LP を実行不能と取り違えないため)
+        let fs = FIND_STOP.with(|f| f.replace(Some(self.stop.clone())));
+        let r = crate::cancel::with_halt(None, || solve_snapshot(self.snap.clone(), MipParams { time_limit: t, cutoff: c, ..self.params }));
+        FIND_STOP.with(|f| *f.borrow_mut() = fs);
+        DEBUG_SOL.with(|d| *d.borrow_mut() = dbg);
+        set_thread_portfolio(pf);
+        self.stats[0].fetch_add(1, Ordering::Relaxed);
+        // 見つけた解は (打ち切り値の求解でも) 主の問題の解。主が検査してから受け取る
+        if let Some(x) = r.x.clone() {
+            self.out.lock().unwrap().push(x);
         }
-        // 探索を終えた (実行不能、または C 未満の解なしで最適) なら「C 未満の解はない」(打ち切り値以上の解はヒューリスティクスが打ち切り値に
-        // 関係なく見つけたもので、刈りの上限は C のまま。二分探索の `bisection_worker` と同じ扱い)。C 未満の解を見つけたときは証明にしない
+        if interrupted() || self.stop.load(Ordering::Relaxed) {
+            return (true, false);
+        }
+        // 打ち切り値以上の解はヒューリスティクスが打ち切り値に関係なく見つけたもので、刈りの上限は C のまま (二分探索の `bisection_worker` と同じ扱い)
         let complete = r.status == MipStatus::Infeasible || (r.status == MipStatus::Optimal && r.objective.is_none_or(|z| z >= c));
-        let what = match r.status {
-            _ if complete => {
-                stats[1].fetch_add(1, Ordering::Relaxed);
-                let v = off + (m0 + kk) * step;
-                if v > proven {
-                    proven = v;
-                    let mut cur = lb.load(Ordering::Relaxed);
-                    while v > f64::from_bits(cur) {
-                        match lb.compare_exchange_weak(cur, v.to_bits(), Ordering::AcqRel, Ordering::Relaxed) {
-                            Ok(_) => break,
-                            Err(x) => cur = x,
-                        }
-                    }
+        let mut kb = self.kb.lock().unwrap();
+        let what = if complete {
+            self.stats[1].fetch_add(1, Ordering::Relaxed);
+            let v = off + (m0 + kk) * step;
+            let mut cur = self.lb.load(Ordering::Relaxed);
+            while v > f64::from_bits(cur) {
+                match self.lb.compare_exchange_weak(cur, v.to_bits(), Ordering::AcqRel, Ordering::Relaxed) {
+                    Ok(_) => break,
+                    Err(x) => cur = x,
                 }
-                k = kk * 2.0;
-                "infeasible"
             }
-            _ if r.objective.is_some_and(|z| z < c) => {
-                stats[3].fetch_add(1, Ordering::Relaxed);
-                k = (kk * 0.5).floor().max(1.0);
-                "solution"
+            kb.0 = kk * 2.0;
+            "proved"
+        } else if r.objective.is_some_and(|z| z < c) {
+            self.stats[3].fetch_add(1, Ordering::Relaxed);
+            kb.0 = (kk * 0.5).floor().max(1.0);
+            "solution"
+        } else {
+            self.stats[2].fetch_add(1, Ordering::Relaxed);
+            if kk > 1.0 {
+                kb.0 = (kk * 0.5).floor().max(1.0);
+            } else {
+                kb.1 *= 2.0;
             }
-            _ => {
-                stats[2].fetch_add(1, Ordering::Relaxed);
-                if kk > 1.0 {
-                    k = (kk * 0.5).floor().max(1.0);
-                } else {
-                    budget *= 2.0;
-                }
-                "no result"
-            }
+            "no result"
         };
-        if verbose {
+        self.hit.store(complete, Ordering::Relaxed);
+        if self.verbose {
             eprintln!(
-                "MIP: OBJSHAVE: L {l:.10e} cutoff {c:.10e} (k {kk}) -> {:?} {what} ({:.2}s of {t:.1}s, nodes {}); proven {proven:.10e}, next k {k} budget {budget:.1}s ({:.2}s)",
+                "MIP: OBJSHAVE: L {l:.10e} cutoff {c:.10e} (k {kk}) -> {:?} {what} ({:.2}s of {t:.1}s, nodes {}, solution {:?}); lower bound {:.10e}, next k {} budget {:.1}s ({:.2}s)",
                 r.status,
                 ts.elapsed().as_secs_f64(),
                 r.nodes,
-                t0.elapsed().as_secs_f64()
+                r.objective,
+                f64::from_bits(self.lb.load(Ordering::Acquire)),
+                kb.0,
+                kb.1,
+                self.t0.elapsed().as_secs_f64()
             );
         }
+        (true, complete)
     }
+}
+
+/// 主が持つ下界の専任の手綱。捨てるときは止める合図だけ立てる (写しの求解はノードの区切りで止まる。待たない)
+pub(super) struct ObjShave {
+    st: std::sync::Arc<ShaveShared>,
+    #[allow(dead_code)]
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for ObjShave {
+    fn drop(&mut self) {
+        self.st.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// `d` の判定の状態 (主だけが持つ): 次に判定する全体のノード数、木に入ったときと前の判定の (ノード数, 木の下界)、判定の回数
+#[derive(Default)]
+pub(super) struct ShaveDecide {
+    next: u64,
+    start: Option<(u64, f64)>,
+    prev: Option<(u64, f64)>,
+    n: u64,
 }
 
 pub(super) fn find_thread_on() -> bool {
@@ -4623,6 +4691,7 @@ impl WorkPool {
             t0: Instant::now(),
             prof: std::sync::Mutex::new(Vec::new()),
             heur_k: heur_role_count(threads),
+            shave: std::sync::OnceLock::new(),
             best_x: std::sync::Mutex::new(None),
             has_x: std::sync::atomic::AtomicBool::new(false),
             lp_x: std::sync::Mutex::new(None),
@@ -5990,6 +6059,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         alns_count: [0; 6],
         alns_bud0: None,
         alns_lns_gain: 0.0,
+        alns_w: 1.0,
+        alns_win: (f64::NAN, (0.0, 0.0), (0.0, 0.0)),
         subb: Default::default(),
         lns_grow: [1.0; 6],
         submip_nosol_timeout: false,
@@ -6183,6 +6254,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         find_out: None,
         find_stop: None,
         shave: None,
+        shave_dec: ShaveDecide::default(),
         rens_succ: (0.0, 0),
         rens_infeas: (0.0, 0),
         node_iters: 0,
@@ -6213,6 +6285,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         warm_verified: None,
         rph_bg: None,
         rph_inlp: None,
+        rph_sb: None,
         gap4_live: gap4_sub,
         gap4_locks: (0.0, false),
         mem2_keep: (true, true),
@@ -6280,7 +6353,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         tab_memo: std::collections::HashMap::new(),
         tab_memo_mode: 0,
         tab_memo_stats: (0, 0),
-        bisect_lb: f64::NEG_INFINITY,
+        // 試作 `ENOMOTO_MIP_OBJSHAVE`: 同じ一番外の求解の前の求解 (再スタートの前) で下界の専任が示した値を引き継ぐ
+        bisect_lb: if !params.submip && snap.is_none() && objshave_on() { OBJSHAVE_CARRY.with(|c| c.get()) } else { f64::NEG_INFINITY },
         bisect_frac: 0.5,
         bisect_last: 0,
         bisect_secs: 0.0,
@@ -14397,14 +14471,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     None => continue,
                 }
             }
-            // 試作 `ENOMOTO_MIP_OBJSHAVE`: 下界の専任スレッドが示した「この値未満の解はない」を受け取る (二分探索と同じ `bisect_lb` に入れる)
-            if let Some(sh) = &self.shave {
-                let v = f64::from_bits(sh.lb.load(std::sync::atomic::Ordering::Acquire));
-                if v > self.bisect_lb {
-                    if self.params.verbose {
-                        eprintln!("MIP: OBJSHAVE: lower bound {v:.10e} received ({:.2}s, nodes {})", self.start.elapsed().as_secs_f64(), self.nodes);
-                    }
-                    self.bisect_lb = v;
+            // 試作 `ENOMOTO_MIP_OBJSHAVE`: 下界の専任が示した「この値未満の解はない」(二分探索と同じ `bisect_lb` に入れる) と見つけた解を受け取る
+            if self.shave.is_some() {
+                self.objshave_poll();
+            }
+            // 試作 `ENOMOTO_MIP_OBJSHAVE=d`: 主が役に回すと決めたら、決まった番号の従が下界の専任の役に就く
+            if plunge.is_none() && !first && self.shave_role_mine() {
+                match self.shave_role_run() {
+                    Some(true) => break,
+                    Some(false) => return self.finish_limit(MipStatus::TimeLimit, None),
+                    None => continue,
                 }
             }
             // 目的値の二分探索で、暫定解より良い解がないことを証明した (下界が打ち切り値に届いた)
@@ -16110,7 +16186,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // 割合 (`ENOMOTO_T_MIP_HEUR_ROLE_FRAC`、[`heur_role_count`]) まで上げる (暫定解があるときだけ。役も暫定解があるときだけ就く)
                     // 試作 `ENOMOTO_MIP_ALNS` の `b` ([`super::alns_cp::budget_on`]): 1 スレッドの木で、割合を ALNS-CP の効き目のシグモイドで決める
                     let frac = if super::alns_cp::budget_on() && !self.params.submip && self.pool.is_none() && self.params.threads <= 1 && self.incumbent.is_some() {
-                        self.alns_budget_frac()
+                        self.alns_budget_frac(node.depth)
                     } else {
                         frac
                     };
@@ -17158,7 +17234,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             // 共有の最良値を公表した解が主に届いていない (受信箱で拒まれた、など)。木はその値から作った打ち切り値で刈っているので、
             // 主の暫定解を最適とは言えない (以前は警告だけ出して最適と報告していた。analysis/h80x6320d_warning_20261021.md)
-            if better_obj(sb, z, z) {
+            // `POLISH_FINAL` (`e` の形): 従は暫定解を研磨せずに最良値に置くので、同じ解でも許容の中の違反の分だけ低い値が届き、主はそれを
+            // 「良くない」として受け取らないことがある (qiu の 4 スレッド、1.7e-7。README 5.12 節)。ここでは決めず、求解の終わりの最後の研磨の確かめで、
+            // 刈りに使った値 (研磨の前の値と共有の最良値の小さい方) から上がった幅が許容 (刈りの余裕・W_mip) の中かで決める
+            let defer = better_obj(sb, z, z) && super::polish_warm_mode() == 3 && polish_final('g') && !self.params.submip;
+            if defer {
+                if self.params.verbose {
+                    eprintln!("MIP: POLISH_FINAL: the shared best value {sb:.10e} is better than the main thread's incumbent {z:.10e} at the end of the tree search; deciding at the final polish");
+                }
+                self.rph_sb = Some(sb);
+            } else if better_obj(sb, z, z) {
                 eprintln!("MIP: WARNING: the shared best value {sb:.10e} is better than the main thread's incumbent {z:.10e} at the end of the tree search; not reporting optimality");
                 if !self.unresolved && env_str!("ENOMOTO_MIP_TREE_NO_END_CHECK").is_none() {
                     return self.finish(MipStatus::NotSolved, wlb.min(lim));
@@ -20348,7 +20433,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             && env_str!("ENOMOTO_MIP_PAR_SB").is_some()
             && self.pool.as_ref().is_none_or(|pl| pl.idle.load(std::sync::atomic::Ordering::Relaxed) + 1 >= pl.threads);
         let mut pre: std::collections::HashMap<usize, [SbSide; 2]> = std::collections::HashMap::new();
-        // 試作 `ENOMOTO_MIP_PARSB` (analysis/parsb_20261126、既定では使わない): 強分枝の子の LP を空いたスレッドで先に解いておく
+        // `ENOMOTO_MIP_PARSB` (2026-11-26 から既定、analysis/parsb_20261126): 強分枝の子の LP を空いたスレッドで先に解いておく
         // (投機)。選び方・打ち切りは下の逐次の繰り返しのまま (候補の順に当てはめる)。先に解いた結果は、その子の「入力」
         // (打ち切り値のビット、子の伝播で LP に渡す境界の並び) が逐次で解くときと全く同じときだけ使い、違えば逐次で解く。
         // 子の LP 解が整数のとき (暫定解の候補、`try_lp_solution` が LP の状態を使う) も逐次で解き直す。
@@ -27800,30 +27885,39 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 試作 `ENOMOTO_MIP_ALNS` の `b`: 1 スレッドの木の大近傍探索の割合 = `LNS_TIME_MIN` + (`HEUR_ROLE_FRAC` − `LNS_TIME_MIN`) × σ(ln(r_lns / r_tree))
     /// = 下限 + 幅 × r_lns / (r_lns + r_tree)。新しい閾値はなく、両端は今の木の大近傍探索の下限 (0.02) と 4 スレッドのヒューリスティクス役の割合 (0.25)。
-    /// - r_tree: 測り始めからの主ギャップ (暫定解 − 下界) / max(|暫定解|, 1) の減り (ALNS-CP の改善の分を除く) ÷ 木の手間 (大近傍探索の手間を除く)
-    /// - r_lns: ALNS-CP の相対改善の合計 ÷ 大近傍探索の手間。r_tree と同じ速さの仮の 1 回 (手間 `LNS_CALL_MIN`) を足しておく
+    /// 残りの仕事を Φ = 主ギャップ (暫定解 − 下界)/max(|暫定解|, 1) × 未処理の重み (Σ 0.5^深さ、今のノードを含む) で測る
+    /// (下界が動かない証明の段階でも、刈って木が進めば Φ が減る。重みは 4 スレッドの `publish_tree_weight` と同じ量)。
+    /// - r_tree: 測り始めからの Φ の減り (ALNS-CP の改善の分を除く) ÷ 木の手間 (大近傍探索の手間を除く)
+    /// - r_lns: ALNS-CP の改善 (主ギャップの減り × その時の重み) ÷ 大近傍探索の手間を、1 つ前に暫定解が変わった時からの窓で数える
+    ///   (昔の改善を忘れ、証明だけが残ると下がる)。r_tree と同じ速さの仮の 1 回 (手間 `LNS_CALL_MIN`) を足しておく
     ///   (呼ぶ前は σ(0) = 0.5 で真ん中から始め、効かなければ下がる)
-    /// どちらも 0 なら真ん中
-    pub(super) fn alns_budget_frac(&mut self) -> f64 {
+    /// どちらも 0 なら真ん中。`depth` は今のノードの深さ
+    pub(super) fn alns_budget_frac(&mut self, depth: usize) -> f64 {
         let lo = tunable!("ENOMOTO_T_MIP_LNS_TIME_MIN", 0.02, f64);
         let hi = tunable!("ENOMOTO_T_MIP_HEUR_ROLE_FRAC", 0.25, f64).max(lo);
-        let Some((r_lns, r_tree)) = self.alns_rates() else { return lo };
+        let Some((r_lns, r_tree)) = self.alns_rates(depth) else { return lo };
         let share = if r_lns + r_tree > 0.0 { r_lns / (r_lns + r_tree) } else { 0.5 };
         lo + (hi - lo) * share
     }
 
     /// 改善の大きさ / 手間 (1 手間 ≒ 1 ns) の (r_lns, r_tree) ([`Self::alns_budget_frac`] の説明のとおり)。暫定解がなければ None。
-    /// 初めて呼んだ時を測り始めにする。ほかの 1 スレッドの解探し (T1PRIMAL など) の効き目の入力にも使える
-    pub(super) fn alns_rates(&mut self) -> Option<(f64, f64)> {
+    /// 初めて呼んだ時を測り始めにする。ほかの 1 スレッドの解探し (T1PRIMAL など) の効き目の入力にも使える。`depth` は今のノードの深さ
+    pub(super) fn alns_rates(&mut self, depth: usize) -> Option<(f64, f64)> {
         let z = self.incumbent.as_ref().map(|(z, _)| *z)?;
-        let gap = ((z - self.global_lower_bound()) / z.abs().max(1.0)).max(0.0);
+        let w = 0.5f64.powi(depth.min(2000) as i32) + self.queue.iter().map(|n| 0.5f64.powi(n.depth.min(2000) as i32)).sum::<f64>();
+        self.alns_w = w;
+        let phi = ((z - self.global_lower_bound()) / z.abs().max(1.0)).max(0.0) * w;
         let tk = crate::ticks::total();
-        let (g0, t0, l0) = *self.alns_bud0.get_or_insert((gap, tk, self.lns_ticks));
+        let (p0, t0, l0) = *self.alns_bud0.get_or_insert((phi, tk, self.lns_ticks));
+        if z != self.alns_win.0 {
+            self.alns_win = (z, self.alns_win.2, (self.lns_ticks, self.alns_lns_gain));
+        }
         let piece = tunable!("ENOMOTO_T_MIP_LNS_CALL_MIN", 0.3, f64) * 1e9;
         let lns_tk = (self.lns_ticks - l0).max(0.0);
         let tree_tk = (tk - t0 - lns_tk).max(piece);
-        let r_tree = ((g0 - gap) - self.alns_lns_gain).max(0.0) / tree_tk;
-        let r_lns = (self.alns_lns_gain + r_tree * piece) / (lns_tk + piece);
+        let r_tree = ((p0 - phi) - self.alns_lns_gain).max(0.0) / tree_tk;
+        let (wl, wg) = self.alns_win.1;
+        let r_lns = (self.alns_lns_gain - wg + r_tree * piece) / ((self.lns_ticks - wl).max(0.0) + piece);
         Some((r_lns, r_tree))
     }
 
@@ -28517,7 +28611,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 同じく「目的値 <= 今の下界 + δ」の解があるかを、根の写し ([`TreeSnapshot`]、主と何も共有しない独立の求解) を打ち切り値で解いて調べ、
     /// 実行不能なら下界を上げる ([`objshave_loop`])。示した値は `ObjShave::lb` で主に渡し、主は `bisect_lb` に入れる (閉じる判定と時間切れの
     /// 報告の下界は二分探索と同じ処理)。写しの求解の中で打ち切り値から導いたカット・衝突・固定は、その求解の中だけに残り、主には戻らない
-    fn spawn_objshave(&mut self, shared: std::sync::Arc<Portfolio>, step: f64, l0: f64) {
+    fn spawn_objshave(&mut self, shared: std::sync::Arc<Portfolio>, pool: &std::sync::Arc<WorkPool>, step: f64, l0: f64) {
+        use std::sync::atomic::{AtomicBool, AtomicU64};
         if !l0.is_finite() {
             return;
         }
@@ -28533,29 +28628,216 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let snap = std::sync::Arc::new(snap);
         let remaining = self.secs_left();
         // 1 回の試しの時間の最初の値は、解探索のスレッドと同じ配分 (残り時間の `ENOMOTO_T_MIP_FIND_THREAD_FRAC` 倍、`_MAX` 秒まで)
-        let budget0 = (tunable!("ENOMOTO_T_MIP_FIND_THREAD_FRAC", 0.3, f64) * remaining).min(tunable!("ENOMOTO_T_MIP_FIND_THREAD_MAX", 20.0, f64));
+        let budget0 = (tunable!("ENOMOTO_T_MIP_FIND_THREAD_FRAC", 0.3, f64) * remaining).min(tunable!("ENOMOTO_T_MIP_FIND_THREAD_MAX", 20.0, f64)).max(1e-3);
         let deadline = Instant::now() + Duration::from_secs_f64(if remaining.is_finite() { remaining.max(0.0) } else { 1e9 });
         // 相対ギャップは 0 にする (暫定解 z が C の少し上にあると、ギャップの分だけ C より下で刈り、「C 未満の解はない」が崩れうる)
         let params = MipParams { node_limit: u64::MAX, verbose: false, threads: 1, rel_gap: 0.0, abs_gap: 1e-9, ..self.params };
-        let lb = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(f64::NEG_INFINITY.to_bits()));
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let stats = std::sync::Arc::new([const { std::sync::atomic::AtomicU64::new(0) }; 4]);
-        let verbose = self.params.verbose;
-        let off = self.p.offset;
-        let t0 = self.start;
-        if verbose {
-            eprintln!("MIP: OBJSHAVE: started (step {step}, lower bound {l0:.10e}, first budget {budget0:.1}s, valid below {:.10e}, {:.2}s)", snap.valid_below, self.start.elapsed().as_secs_f64());
+        let dynamic = objshave_dynamic();
+        if self.params.verbose {
+            eprintln!(
+                "MIP: OBJSHAVE: {} (step {step}, lower bound {l0:.10e}, first budget {budget0:.1}s, valid below {:.10e}, {:.2}s)",
+                if dynamic { "role prepared" } else { "thread started" },
+                snap.valid_below,
+                self.start.elapsed().as_secs_f64()
+            );
         }
-        let (lb2, stop2, stats2) = (lb.clone(), stop.clone(), stats.clone());
+        let st = std::sync::Arc::new(ShaveShared {
+            snap,
+            params,
+            step,
+            off: self.p.offset,
+            l0,
+            deadline,
+            t0: self.start,
+            verbose: self.params.verbose,
+            lb: AtomicU64::new(f64::NEG_INFINITY.to_bits()),
+            tree_lb: AtomicU64::new(l0.to_bits()),
+            stop: std::sync::Arc::new(AtomicBool::new(false)),
+            active: AtomicBool::new(false),
+            hit: AtomicBool::new(false),
+            kb: std::sync::Mutex::new((1.0, budget0)),
+            stats: [const { AtomicU64::new(0) }; 6],
+            out: std::sync::Mutex::new(Vec::new()),
+        });
+        if dynamic {
+            let _ = pool.shave.set(st.clone());
+            self.shave = Some(ObjShave { st, handle: None });
+            return;
+        }
+        let st2 = st.clone();
         let h = std::thread::Builder::new()
             .stack_size(64 << 20)
             .spawn(move || {
-                // 写しの求解はノードの区切りで止める合図を見る ([`Solver::time_up`])。LP の途中の打ち切り (`with_halt`) は使わない
-                FIND_STOP.with(|o| *o.borrow_mut() = Some(stop2.clone()));
-                objshave_loop(&snap, params, step, off, l0, deadline, budget0, &shared, &lb2, &stop2, &stats2, verbose, t0);
+                while !st2.stop.load(std::sync::atomic::Ordering::Relaxed) && Instant::now() < st2.deadline {
+                    let (tried, _) = st2.try_once(f64::NEG_INFINITY, shared.best(), &|| false);
+                    if !tried {
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                }
             })
             .expect("failed to spawn the objective shaving thread");
-        self.shave = Some(ObjShave { lb, stop, stats, handle: Some(h) });
+        self.shave = Some(ObjShave { st, handle: Some(h) });
+    }
+
+    /// 試作 `ENOMOTO_MIP_OBJSHAVE`: 主が専任の示した下界と見つけた解を受け取り、`d` なら役に回すかを決める ([`Self::objshave_decide`])
+    fn objshave_poll(&mut self) {
+        let Some(st) = self.shave.as_ref().map(|s| s.st.clone()) else { return };
+        let v = f64::from_bits(st.lb.load(std::sync::atomic::Ordering::Acquire));
+        if v > self.bisect_lb {
+            if self.params.verbose {
+                eprintln!("MIP: OBJSHAVE: lower bound {v:.10e} received ({:.2}s, nodes {})", self.start.elapsed().as_secs_f64(), self.nodes);
+            }
+            self.bisect_lb = v;
+            OBJSHAVE_CARRY.with(|c| c.set(c.get().max(v)));
+        }
+        if self.nodes % 64 == 0 {
+            let tl = self.global_lower_bound();
+            if tl.is_finite() && tl > f64::from_bits(st.tree_lb.load(std::sync::atomic::Ordering::Relaxed)) {
+                st.tree_lb.store(tl.to_bits(), std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        let got: Vec<Vec<f64>> = std::mem::take(&mut *st.out.lock().unwrap());
+        for x in got {
+            let z0 = self.incumbent.as_ref().map(|(z, _)| *z);
+            let label = std::mem::replace(&mut self.heur_label, "objshave");
+            // 主の問題で実行可能かを確かめてから暫定解にする ([`Self::try_incumbent`])
+            let acc = self.try_incumbent(x);
+            self.heur_label = label;
+            if acc {
+                st.stats[5].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            if self.params.verbose {
+                eprintln!("MIP: OBJSHAVE: solution offered: accepted {acc} (incumbent {z0:?} -> {:?}) ({:.2}s)", self.incumbent.as_ref().map(|(z, _)| *z), self.start.elapsed().as_secs_f64());
+            }
+        }
+        if objshave_dynamic() {
+            self.objshave_decide(&st);
+        }
+    }
+
+    /// 試作 `ENOMOTO_MIP_OBJSHAVE=d` の判定 (主だけ): 木の中の再スタートの判定 ([`Self::tree_restart_due`]) と同じく、全体のノード数が
+    /// `ENOMOTO_T_MIP_TREE_RESTART_FIRST` を超えてから `ENOMOTO_T_MIP_TREE_RESTART_EVERY` × スレッド数のノードごとに、木の下界の伸び
+    /// (下界の上がり幅 ÷ ノード数) を、直近の区間 r_recent と木に入ってから全体 r_hist で比べる。役に回す確率は ln(r_hist / r_recent) の
+    /// シグモイド = r_hist / (r_hist + r_recent) (同じ伸びなら 1/2、止まれば 1、伸び始めれば 0 に近づく。どちらも 0 なら 1)。直前の試しで
+    /// 証明が当たっていれば続ける。乱数は種と判定の回数から決める (時間でなく手間で決める)
+    fn objshave_decide(&mut self, st: &ShaveShared) {
+        use std::sync::atomic::Ordering;
+        let Some(pool) = self.pool.clone() else { return };
+        let done = self.nodes + pool.slots.iter().map(|sl| sl.nodes.load(Ordering::Relaxed)).sum::<u64>();
+        if done < self.shave_dec.next {
+            return;
+        }
+        let every = tunable!("ENOMOTO_T_MIP_TREE_RESTART_EVERY", 100u64, u64).max(1) * pool.threads as u64;
+        let lb = self.global_lower_bound();
+        if !lb.is_finite() {
+            self.shave_dec.next = done + every;
+            return;
+        }
+        let Some((n0, lb0)) = self.shave_dec.start else {
+            let first = tunable!("ENOMOTO_T_MIP_TREE_RESTART_FIRST", 1000u64, u64).max(1);
+            if done < first {
+                self.shave_dec.next = first;
+            } else {
+                self.shave_dec.start = Some((done, lb));
+                self.shave_dec.prev = Some((done, lb));
+                self.shave_dec.next = done + every;
+            }
+            return;
+        };
+        let (n1, lb1) = self.shave_dec.prev.unwrap_or((n0, lb0));
+        let r_hist = (lb - lb0).max(0.0) / (done - n0).max(1) as f64;
+        let r_rec = (lb - lb1).max(0.0) / (done - n1).max(1) as f64;
+        let prob = if r_hist + r_rec > 0.0 { r_hist / (r_hist + r_rec) } else { 1.0 };
+        // 種と判定の回数から決める一様乱数 (splitmix64)
+        let mut z = self.params.seed.wrapping_add(0x9E37_79B9_7F4A_7C15u64.wrapping_mul(self.shave_dec.n + 1));
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        let u = (z >> 11) as f64 / (1u64 << 53) as f64;
+        let hit = st.hit.load(Ordering::Relaxed);
+        let on = hit || u < prob;
+        let was = st.active.swap(on, Ordering::Relaxed);
+        if self.params.verbose && on != was {
+            eprintln!(
+                "MIP: OBJSHAVE: role {} (nodes {done}, tree lb {lb:.10e}, rate recent {r_rec:.3e} overall {r_hist:.3e}, p {prob:.3}, u {u:.3}, hit {hit}, {:.2}s)",
+                if on { "on" } else { "off" },
+                self.start.elapsed().as_secs_f64()
+            );
+        }
+        self.shave_dec.prev = Some((done, lb));
+        self.shave_dec.next = done + every;
+        self.shave_dec.n += 1;
+    }
+
+    /// 試作 `ENOMOTO_MIP_OBJSHAVE=d`: このスレッドが下界の専任の役に就くか (主が役に回すと決め、番号がヒューリスティクス役の 1 つ下の従で、
+    /// racing ramp-up を終えたとき)
+    fn shave_role_mine(&self) -> bool {
+        let Some(pool) = &self.pool else { return false };
+        let Some(st) = pool.shave.get() else { return false };
+        let tid = pool.threads.saturating_sub(1 + pool.heur_k);
+        // 従の期限は主より 2 秒長い ([`Self::start_workers`]) ので、専任の期限 (主の期限) を過ぎたら就かない
+        self.snap.is_some() && self.race_done && tid > 0 && self.pool_tid as usize == tid && st.active.load(std::sync::atomic::Ordering::Relaxed) && Instant::now() < st.deadline
+    }
+
+    /// 試作 `ENOMOTO_MIP_OBJSHAVE=d`: 下界の専任の役 (ヒューリスティクス役 [`Self::heur_role_run`] と同じく、手持ちのノードを共有の待ち行列に
+    /// 返してから役に就く)。主が役を外し、直前の試しが当たっていなければ木に戻る (`None`)。木の探索が終われば `Some(true)`、時間切れなら `Some(false)`
+    fn shave_role_run(&mut self) -> Option<bool> {
+        use std::sync::atomic::Ordering;
+        let pool = self.pool.clone()?;
+        let st = pool.shave.get()?.clone();
+        st.stats[4].fetch_add(1, Ordering::Relaxed);
+        let mut out = Vec::with_capacity(self.queue.len());
+        while let Some(n) = self.queue.pop_best() {
+            out.push(self.snap_of(&n));
+        }
+        self.dive_stack.clear();
+        {
+            let mut g = pool.inner.lock().unwrap();
+            g.nodes.extend(out);
+            pool.len.store(g.nodes.len(), Ordering::Relaxed);
+            if self.pool_busy {
+                g.busy -= 1;
+                self.pool_busy = false;
+                if env_str!("ENOMOTO_MIP_NO_ROLE_IDLE_FIX").is_none() {
+                    pool.idle.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            if g.busy == 0 && g.nodes.is_empty() {
+                g.done = true;
+                pool.fin.store(true, Ordering::Release);
+            }
+        }
+        if let Some(sl) = pool.slots.get(self.pool_tid as usize) {
+            sl.lb.store(f64::INFINITY.to_bits(), Ordering::Relaxed);
+            sl.open.store(0, Ordering::Relaxed);
+        }
+        self.dom.reset_to_root(self.p);
+        self.sync_lp();
+        // 写しの求解は、木の探索が終われば止まる ([`Self::time_up`] の `ROLE_POOL`)
+        ROLE_POOL.with(|r| *r.borrow_mut() = Some(pool.clone()));
+        let res = loop {
+            if pool.fin.load(Ordering::Acquire) {
+                break Some(true);
+            }
+            if self.time_up() {
+                break Some(false);
+            }
+            if !st.active.load(Ordering::Relaxed) && !st.hit.load(Ordering::Relaxed) {
+                break None;
+            }
+            let ub = pool.best_x.lock().unwrap().as_ref().map_or(f64::INFINITY, |(z, _)| *z).min(self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z));
+            let lh = f64::NEG_INFINITY;
+            let halt = pool.halt.clone();
+            let (tried, _) = st.try_once(lh, ub, &|| pool.stop.load(Ordering::Relaxed) || pool.fin.load(Ordering::Relaxed) || halt.load(Ordering::Relaxed));
+            if !tried {
+                break None;
+            }
+        };
+        ROLE_POOL.with(|r| *r.borrow_mut() = None);
+        if st.verbose && env_str!("ENOMOTO_MIP_OBJSHAVE_DEBUG").is_some() {
+            eprintln!("MIP: OBJSHAVE: role exit {res:?} (active {}, hit {})", st.active.load(Ordering::Relaxed), st.hit.load(Ordering::Relaxed));
+        }
+        res
     }
 
     /// 木を分け合う従のスレッドを始める (根の処理を終えて木の探索に入るところで、主が呼ぶ)。従は根の後の写し (ノードなし)
@@ -28565,7 +28847,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let tt = if thread_budget_on() && self.find_out.is_some() && self.params.threads > 2 { self.params.threads - 1 } else { self.params.threads };
         // 試作 `ENOMOTO_MIP_OBJSHAVE`: 下界の専任スレッドの分だけ木のスレッドを 1 本減らす (目的が整数の刻みを取る問題だけ)
         let shave_step = self.objshave_step();
-        let tt = if shave_step.is_some() && tt >= 2 { tt - 1 } else { tt };
+        let tt = if shave_step.is_some() && !objshave_dynamic() && tt >= 2 { tt - 1 } else { tt };
         let n = tt - 1;
         // 以後は木の探索が全てのスレッドを使うので、このスレッドの基底のない求解は同時実行にしない
         crate::simplex::mip_lp::set_cold_race_threads(1);
@@ -28596,7 +28878,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if let Some(step) = shave_step {
             let l0 = self.global_lower_bound().min(plunge.as_ref().map_or(f64::INFINITY, |n| n.lower_bound));
-            self.spawn_objshave(shared.clone(), step, l0);
+            self.spawn_objshave(shared.clone(), &pool, step, l0);
         }
         self.tprof.workers_s = self.start.elapsed().as_secs_f64();
         if prof_tree_par() {
@@ -30435,9 +30717,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
     fn finish(&mut self, status: MipStatus, best_bound: f64) -> MipResult {
         // 試作 `ENOMOTO_MIP_OBJSHAVE`: 下界の専任スレッドを止める (待たない)
         if let Some(sh) = self.shave.take() {
-            self.bisect_lb = self.bisect_lb.max(f64::from_bits(sh.lb.load(std::sync::atomic::Ordering::Acquire)));
+            self.bisect_lb = self.bisect_lb.max(f64::from_bits(sh.st.lb.load(std::sync::atomic::Ordering::Acquire)));
+            OBJSHAVE_CARRY.with(|c| c.set(c.get().max(self.bisect_lb)));
             if self.params.verbose {
-                eprintln!("MIP: OBJSHAVE: {} (bisect_lb {:.10e})", sh.summary(), self.bisect_lb);
+                eprintln!("MIP: OBJSHAVE: {} (bisect_lb {:.10e})", sh.st.summary(), self.bisect_lb);
             }
         }
         self.rph_join_polish();
@@ -30685,7 +30968,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 warm_raise = (z - z0).max(0.0);
                 if warm == 3 && (rootpar_ph('f') || polish_final('g')) {
-                    rph_f_raise = Some((z0, z - z0, super::POLISH_TOL_LEAK.with(|c| c.get())));
+                    // 刈りに使った値: 研磨の前の値と、木の終わりに主に届かなかった共有の最良値 (`rph_sb`) の小さい方
+                    let zc = self.rph_sb.map_or(z0, |sb| z0.min(sb));
+                    rph_f_raise = Some((zc, z - zc, super::POLISH_TOL_LEAK.with(|c| c.get())));
                 }
                 self.incumbent = Some((z, x));
             }
@@ -31212,7 +31497,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 目的値を上げたときは、その幅 (`warm_raise`) を引いて比べる (上の研磨の前の値で共有しているため。qiu の 4 スレッドで
         // 研磨が 3e-6 上げ、最適を NotSolved と報告した: analysis/polishp_20261125)
         let (status, best_bound) = match (status, objective, self.shared.as_ref().map(|s| s.best())) {
-            (MipStatus::Optimal, Some(z), Some(sb)) if sb < z - warm_raise - 1e-9 * z.abs().max(1.0) && self.snap.is_none() && env_str!("ENOMOTO_MIP_NO_FINAL_SHARED_CHECK").is_none() => {
+            // `POLISH_FINAL` (`e` の形): 従は暫定解を研磨せずに共有の最良値に置くので、最良値は許容の中の違反の分だけ低く見えうる (W_mip の水準。
+            // 最適の定義と同じ)。その分は食い違いと見ない (qiu の 4 スレッドで、従の未研磨の値が研磨して返す値より 1e-7 低く、最適を NotSolved と
+            // 返した。README 5.12 節)
+            (MipStatus::Optimal, Some(z), Some(sb))
+                if sb < z - warm_raise - (1e-9 * z.abs().max(1.0)).max(rph_f_raise.map_or(0.0, |(_, _, (_, w))| w)) && self.snap.is_none() && env_str!("ENOMOTO_MIP_NO_FINAL_SHARED_CHECK").is_none() =>
+            {
                 eprintln!("MIP: WARNING: the shared best value {sb:.10e} is better than the returned solution {z:.10e} at the end; not reporting optimality");
                 (MipStatus::NotSolved, sb)
             }
@@ -31479,11 +31769,13 @@ fn sb_objprop() -> bool {
     env_str!("ENOMOTO_MIP_SB_OBJPROP").is_some()
 }
 
-/// 試作 `ENOMOTO_MIP_PARSB` (analysis/parsb_20261126、既定では使わない): 強分枝の子の LP を空いたスレッドで先に解く。
-/// 値は文字の並び (`1` など何でも有効、`v` を含めば確かめ)。`0`・`off` で使わない
+/// `ENOMOTO_MIP_PARSB` (analysis/parsb_20261126): 強分枝の子の LP を空いたスレッドで先に解く (2 スレッド以上のときだけ働く)。
+/// 値は文字の並び (`1` など何でも有効、`v` を含めば確かめ、`s`・`p` は診断)。
+/// **2026-11-26 に既定にした: 値 `1` (利用者の判断)。`0`・`off` で使わない (前の形)。** P の 4 スレッドで 0.981 [0.966, 0.995] (3d8853863)・
+/// 0.994 [0.979, 1.010] (ed02a8cc8)、解けた数は減らず (137 → 137・138 → 140)、食い違い 0、根の強分枝は 1.7〜2.5 倍速い。
+/// 先に解いた結果は逐次で解く結果とビットで同じ (子の LP はどれも強分枝の前の LP の複製から解く。既定の逐次とは解の下の桁が違いうる)
 fn parsb_flags() -> Option<&'static str> {
-    static V: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_str!("ENOMOTO_MIP_PARSB").filter(|v| *v != "0" && *v != "off").map(|v| v.to_string())).as_deref()
+    env_def!("ENOMOTO_MIP_PARSB", "1")
 }
 
 /// `ENOMOTO_MIP_PARIDLE` (analysis/paridle_20261126): 複数スレッドの木の始まりの遊びを減らす。値の文字で部品を選ぶ。

@@ -341,3 +341,24 @@ dano3_3 の 2 本は退化の道筋の運で反復が 0.4〜2 倍に動く (3 �
 - LUCLOCK の結論「P の差の大半は退化した LP の道筋の揺れ (閾値を ±1/16 動かすだけで根の LP の反復が 2〜20 倍)」はここでも当てはまる見込み。
   cod105 のように手間の釣り合いが桁で外れている所では道筋の揺れより大きく効く。
 - P 1 スレッド (def・rb1・rbt、522 回、`shards_rb.json`・`res_p_rb.jsonl`、ビルド bf9d78707) を回している。4 スレッドはその後。
+
+### 9.5 P 1 スレッド (def・rb1・rbt、58 問 × 種 1〜3、60 秒、522 回、`res_p_rb.jsonl`・`psumm_rb1_t1.txt`・`psumm_rbt_t1.txt`、ビルド bf9d78707)
+
+crash 0・目的値の食い違い 0。
+
+| | 最適 | ずらし幾何平均 (秒) | 比 (対 def) |
+|---|---|---|---|
+| def_t1 | 128 / 174 | 10.33 | |
+| rb1_t1 (`REFAC_BAL=1`、演算の数) | **134** / 174 | 10.15 | **0.984 [0.934, 1.035]** |
+| rbt_t1 (`REFAC_BAL=t`、実際の秒) | 126 / 174 | 10.29 | 0.997 [0.926, 1.056] |
+
+- rb1 は最適 +6 (10teams 種 1〜3・mzzv42z 種 1・2 (境目)・physiciansched6-2 種 3・timtab1 種 3、失ったのは mc11 種 2)。種 3 つとも同じ向きは、速く: misc07・fiber・neos-3083819-nubu、
+  遅く: nw04 (14 → 19〜23 秒)・nu25-pr12 (1.4 → 3.7〜4.1)・qiu (16〜20 → 26)。LUCLOCK と同じく、P の差の大半は LP の解が変わった後の MIP の道筋。
+- rbt は勝ち負けがほぼ打ち消し合う (最適 −2: mc11 ×2・roll3000 ×2・swath1・mzzv42z を失い、10teams ×2・mzzv42z・timtab1 を得る)。
+- LP 単独で分解し直しが多すぎた rb1 が P では良い向き (P の LP は小さく、分解が軽いので多すぎても損が小さい)。決定的な形 `k` (ticks の較正、親の方針) を作って並べる。
+
+### 8.2 既定にした (2026-11-27、利用者の承認、親の指示)
+
+`ENOMOTO_SIMPLEX_RETRY_ZMAX` を既定で有効にした (`=0`・`off` で使わない、`env_def!` で既定 `1`)。先端 64e0058de (70010bfd6 以降、新しい check_default の基準) で確かめた:
+check_default 6 問一致 (既定の道筋は変わらない。破綻の後の解き直しのときだけ効く)、fuzz 7 本 (`analysis/comboharm_20261124/fuzz.sh`) すべて誤答 0
+(fuzz_tiny 0/400・fuzz_highs 0/300・fuzz_objint 0/1000・fuzz_slack 0/1000・fuzz_tiny2 0/400・fuzz_objint2 0/1000・fuzz_slack2 0/1000)、cargo test 425 通過 (無視 19)。
