@@ -1,7 +1,6 @@
-"""cmirgen の計測の分担を回す: python run.py SET K (SET は P (MIPLIB の 58 問 × 種 1〜3、60 秒)・M (Mittelmann 186 問 × 種 1、600 秒)・
-L (手元の通しの比べ、8 問 × 種 1〜3、60 秒、分担 1 つ))。rootgap_20261121/run.py の写し。
+"""divebudget の P の分担を回す: python run.py SET K (SET は P (4 スレッド) か P1 (1 スレッド)。分担表は plan.py)。alns_20261126/run.py の写し。
 shards_SET.json の K 番目の (問題, 設定, 種, 秒) を順に解き、res_SET_sK.jsonl に足す。途中から再開できる。ソルバーは同時に 1 つ。
-行の形は analysis/final_20261118/run.py と同じ (analysis/slowm_20261119/run.py の写し)。設定は cfg.py、どれも 4 スレッド。"""
+設定は cfg.py。名前が _t1 で終われば 1 スレッド、ほかは 4 スレッド。"""
 import json, os, subprocess, sys, time
 from pathlib import Path
 D = Path(__file__).resolve().parent
