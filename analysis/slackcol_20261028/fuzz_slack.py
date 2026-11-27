@@ -1,7 +1,7 @@
 """費用 0・有界の連続列が 1 行だけに現れる (不等式・範囲制約・等式の行、1 行に何本も) 乱数の LP/MIP で HiGHS と最適値を
 突き合わせる (ENOMOTO_PRESOLVE_SLACK_COL の確かめ用)。python fuzz_slack.py 問題数 [開始seed]"""
 import random, sys, highspy
-from enomoto_solver import Model, Variable
+from enomoto_solver import Model
 inf = float('inf')
 
 def gen(seed):
@@ -42,7 +42,7 @@ def highs(cols, rows):
     return h.modelStatusToString(h.getModelStatus()), h.getInfo().objective_function_value
 
 def ours(cols, rows):
-    M = Model(); xs = [Variable(int if it else float, lo, up) for it, lo, up, _ in cols]
+    M = Model(); xs = [M.add_variable(int if it else float, lo, up) for it, lo, up, _ in cols]
     M.set_objective(sum(c[3] * x for c, x in zip(cols, xs)))
     for r, l, u in rows:
         e = sum(v * xs[j] for j, v in r)

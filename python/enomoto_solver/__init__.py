@@ -1,11 +1,11 @@
 """ENOMOTO-Solver: 線形最適化・混合整数最適化ソルバーの Python 入力インターフェース。
 行列の保持・前処理・最適化アルゴリズムは Rust コア (``enomoto_solver._core``) が担う。
 
-    from enomoto_solver import Model, Variable
+    from enomoto_solver import Model
 
     M = Model()
-    x = Variable(float, 0, 10)
-    y = Variable(float, 0, 10)
+    x = M.add_variable(float, 0, 10)
+    y = M.add_variable(float, 0, 10)
     f = x + 2 * y
     M.set_objective(f, sense="maximize")
     M.add_constraint(x + y <= 10)
@@ -59,7 +59,7 @@ _enomoto_load_core()
 del _enomoto_load_core
 
 from .constraint import Constraint
-from .function import Function
+from .function import Function, quicksum
 from .model import Model, Solution
 from .variable import Variable
 from ._core import __version__, default_threads, max_threads
@@ -73,6 +73,7 @@ __all__ = [
     "Function",
     "Constraint",
     "Solution",
+    "quicksum",
 ]
 
 # パッケージのバージョン (`__version__`) は Rust コアが Cargo.toml の版を持つので、それを上で読み込む。

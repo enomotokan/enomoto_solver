@@ -1,7 +1,7 @@
 """乱数で小さな MIP を作り、HiGHS と最適値を突き合わせる (python scripts/mip_fuzz_vs_highs.py 問題数 [開始seed])。
 比較は ENOMOTO_MIP_REL_GAP=1e-9 で行うこと (既定の相対ギャップ 1e-4 では最適値が少しずれうる)。"""
 import random, sys, highspy, time
-from enomoto_solver import Model, Variable
+from enomoto_solver import Model
 inf=float('inf')
 def gen(seed):
     g=random.Random(seed); n=g.randint(3,25); m=g.randint(2,15)
@@ -48,7 +48,7 @@ def highs(lp):
     h.run(); return h.modelStatusToString(h.getModelStatus()), h.getInfo().objective_function_value
 def ours(lp):
     lo,up,c,it,rows,rlo,rup=lp
-    M=Model(); xs=[Variable(int if it[j] else float,lo[j],up[j]) for j in range(len(lo))]
+    M=Model(); xs=[M.add_variable(int if it[j] else float,lo[j],up[j]) for j in range(len(lo))]
     M.set_objective(sum(cc*x for cc,x in zip(c,xs)))
     for r,l,u in zip(rows,rlo,rup):
         e=sum(v*xs[j] for j,v in r)
