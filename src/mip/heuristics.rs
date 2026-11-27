@@ -663,7 +663,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let mut pick: Option<(usize, f64, bool, f64)> = None; // (列, 値, 上へ, スコア)
             // 線探索は SCIP の `lpsolvefreq` 0 と同じく、同じ LP 解の候補を点数の順に続けて固定し、変わった境界が列の
             // `lpresolvedomchgquot` (SCIP の既定 0.15) を超えたら LP を解き直す (下の「まとめて固定する分」で止める)
-            let ls_multi = kind == DiveKind::LineSearch && !no_multi;
+            // 試作 `ENOMOTO_MIP_DIVEBUDGET` ([`super::solver::divebudget_on`]) の木の中のダイビングは、全種類をこの形にする
+            let ls_multi = (kind == DiveKind::LineSearch || self.dive_scip) && !no_multi;
             let multi = if ls_multi {
                 frac.len()
             } else if multi_div > 0 && !no_multi && frac.len() >= multi_min {
@@ -1066,7 +1067,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if prop_ok && !past {
             self.sync_lp();
             let it0 = self.lp.total_iterations();
-            let lim = budget.saturating_sub(self.lp.total_iterations() - it_start).max(1000);
+            // 試作 `ENOMOTO_MIP_DIVEBUDGET` の木の中のダイビングは、SCIP の `solveLP` と同じく LP 1 回に最低 `MINLPITER`
+            let lp_min = if self.dive_scip { super::solver::DIVE_MINLPITER } else { 1000 };
+            let lim = budget.saturating_sub(self.lp.total_iterations() - it_start).max(lp_min);
             let st = self.lp.solve(&self.limits_k(lim, 2));
             self.heur_iters += self.lp.total_iterations() - it0;
             if st == LpStatus::Optimal && self.lp.objective() + p.offset < search_bound.min(self.prune_limit()) {
