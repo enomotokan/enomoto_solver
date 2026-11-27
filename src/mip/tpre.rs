@@ -729,17 +729,25 @@ fn pt_worker(p: &MipProblem, t: usize, seed: u64, best: &std::sync::Mutex<Vec<Op
 /// このスレッドの OS の優先度を下げる (nice 19、`ENOMOTO_T_MIP_TPRE_PT_NICE`)。主の前処理と並列のプロービングにコアを譲る
 /// (取り合うと主の前処理が遅くなった: satellites2-60-fs 10 秒 → 16〜18 秒)。計算の中身は変わらない (門で手間を数える)
 fn lower_priority() {
-    #[cfg(target_os = "linux")]
+    // gettid() は glibc 2.30 からの関数で、配る wheel の manylinux_2_28 (glibc 2.28) には無い (読み込みで undefined symbol になる)。
+    // そのため syscall(SYS_gettid) で取る (syscall は古い glibc にもある)。番号は x86_64 が 186、aarch64 が 178
+    #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
         extern "C" {
             fn setpriority(which: i32, who: u32, prio: i32) -> i32;
-            fn gettid() -> i32;
+            fn syscall(num: i64, ...) -> i64;
         }
+        #[cfg(target_arch = "x86_64")]
+        const SYS_GETTID: i64 = 186;
+        #[cfg(target_arch = "aarch64")]
+        const SYS_GETTID: i64 = 178;
         let nice = tunable!("ENOMOTO_T_MIP_TPRE_PT_NICE", 19i32, i32);
         // SAFETY: 自分のスレッドの nice を変えるだけ (PRIO_PROCESS = 0 に tid を渡すと Linux ではそのスレッドだけ)
         unsafe {
-            let tid = gettid();
-            let _ = setpriority(0, tid as u32, nice);
+            let tid = syscall(SYS_GETTID);
+            if tid > 0 {
+                let _ = setpriority(0, tid as u32, nice);
+            }
         }
     }
 }
