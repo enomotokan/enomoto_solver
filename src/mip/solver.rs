@@ -5080,7 +5080,29 @@ pub(crate) fn better_obj(z: f64, b: f64, scale: f64) -> bool {
 /// - `m`: 根のカットのラウンドの頭でも判定する (被約費用で固定できる列も数える)。W = 残りのラウンドの見込みの秒
 /// - `a`: 根の内点法の丸めの初めに、費用 0 の内点法の双対で固定する (`ENOMOTO_MIP_HO4_ACFIX=d` と同じ。HiGHS の解析的中心による固定に当たる)
 pub(crate) fn rootrestart2(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_ROOTRESTART2").is_some_and(|v| v.contains(c))
+    rr2_letters(env_str!("ENOMOTO_MIP_ROOTRESTART2"), c)
+}
+
+/// [`rootrestart2`] の値の読み方: `none`・`0`・`off` (と空) は全部オフ、それ以外は文字の集合として読む
+/// (以前は「値に文字が含まれるか」だけだったので、`none`・`def` が文字 `e` を含んでしまっていた)。
+fn rr2_letters(v: Option<&str>, c: char) -> bool {
+    match v.map(str::trim) {
+        None | Some("" | "none" | "0" | "off") => false,
+        Some(v) => v.contains(c),
+    }
+}
+
+#[cfg(test)]
+mod rr2_letters_tests {
+    use super::rr2_letters;
+    #[test]
+    fn off_values_and_letters() {
+        for v in [None, Some(""), Some("none"), Some("0"), Some("off")] {
+            assert!(!rr2_letters(v, 'e') && !rr2_letters(v, 'a') && !rr2_letters(v, 'm'));
+        }
+        assert!(rr2_letters(Some("am"), 'a') && rr2_letters(Some("am"), 'm') && !rr2_letters(Some("am"), 'e'));
+        assert!(rr2_letters(Some("eam"), 'e'));
+    }
 }
 
 /// 試作 `ENOMOTO_MIP_LMBOOST` (COMP07、既定では使わない): [`Solver::lmip_boost`]。
@@ -16648,8 +16670,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             eprintln!("MIP:   no-incumbent heuristic arm {arm}: close {close:.3} found {found} ({secs:.2}s, node {}, frac {time_frac:.2}, stall {})", self.nodes, self.noinc_stall);
                         }
                     }
-                    // 試作 `ENOMOTO_MIP_T1PRIMAL` ([`super::t1primal`]): 貯えがたまっていれば FJ + Local-MIP の補助のスレッドを回す
-                    if self.t1p.is_some() && heur_ok && node.depth > 0 && plunge_depth == 0 {
+                    // 試作 `ENOMOTO_MIP_T1PRIMAL` ([`super::t1primal`]): 貯えがたまっていれば FJ + Local-MIP の補助のスレッドを回す。
+                    // 貯えを見るだけなら安いので、潜りの途中のノードでも見る (潜りの頭だけだと、長く潜る 30n20b8 では 40 秒以上
+                    // 呼ばれない。analysis/t1primal_20261126 8 節)
+                    if self.t1p.is_some() && heur_ok && node.depth > 0 {
                         self.t1primal_tick(false);
                     }
                     xp("m_heur");
@@ -31241,7 +31265,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // 試作 `ROOTPAR_PH` の `f` (`POLISH_WARM=e` と組): 木の中は見積りだけで受け取り、研磨の LP は返す前のここで 1 回だけ解く。
                     // 期限は `d` と同じ求解の期限 (時間切れで終わるときは解かず、見積りを足して返す = `e` と同じ)
                     // `g` (`f` の変形): 返す値を確かにするため、最後の 1 回の研磨には期限を渡さない (時間切れで終わる回も解く。上限を越える分はこの 1 回の LP)
-                    let dl = if warm == 3 && polish_final('g') {
+                    // 試作 `ENOMOTO_MIP_OVERRUN240` の `p` (analysis/overrun240_20261127): 時間切れで終わるときは、最後の研磨にも求解の期限を渡す
+                    // (期限の後に研磨の LP を 1 回解いて上限を 10〜41 秒越えていた: cuanza・neos-873061・thor50dday・dano3_5・snp-02-004-104)。
+                    // 解けなければ、ほかの形と同じく見積りを足した値で返す
+                    let over_p = overrun240('p') && self.time_up();
+                    let dl = if over_p {
+                        self.deadline
+                    } else if warm == 3 && polish_final('g') {
                         None
                     } else if warm == 2 || (warm == 3 && rootpar_ph('f')) {
                         self.deadline
@@ -31293,7 +31323,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 verified => {
                                     let t = Instant::now();
                                     let b = self.lp.basis();
-                                    let r2 = super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), None);
+                                    let dl2 = if overrun240('p') && self.time_up() { self.deadline } else { None };
+                                    let r2 = super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), dl2);
                                     super::WARM_POLISH[9].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                     super::WARM_POLISH[10].fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
                                     match (r2, verified) {
@@ -32134,6 +32165,17 @@ pub(crate) fn objprop_redo(c: char) -> bool {
 /// (`ENOMOTO_MIP_SB_PROP`・`SB_PROBEBD`) で、`ENOMOTO_MIP_OBJ_PROP` が切でも目的の行を伝播する
 fn sb_objprop() -> bool {
     env_str!("ENOMOTO_MIP_SB_OBJPROP").is_some()
+}
+
+/// 試作 `ENOMOTO_MIP_OVERRUN240` (analysis/overrun240_20261127、既定では使わない): 時間の上限を越える分を減らす。値の文字で部品を選ぶ。
+/// `p` 時間切れで終わるとき、最後の研磨にも求解の期限を渡す
+fn overrun240(c: char) -> bool {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| match env_str!("ENOMOTO_MIP_OVERRUN240") {
+        Some(v) if v != "0" && v != "off" => v.to_string(),
+        _ => String::new(),
+    })
+    .contains(c)
 }
 
 /// `ENOMOTO_MIP_PARSB` (analysis/parsb_20261126): 強分枝の子の LP を空いたスレッドで先に解く (2 スレッド以上のときだけ働く)。
