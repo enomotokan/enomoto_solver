@@ -31282,7 +31282,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // `j`: 求解の終わりでは従のスレッドは止まっている ([`Self::join_workers`] の後) ので、研磨の LP の同時実行にスレッド数を渡す
                     // (木の主のスレッドは 1 にしてある)
                     let prev = (polish_final('j') && self.params.threads > 1).then(|| crate::simplex::mip_lp::set_cold_race_threads(self.params.threads));
-                    let r = super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), dl);
+                    // 試作 `ENOMOTO_MIP_POLISH_PRESOLVE` ([`super::polish_presolve_mode`]): LP の前処理 + 単体法で先に解く。解けなければ温めた単体法へ
+                    let pre = super::polish_presolve_mode().filter(|&m| m == 'a' || self.time_up()).map(|_| super::polish_presolved(&self.p, &mut x, z, dl));
+                    let r = match pre {
+                        Some(r @ (super::WarmPolish::Replaced(_) | super::WarmPolish::Kept)) => r,
+                        _ => super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), dl),
+                    };
                     if let Some(k) = prev {
                         crate::simplex::mip_lp::set_cold_race_threads(k);
                     }
@@ -31324,7 +31329,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                     let t = Instant::now();
                                     let b = self.lp.basis();
                                     let dl2 = if overrun240('p') && self.time_up() { self.deadline } else { None };
-                                    let r2 = super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), dl2);
+                                    let pre2 = super::polish_presolve_mode().filter(|&m| m == 'a' || self.time_up()).map(|_| super::polish_presolved(&self.p, &mut x, z, dl2));
+                                    let r2 = match pre2 {
+                                        Some(r @ (super::WarmPolish::Replaced(_) | super::WarmPolish::Kept)) => r,
+                                        _ => super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), dl2),
+                                    };
                                     super::WARM_POLISH[9].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                     super::WARM_POLISH[10].fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
                                     match (r2, verified) {
