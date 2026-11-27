@@ -59,6 +59,7 @@ pub(crate) mod cmirdelta;
 pub(crate) mod seplearn;
 pub(crate) mod sepalloc;
 pub(crate) mod treedepth;
+pub(crate) mod adapt;
 pub(crate) mod cutmix;
 pub(crate) mod mcf;
 pub(crate) mod clique;
@@ -718,6 +719,12 @@ pub fn solve_mip(
         for (l, ns) in crate::simplex::slope_intercept_dual::xprof_workers_take() {
             eprintln!("XPROFW {l:10} {:10.1} ms", ns as f64 / 1e6);
         }
+    }
+    // 診断 `ENOMOTO_DEBUG_TICKSUM` (analysis/lpgap_20261126 の 9.8 節): このスレッドの分解の数と ticks の部分ごとの数 (lpit は LP の反復) と重み付きの合計
+    if env_str!("ENOMOTO_DEBUG_TICKSUM").is_some() && !params.submip {
+        let raw = crate::ticks::raw();
+        let parts: Vec<String> = (0..crate::ticks::NK).map(|k| format!("{}={}", crate::ticks::NAMES[k], raw[k])).collect();
+        eprintln!("TICKSUM builds={} total={:.4e} {}", crate::simplex::lu::LU_BUILDS.with(|c| c.get()), crate::ticks::total(), parts.join(" "));
     }
     let s = p.sense_sign;
     let mut r = r;

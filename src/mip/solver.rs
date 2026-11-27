@@ -4218,6 +4218,10 @@ pub(crate) fn divebudget_on() -> bool {
 ///   木の中 (深さ余り 3・7) と、暫定解がない間の巡回 (`ENOMOTO_MIP_NOINC_BANDIT` でないとき) のダイビングの枠で使う。
 ///   `ENOMOTO_MIP_LSDIVE` が入っていれば線探索も候補に入れる。
 /// - `b`: 種類ごとの上限 (`ENOMOTO_MIP_DIVEBUDGET` と同じ)。`ub` なら上限の残る種類の中から UCB1 で選ぶ。
+/// - `g` (`b` と一緒に): 上限の割合 0.05 (SCIP の `maxlpiterquot`) に、ギャップの係数 2·laplace(ギャップ, n) を掛ける
+///   ([`super::adapt`]、T1PRIMAL v2 の g と同じならし方。項が 1 つなので σ(logit(·)) は値を変えず、省く。n はその種類の呼んだ数)。
+///   情報がない (n = 0) と係数 1 で `ub` と同じ所から始まり、ギャップが小さいほど潜る手間を減らし、大きいままなら 2 に近づく。
+///   暫定解がない間はギャップ 1 で 2(n + 1)/(n + 2) < 2 になり、振り切れない。MINLPITER の最低保証はそのまま。
 pub(crate) fn divesel(c: char) -> bool {
     env_str!("ENOMOTO_MIP_DIVESEL").is_some_and(|v| v != "0" && v != "off" && v.contains(c))
 }
@@ -6829,6 +6833,10 @@ thread_local! {
     /// 試作 `ENOMOTO_MIP_ROOTRESTART2` ([`rootrestart2`]): 根の再スタートを決めた時刻 (外側の経過秒) と、前の再スタートに実際にかかった秒
     /// (決めてから次の根の LP が解けるまで: 前処理のかけ直し + 根の LP の解き直し)
     static RR2_STATE: std::cell::Cell<(f64, f64)> = const { std::cell::Cell::new((f64::NAN, f64::NAN)) };
+    /// 試作 `ENOMOTO_MIP_ROOTRESTART2`: 今の根のカットのループの秒 (再スタートすると、効いているカット以外のこの仕事を次の根でやり直す)
+    static RR2_CUT_SECS: std::cell::Cell<f64> = const { std::cell::Cell::new(f64::NAN) };
+    /// 試作 `ENOMOTO_MIP_ROOTRESTART2`: 今の根の LP の値 (カットの前。根の下界の伸びを測る起点)
+    static RR2_LP0: std::cell::Cell<f64> = const { std::cell::Cell::new(f64::NAN) };
 }
 
 pub(super) fn lp_int_bounds() -> bool {
@@ -11301,6 +11309,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 探索全体の下界 (最小化形): 自分の待ち行列・処理中のノード、木を分け合うときは共有の待ち行列と各スレッドの下界の最小。
+    /// 相対ギャップ (z − lb) / max(|z|, |lb|, 1) を [0, 1] に収めたもの。暫定解なし・下界なしは 1 (T1PRIMAL v2 の g のならす前、
+    /// [`super::adapt`])
+    pub(super) fn gap_frac(&self) -> f64 {
+        match &self.incumbent {
+            None => 1.0,
+            Some((z, _)) => {
+                let lb = self.global_lower_bound();
+                if lb.is_finite() { ((z - lb) / z.abs().max(lb.abs()).max(1.0)).clamp(0.0, 1.0) } else { 1.0 }
+            }
+        }
+    }
+
     pub(super) fn global_lower_bound(&self) -> f64 {
         let mut lb = self.queue.best_lower_bound().min(self.cur_lb);
         if let Some(pool) = &self.pool {
@@ -12233,6 +12253,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             LpStatus::Optimal => {
                 self.cur_lb = self.lp.objective() + self.p.offset;
                 self.root_lb = self.cur_lb;
+                if !self.params.submip && rootrestart2('e') {
+                    RR2_LP0.with(|c| c.set(self.cur_lb));
+                }
                 user_log!("Root LP: objective {:.10e} ({:.2}s)", self.p.sense_sign * (self.lp.objective() + self.p.offset), self.start.elapsed().as_secs_f64());
             }
             LpStatus::Infeasible => {
@@ -12432,6 +12455,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.facecut_probe();
                 }
                 root_cut_secs = t_cut.elapsed().as_secs_f64();
+                if !self.params.submip && (rootrestart2('e') || rootrestart2('m')) {
+                    RR2_CUT_SECS.with(|c| c.set(root_cut_secs));
+                }
                 if root_warm_dse {
                     crate::simplex::slope_intercept_dual::WARM_DSE_ON.store(warm_prev, std::sync::atomic::Ordering::Relaxed);
                 }
@@ -16668,10 +16694,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             }
                             let kinds = &kinds_v[..];
                             // 種類の反復の上限の残り (`db` なら種類ごと、そうでなければ共有の残り)
+                            // `ENOMOTO_MIP_DIVESEL` の `g` ([`divesel`]): 割合 0.05 にギャップの係数 2·laplace(ギャップ, その種類の回数) を掛ける
+                            let dg = divesel('g');
+                            let gap = if dg { self.gap_frac() } else { 1.0 };
+                            if dg && self.params.verbose && env_str!("ENOMOTO_MIP_DEBUG_DIVESEL").is_some() {
+                                let cs: Vec<String> = kinds.iter().map(|k| format!("{:.3}", 2.0 * super::adapt::laplace(gap, self.dive_k[k.idx()].0 as f64))).collect();
+                                eprintln!("MIP:   DIVESEL g: node {} depth {} gap {gap:.4} coefficients {} ({:.2}s, tree dive secs {:.2})", self.nodes, node.depth, cs.join(" "), self.start.elapsed().as_secs_f64(), self.dive_secs);
+                            }
                             let room = |s: &Self, k: K| -> Option<u64> {
                                 if db {
                                     let st = s.dive_k[k.idx()];
-                                    let lim = (0.05 * (11 * st.1 + 1) as f64 / (st.0 + 1) as f64 * ni) as u64 + 1000;
+                                    let gq = if dg { 2.0 * super::adapt::laplace(gap, st.0 as f64) } else { 1.0 };
+                                    let lim = (0.05 * gq * (11 * st.1 + 1) as f64 / (st.0 + 1) as f64 * ni) as u64 + 1000;
                                     (st.2 < lim).then(|| (lim - st.2).max(DIVE_MINLPITER))
                                 } else {
                                     Some(quota.saturating_sub(s.dive_iters))
@@ -27026,21 +27060,51 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 試作 `ENOMOTO_MIP_ROOTRESTART2` の判定: 縮む割合 `s` (新たに固定した列の非零 / 根の始めに自由だった列の非零) の分だけ次の段の手間
     /// `w` 秒が軽くなる見込み `w s` と、再スタートの手間 `C` 秒 (前の再スタートで実際にかかった秒、初回は同じ量の見積もり = 前処理の秒
     /// (外側の経過秒 − このソルバーの経過秒) + 根の LP の秒) を比べ、シグモイド σ(ln(w s / C)) が 1/2 以上 (w s >= C) なら真。
-    /// 初回を外側の経過秒にすると根のヒューリスティクス (satellites2-40 の RINS 174 秒) まで手間に入り、再スタートを見送る (cmp6)
+    /// 初回を外側の経過秒にすると根のヒューリスティクス (satellites2-40 の RINS 174 秒) まで手間に入り、再スタートを見送る (cmp6)。
+    /// `C` には今の根のカットのループの秒も足す (次の根でやり直す仕事。前処理 + 根の LP だけだと、h80x6320d で固定 3〜5% の再スタートを
+    /// 重ねてカットの仕事を捨て、ノードが 3 → 193 に増えた。P の分担の集計、README の 7 節)
     pub(super) fn rr2_value(&self, w: f64, s: f64, tag: &str) -> bool {
         let (_, last) = RR2_STATE.with(|c| c.get());
+        let cut = RR2_CUT_SECS.with(|c| c.get());
+        let cut = if cut.is_finite() { cut.max(0.0) } else { 0.0 };
         let c = if last.is_finite() && last > 0.0 {
-            last
+            last + cut
         } else {
             let pre = super::outer_elapsed().map_or(0.0, |o| (o - self.start.elapsed().as_secs_f64()).max(0.0));
-            (pre + self.root_lp_secs).max(1e-3)
+            (pre + self.root_lp_secs + cut).max(1e-3)
         };
         let g = if s > 0.0 && w > 0.0 { (w * s / c).ln() } else { f64::NEG_INFINITY };
         let sig = 1.0 / (1.0 + (-g).exp());
         if self.params.verbose {
-            eprintln!("MIP: ROOTRESTART2 {tag}: next stage {w:.2}s x shrink {s:.4} vs restart cost {c:.2}s{}: sigmoid {sig:.3} -> restart {}", if last.is_finite() { " (measured)" } else { " (estimated)" }, sig >= 0.5);
+            eprintln!("MIP: ROOTRESTART2 {tag}: next stage {w:.2}s x shrink {s:.4} vs restart cost {c:.2}s{} (cut loop {cut:.2}s): sigmoid {sig:.3} -> restart {}", if last.is_finite() { " (measured)" } else { " (estimated)" }, sig >= 0.5);
         }
         sig >= 0.5
+    }
+
+    /// [`rootrestart2`] の `e`: 根の最後の判定の次の段 (木) の手間の見込み (秒)。根のカットのループが下界を伸ばした速さ
+    /// (伸び Δ = 今の根の下界 − カットの前の根の LP の値、かかった秒 t = カットのループの秒) のまま、残りのギャップ G = 暫定解 − 根の下界を
+    /// 閉じる秒 t·G/Δ とし、期限までの残りを上限にする。暫定解がない・Δ が 0 以下・t が測れないときは期限までの残り。G が 0 以下なら 0。
+    /// 期限までの残りだけだと、1 秒で解ける木 (p0201) にも 60 秒の手間を見込み、固定 1 本でも再スタートしていた (README の 8 節)
+    fn rr2_tree_work(&self) -> f64 {
+        let left = self.secs_left().max(0.0);
+        let lb = self.root_lb;
+        let lp0 = RR2_LP0.with(|c| c.get());
+        let t = RR2_CUT_SECS.with(|c| c.get());
+        let ub = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
+        let (w, why) = if !ub.is_finite() || !lb.is_finite() {
+            (left, "no incumbent")
+        } else if ub - lb <= 0.0 {
+            (0.0, "gap closed")
+        } else if !(lp0.is_finite() && t.is_finite() && t > 0.0 && lb - lp0 > 0.0) {
+            (left, "no root progress")
+        } else {
+            (t * (ub - lb) / (lb - lp0), "root rate")
+        };
+        let w = w.min(left);
+        if self.params.verbose {
+            eprintln!("MIP: ROOTRESTART2 tree work: {w:.2}s ({why}; root LP {lp0:.6e}, root bound {lb:.6e}, incumbent {ub:.6e}, cut loop {t:.2}s, left {left:.2}s)");
+        }
+        w
     }
 
     /// [`rootrestart2`] の再スタートを決めた時刻を置く (次の根の LP の後で [`Self::rr2_root_done`] が手間を測る)
@@ -27054,9 +27118,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.params.submip || self.params.restarts == 0 {
             if !self.params.submip {
                 RR2_STATE.with(|c| c.set((f64::NAN, f64::NAN)));
+                RR2_CUT_SECS.with(|c| c.set(f64::NAN));
             }
             return;
         }
+        RR2_CUT_SECS.with(|c| c.set(f64::NAN));
         let (t0, _) = RR2_STATE.with(|c| c.get());
         if let (true, Some(now)) = (t0.is_finite(), super::outer_elapsed()) {
             RR2_STATE.with(|c| c.set((f64::NAN, now - t0)));
@@ -27122,7 +27188,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 試作 `ENOMOTO_MIP_ROOTRESTART2` の `e`: 固定の割合の閾値と RSTCRIT の代わりに、次の段 (木: 期限までの残り) の縮む分と再スタートの手間を比べる
             let (_, nnz_new, nnz_free, _, _) = self.restart_shrink();
             let s = nnz_new as f64 / nnz_free.max(1) as f64;
-            if nint == 0 || newly == 0 || !self.rr2_value(self.secs_left(), s, "end") {
+            if nint == 0 || newly == 0 || !self.rr2_value(self.rr2_tree_work(), s, "end") {
                 return None;
             }
         } else {
