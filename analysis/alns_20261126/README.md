@@ -344,4 +344,4 @@ OR-Tools CP-SAT の LNS (ortools/sat/cp_model_lns.{h,cc}、ortools/util/adaptati
 - 上界の弱い 10 問の 1 スレッドの primal integral (pint_t1.jsonl の alnsc) は合計 7.419。
   - alnsb の 7.420 と同じで、良さは保たれた。def は 7.982。
   - 問題ごとの値: neos-1456979 0.322、lectsched 0.432、kakapo 0.909、trento1 0.966、comp21 0.850。
-- 次の P は、3f7265069 (qiu の not_solved の直し) を取り込んだ 3895a0502 のビルドで回す。分担表は shards_Pc.json・shards_Pc1.json。
+- 次の P は、3f7265069 (qiu の not_solved の直し) と、既定になった ENOMOTO_SIMPLEX_RETRY_ZMAX を取り込んだ 0d84a7e1d のビルドで回す。分担表は shards_Pc.json・shards_Pc1.json。
