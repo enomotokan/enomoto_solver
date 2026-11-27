@@ -4012,6 +4012,14 @@ fn btran_tin() -> f64 {
     *V.get_or_init(|| if env_str!("ENOMOTO_LU_BTRAN_TINY").is_some_and(|v| v != "0") { 1e-14 } else { 0.0 })
 }
 
+/// 試作 `ENOMOTO_LU_BTRAN_OUT` (既定オフ、analysis/lpiter_20261127 9 節): BTRAN の全走査経路の `O(m)` の走査 (出力の並べ替えと非ゼロの記録
+/// ([`permute_btran_out_capture`])、`L^T` 段の前の非ゼロの数え上げ) を分岐の少ない形にする。結果はビット一致
+#[inline]
+fn btran_out_fast() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_LU_BTRAN_OUT").is_some_and(|v| v != "0"))
+}
+
 /// BTRAN の段の起点 `v` を [`btran_tin`] 以下なら 0 にして真を返す。
 #[inline(always)]
 fn bt_drop(v: &mut f64) -> bool {
@@ -4065,6 +4073,8 @@ pub struct StepCapture {
     limit_frac: f64,
     /// 消費側 FTRAN が使う Gilbert-Peierls スクラッチ。
     gp: GpScratch,
+    /// 試作 [`btran_out_fast`] の分岐なしの記録の作業領域 (長さ `m`)。
+    buf: Vec<u32>,
 }
 
 impl StepCapture {
@@ -4075,6 +4085,7 @@ impl StepCapture {
             valid: false,
             limit_frac: tunable!("ENOMOTO_T_TAU_GP_FRACTION", TAU_GP_FRACTION, f64),
             gp: GpScratch::new(m),
+            buf: Vec::new(),
         }
     }
 
@@ -4532,6 +4543,44 @@ fn permute_btran_out_capture<const ZERO_W: bool>(row_perm: &[usize], w: &mut [f6
     let tiny = tiny_out().max(btran_tin() * 1.0000000000000002);
     // 記録できる非ゼロ数の上限
     let limit = (cap.limit_frac * w.len() as f64) as usize;
+    if btran_out_fast() {
+        // 非ゼロのステップを分岐なしで作業領域に書き (位置は常に `s` 以下)、最後に上限内なら写す。結果は下の形と同じ
+        let m = w.len();
+        if cap.buf.len() < m {
+            cap.buf.resize(m, 0);
+        }
+        let buf = &mut cap.buf[..m];
+        let row_perm = &row_perm[..m];
+        let mut cnt = 0usize;
+        if tiny > 0.0 {
+            for s in 0..m {
+                let v = w[s];
+                if ZERO_W {
+                    w[s] = 0.0;
+                }
+                let v = if v.abs() < tiny { 0.0 } else { v };
+                y[row_perm[s]] = v;
+                buf[cnt] = s as u32;
+                cnt += (v != 0.0) as usize;
+            }
+        } else {
+            for s in 0..m {
+                let v = w[s];
+                if ZERO_W {
+                    w[s] = 0.0;
+                }
+                y[row_perm[s]] = v;
+                buf[cnt] = s as u32;
+                cnt += (v != 0.0) as usize;
+            }
+        }
+        cap.steps.clear();
+        cap.valid = cnt <= limit;
+        if cap.valid {
+            cap.steps.extend(buf[..cnt].iter().map(|&s| s as usize));
+        }
+        return;
+    }
     cap.steps.clear();
     // 上限を超えたか
     let mut over = false;
@@ -5052,11 +5101,22 @@ impl FtLu {
         let mut sparse = true;
         if nnz_bound > limit {
             let mut nnz = 0usize;
-            for &v in w.iter() {
-                nnz += (v != 0.0) as usize;
-                if nnz > limit {
-                    sparse = false;
-                    break;
+            if btran_out_fast() {
+                // 試作: 256 個ずつ数えてから上限と比べる (判定は下の形と同じ)
+                for ch in w.chunks(256) {
+                    nnz += ch.iter().map(|&v| (v != 0.0) as usize).sum::<usize>();
+                    if nnz > limit {
+                        sparse = false;
+                        break;
+                    }
+                }
+            } else {
+                for &v in w.iter() {
+                    nnz += (v != 0.0) as usize;
+                    if nnz > limit {
+                        sparse = false;
+                        break;
+                    }
                 }
             }
         }
