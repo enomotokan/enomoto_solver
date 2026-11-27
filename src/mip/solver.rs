@@ -6831,6 +6831,8 @@ thread_local! {
     static RR2_STATE: std::cell::Cell<(f64, f64)> = const { std::cell::Cell::new((f64::NAN, f64::NAN)) };
     /// 試作 `ENOMOTO_MIP_ROOTRESTART2`: 今の根のカットのループの秒 (再スタートすると、効いているカット以外のこの仕事を次の根でやり直す)
     static RR2_CUT_SECS: std::cell::Cell<f64> = const { std::cell::Cell::new(f64::NAN) };
+    /// 試作 `ENOMOTO_MIP_ROOTRESTART2`: 今の根の LP の値 (カットの前。根の下界の伸びを測る起点)
+    static RR2_LP0: std::cell::Cell<f64> = const { std::cell::Cell::new(f64::NAN) };
 }
 
 pub(super) fn lp_int_bounds() -> bool {
@@ -12235,6 +12237,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             LpStatus::Optimal => {
                 self.cur_lb = self.lp.objective() + self.p.offset;
                 self.root_lb = self.cur_lb;
+                if !self.params.submip && rootrestart2('e') {
+                    RR2_LP0.with(|c| c.set(self.cur_lb));
+                }
                 user_log!("Root LP: objective {:.10e} ({:.2}s)", self.p.sense_sign * (self.lp.objective() + self.p.offset), self.start.elapsed().as_secs_f64());
             }
             LpStatus::Infeasible => {
@@ -27052,6 +27057,32 @@ impl<'a, L: MipLp> Solver<'a, L> {
         sig >= 0.5
     }
 
+    /// [`rootrestart2`] の `e`: 根の最後の判定の次の段 (木) の手間の見込み (秒)。根のカットのループが下界を伸ばした速さ
+    /// (伸び Δ = 今の根の下界 − カットの前の根の LP の値、かかった秒 t = カットのループの秒) のまま、残りのギャップ G = 暫定解 − 根の下界を
+    /// 閉じる秒 t·G/Δ とし、期限までの残りを上限にする。暫定解がない・Δ が 0 以下・t が測れないときは期限までの残り。G が 0 以下なら 0。
+    /// 期限までの残りだけだと、1 秒で解ける木 (p0201) にも 60 秒の手間を見込み、固定 1 本でも再スタートしていた (README の 8 節)
+    fn rr2_tree_work(&self) -> f64 {
+        let left = self.secs_left().max(0.0);
+        let lb = self.root_lb;
+        let lp0 = RR2_LP0.with(|c| c.get());
+        let t = RR2_CUT_SECS.with(|c| c.get());
+        let ub = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
+        let (w, why) = if !ub.is_finite() || !lb.is_finite() {
+            (left, "no incumbent")
+        } else if ub - lb <= 0.0 {
+            (0.0, "gap closed")
+        } else if !(lp0.is_finite() && t.is_finite() && t > 0.0 && lb - lp0 > 0.0) {
+            (left, "no root progress")
+        } else {
+            (t * (ub - lb) / (lb - lp0), "root rate")
+        };
+        let w = w.min(left);
+        if self.params.verbose {
+            eprintln!("MIP: ROOTRESTART2 tree work: {w:.2}s ({why}; root LP {lp0:.6e}, root bound {lb:.6e}, incumbent {ub:.6e}, cut loop {t:.2}s, left {left:.2}s)");
+        }
+        w
+    }
+
     /// [`rootrestart2`] の再スタートを決めた時刻を置く (次の根の LP の後で [`Self::rr2_root_done`] が手間を測る)
     fn rr2_mark(&self) {
         let t = super::outer_elapsed().unwrap_or(f64::NAN);
@@ -27133,7 +27164,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // 試作 `ENOMOTO_MIP_ROOTRESTART2` の `e`: 固定の割合の閾値と RSTCRIT の代わりに、次の段 (木: 期限までの残り) の縮む分と再スタートの手間を比べる
             let (_, nnz_new, nnz_free, _, _) = self.restart_shrink();
             let s = nnz_new as f64 / nnz_free.max(1) as f64;
-            if nint == 0 || newly == 0 || !self.rr2_value(self.secs_left(), s, "end") {
+            if nint == 0 || newly == 0 || !self.rr2_value(self.rr2_tree_work(), s, "end") {
                 return None;
             }
         } else {
