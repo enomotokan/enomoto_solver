@@ -104,7 +104,7 @@ M.set_objective(x + 2 * y, sense="maximize")
 M.add_constraint(x + y <= 10)
 M.add_constraint(x - y >= -4)
 
-sol = M.solve()
+sol = M.solve()                     # 設定は solve の引数で渡す (例: M.solve(threads=4, time_limit=60))
 print(sol.status, sol.objective)    # optimal 17.0
 print(x.value, y.value)             # 3.0 7.0
 ```
@@ -123,11 +123,12 @@ print(x.value, y.value)             # 3.0 7.0
   `quicksum` には変数・式・数値を混ぜて渡せます．式が 1 つもなければ数値の和(空なら `0.0`)を返します．
 - 線型式は `+`，`-`，スカラー倍，数値での割り算で，制約は `<=`，`>=`，`==` で書きます．目的関数と制約は線型式に限ります．変数どうしの積(`x * y`)，べき乗(`x ** 2`)，式での割り算(`1 / x`)のように二次以上になる式を作ると，線型でないことを示す `TypeError` になります．
 - `set_objective(f, sense="minimize" | "maximize")` で目的関数を設定します(既定は最小化)．
+- スレッド数・時間制限などの設定は，すべて `M.solve(...)` の引数で渡します(`Model()` を作るときではありません)．例：`sol = M.solve(threads=4, time_limit=60)`．
 - `solve()` の引数(すべて省略可)：
 
   | 引数 | 意味 |
   |---|---|
-  | `threads` | 使うスレッドの数(既定は，使える CPU の数 + 1 の半分．HiGHS と同じ．`enomoto_solver.default_threads()`)．2 以上なら LP を二段解法と内点法 + クロスオーバーで同時に解き，整数最適化では木の探索も分け合います．詳しくは下の「スレッド数(`threads`)」． |
+  | `threads` | 使うスレッドの数(既定は，使える CPU の数 + 1 の半分．HiGHS と同じ．`enomoto_solver.default_threads()`)．2 以上なら LP を二段解法と内点法 + クロスオーバーで同時に解き，整数最適化では木の探索も分け合います．詳しくはすぐ下の「スレッド数(`threads`)」． |
   | `lp_solver` | LP の解法(既定 `"auto"`．下の「LP の解法の選択」)．以前の名前 `root_solver` も受け付けますが，非推奨です(`DeprecationWarning` を出します)． |
   | `distinguish_infeasible_unbounded` | 有限な最適値がないとき，実行不可能か非有界かを区別するか(既定 `False`．下の「結果の状態と，実行不可能・非有界な問題」)． |
   | `time_limit`，`mip_rel_gap`，`node_limit` | 整数最適化の打ち切り条件(秒，相対ギャップ(既定 0)，ノード数)． |
@@ -135,6 +136,22 @@ print(x.value, y.value)             # 3.0 7.0
   | `seed` | 整数最適化の乱数の種(0 以上 2**64 未満の整数．既定 `None`)．下の「乱数の種(`seed`)」． |
 
 - `solve()` は常に `Solution` を返し，実行不可能・非有界・求解失敗でも例外は送出しません．結果は `Solution.status` で判断します．`status` が `"optimal"` のとき(整数最適化で打ち切ったときは，暫定解があれば)だけ `objective` に値が入り，各変数の値を `.value` で読めます．それ以外では `objective` は `None` で，`.value` を読むと `RuntimeError` になります．
+
+### スレッド数(`threads`)
+
+`solve(threads=...)` で使うスレッドの数を指定します．省略すると，HiGHS と同じく(このプロセスが使える CPU の数 + 1) / 2 にします(`enomoto_solver.default_threads()`．論理コアが 4 なら 2，8 なら 4)．このプロセスが使える CPU の数(`enomoto_solver.max_threads()`)を超える値は，そこで頭打ちにします．プリソルブなどの並列区間も含め，求解全体をこの数のスレッドで動かします．
+
+| `threads` | LP(`lp_solver="auto"`) | MIP |
+|---|---|---|
+| 1 | 傾き・切片双対二段解法だけで解きます． | 緩和問題も木の探索も 1 スレッドで解きます． |
+| k ≥ 2 | 二段解法(1 スレッド)と近接内点法 + クロスオーバー(k − 1 スレッド)で同時に解き，先に結論を出した側を採ります． | warm start できない緩和問題(根など)を左と同じように同時に解き，根の処理の後は k 本のスレッドで木を分け合って探索します(下の「探索の並列化」)． |
+
+同時実行では，始める前にスレッドを二段解法用(1 本)と内点法 + クロスオーバー用(残り)の別々のプールに分けるので，二つの解法が互いのスレッドを奪い合うことはありません．二段解法が先に解ければその基底解をそのまま使い，内点法 + クロスオーバーが先なら，クロスオーバーの仕上げ(二段解法の主ループ)で得た最適基底をそのまま使います．負けた側は打ち切り，その終了は待ちません．
+
+```python
+import enomoto_solver
+sol = M.solve(threads=enomoto_solver.max_threads())   # 使える CPU をすべて使う
+```
 
 ### 結果の状態と，実行不可能・非有界な問題
 
@@ -185,7 +202,7 @@ M = Model()
 items = [(M.add_variable(int, 0, 1), value, weight) for value, weight in [(60, 10), (100, 20), (120, 30)]]
 M.set_objective(quicksum(v * value for v, value, _ in items), sense="maximize")
 M.add_constraint(quicksum(v * weight for v, _, weight in items) <= 50)
-sol = M.solve(time_limit=60)
+sol = M.solve(time_limit=60, threads=4)   # 60 秒・4 スレッドで解く
 print(sol.objective, [round(v.value) for v, _, _ in items])   # 220.0 [0, 1, 1]
 print(sol.best_bound, sol.mip_gap, sol.nodes)                 # 220.0 0.0 0
 ```
@@ -259,22 +276,6 @@ HiGHS と違う点:
 読めるデータが無いファイル(空・注釈だけ・`NAME` だけ)は `ValueError` になります(変数 0 個の問題としては読みません)．
 
 扱えないもの(`ValueError` になります): 二次の項(`QUADOBJ`・`QSECTION`・`QMATRIX`・`QCMATRIX`)・`SOS`・`INDICATORS`・`GENCONS`・`PWLOBJ`・半連続と半整数の境界(`SC`・`SI`)．
-
-### スレッド数(`threads`)
-
-`solve(threads=...)` で使うスレッドの数を指定します．省略すると，HiGHS と同じく(このプロセスが使える CPU の数 + 1) / 2 にします(`enomoto_solver.default_threads()`．論理コアが 4 なら 2，8 なら 4)．このプロセスが使える CPU の数(`enomoto_solver.max_threads()`)を超える値は，そこで頭打ちにします．プリソルブなどの並列区間も含め，求解全体をこの数のスレッドで動かします．
-
-| `threads` | LP(`lp_solver="auto"`) | MIP |
-|---|---|---|
-| 1 | 傾き・切片双対二段解法だけで解きます． | 緩和問題も木の探索も 1 スレッドで解きます． |
-| k ≥ 2 | 二段解法(1 スレッド)と近接内点法 + クロスオーバー(k − 1 スレッド)で同時に解き，先に結論を出した側を採ります． | warm start できない緩和問題(根など)を左と同じように同時に解き，根の処理の後は k 本のスレッドで木を分け合って探索します(上の「探索の並列化」)． |
-
-同時実行では，始める前にスレッドを二段解法用(1 本)と内点法 + クロスオーバー用(残り)の別々のプールに分けるので，二つの解法が互いのスレッドを奪い合うことはありません．二段解法が先に解ければその基底解をそのまま使い，内点法 + クロスオーバーが先なら，クロスオーバーの仕上げ(二段解法の主ループ)で得た最適基底をそのまま使います．負けた側は打ち切り，その終了は待ちません．
-
-```python
-import enomoto_solver
-sol = M.solve(threads=enomoto_solver.max_threads())   # 使える CPU をすべて使う
-```
 
 ### ログ
 
