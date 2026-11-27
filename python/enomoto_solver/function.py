@@ -78,6 +78,30 @@ class Function:
 
     __radd__ = __add__
 
+    def __iadd__(self, other):
+        """``f += other``: ``f`` をその場で書き換える (項の数に比例する手間で済む。``f = f + other`` は
+        毎回 ``f`` の項を複製するので、ループで足し込むと項の数の二乗の手間になる)。
+        同じ Function を別の名前でも持っていれば、そちらも変わる。"""
+        rhs = self._coerce(other)
+        if rhs is None:
+            return NotImplemented
+        coeffs = self.coeffs
+        for j, c in rhs.coeffs.items():
+            coeffs[j] = coeffs.get(j, 0.0) + c
+        self.constant += rhs.constant
+        return self
+
+    def __isub__(self, other):
+        """``f -= other``: ``f`` をその場で書き換える (``__iadd__`` と同じ)。"""
+        rhs = self._coerce(other)
+        if rhs is None:
+            return NotImplemented
+        coeffs = self.coeffs
+        for j, c in rhs.coeffs.items():
+            coeffs[j] = coeffs.get(j, 0.0) - c
+        self.constant -= rhs.constant
+        return self
+
     def __neg__(self):
         """``-self``。"""
         return Function(self.model, {j: -c for j, c in self.coeffs.items()}, -self.constant)
@@ -160,3 +184,29 @@ class Function:
         if self.constant:
             terms += f" + {self.constant:g}"
         return f"Function({terms})"
+
+
+def quicksum(terms) -> "Function | float":
+    """式・変数・数値の並び ``terms`` の和を、項の総数に比例する手間で作る。
+
+        M.add_constraint(quicksum(w[i] * x[i] for i in range(n)) <= cap)
+
+    組み込みの ``sum`` は途中の和を毎回複製するので、項が多いと項の数の二乗の手間になる
+    (1 万項で約 0.5 秒、10 万項で約 50 秒)。``quicksum`` は 1 つの Function に足し込む。
+    式が 1 つもなければ数値の和 (空なら 0.0) を返す。"""
+    acc: "Function | None" = None
+    const = 0.0
+    for t in terms:
+        if isinstance(t, Function):
+            if acc is None:
+                acc = Function(t.model, t.coeffs, t.constant)
+            else:
+                acc += t
+        elif isinstance(t, Number) and not isinstance(t, bool):
+            const += float(t)
+        else:
+            raise TypeError(f"quicksum expects Functions, Variables or numbers, got {type(t).__name__}")
+    if acc is None:
+        return const
+    acc.constant += const
+    return acc

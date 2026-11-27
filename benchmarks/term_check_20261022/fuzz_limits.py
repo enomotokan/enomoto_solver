@@ -8,11 +8,11 @@ sys.argv_saved = sys.argv; sys.argv = [sys.argv[0], "0"]
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 import mip_fuzz_vs_highs as F
 sys.argv = sys.argv_saved
-from enomoto_solver import Model, Variable
+from enomoto_solver import Model
 inf = float("inf")
 def ours(lp):
     lo, up, c, it, rows, rlo, rup = lp
-    M = Model(); xs = [Variable(int if it[j] else float, lo[j], up[j]) for j in range(len(lo))]
+    M = Model(); xs = [M.add_variable(int if it[j] else float, lo[j], up[j]) for j in range(len(lo))]
     M.set_objective(sum(cc * x for cc, x in zip(c, xs)))
     for r, l, u in zip(rows, rlo, rup):
         e = sum(v * xs[j] for j, v in r)
