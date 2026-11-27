@@ -2,7 +2,8 @@
 使い方: python -I hphase.py rel <LP の MPS> [秒]          冷えた始動 (LP 緩和)
         python -I hphase.py warm <prefix>                  書き出したノードの LP (<prefix>.mps / .bas) を同じ出発の基底から
                                                             (基底の作り方は analysis/node_lp_20261106/highs_warm.py と同じ)
-        timer=0 を足すと計時なし (計時の重さを見る)。
+        timer=0 を足すと計時なし (計時の重さを見る)。HPHASE_LEVEL で解析の段階 (既定 8、12 で FTRAN などの密度の集計も)、
+        HPHASE_RAW=<ファイル> で HiGHS の出力をそのまま書く。
 出力: 最後の行に 1 行の JSON (iters, secs, status, phases = {段階: 秒})。"""
 import io, json, math, os, re, sys, tempfile, time
 import highspy
@@ -21,7 +22,7 @@ h.setOptionValue("simplex_strategy", 1)
 h.setOptionValue("threads", 1)
 h.setOptionValue("time_limit", tl)
 if timer:
-    h.setOptionValue("highs_analysis_level", 8)
+    h.setOptionValue("highs_analysis_level", int(os.environ.get("HPHASE_LEVEL", "8")))
 h.readModel(arg + ".mps" if mode == "warm" else arg)
 if mode == "rel":
     lp = h.getLp()
@@ -69,11 +70,13 @@ t0 = time.perf_counter(); h.run(); t = time.perf_counter() - t0
 sys.stdout.flush()
 os.dup2(fd, 1)
 tmp.seek(0); txt = tmp.read().decode(errors="replace")
-ph = {}
+ph = {}; calls = {}
 for l in txt.splitlines():
     mm = re.match(r"SimplexInner-time\s+(\w+)\s+:\s+([\d.e+-]+) \(.*\):\s+(\d+)", l)
     if mm:
-        ph[mm.group(1)] = ph.get(mm.group(1), 0.0) + float(mm.group(2))
+        ph[mm.group(1)] = ph.get(mm.group(1), 0.0) + float(mm.group(2)); calls[mm.group(1)] = calls.get(mm.group(1), 0) + int(mm.group(3))
+if os.environ.get("HPHASE_RAW"):
+    open(os.environ["HPHASE_RAW"], "w").write(txt)
 info = h.getInfo()
 print(json.dumps({"iters": info.simplex_iteration_count, "secs": round(t, 4), "status": h.modelStatusToString(h.getModelStatus()),
-                  "obj": info.objective_function_value, "timer": timer, "phases": ph}))
+                  "obj": info.objective_function_value, "timer": timer, "phases": ph, "calls": calls}))

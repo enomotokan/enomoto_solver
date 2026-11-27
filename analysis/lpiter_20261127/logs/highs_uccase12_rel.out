@@ -1,0 +1,154 @@
+LP uccase12_rel has 121161 rows; 62529 cols; 419447 nonzeros
+Coefficient ranges:
+  Matrix  [9e-05, 4e+02]
+  Cost    [1e+00, 7e+00]
+  Bound   [1e+00, 1e+04]
+  RHS     [3e-02, 6e+03]
+Solving LP without presolve or useful basis
+Using dual simplex solver
+  Iteration        Objective     Infeasibilities num(sum)
+          0     0.0000000000e+00 Pr: 348(201484) 0.2s
+      16297     1.0136054095e+04 Pr: 35527(6.17481e+07); Du: 0(2.57634e-06) 5.2s
+      19402     1.0136310982e+04 Pr: 35477(1.04767e+08); Du: 0(1.96216e-06) 10.7s
+      22383     1.0144991298e+04 Pr: 34736(1.73974e+08); Du: 0(1.25189e-06) 15.8s
+      28571     1.0964230525e+04 Pr: 28105(8.30749e+08); Du: 0(1.12599e-06) 21.3s
+      48927     1.1490226411e+04 Pr: 4668(2073.73); Du: 0(4.05173e-13) 26.5s
+      54256     1.1507285324e+04 Pr: 0(0); Du: 0(3.6631e-12) 27.7s
+      54256     1.1507285324e+04 Pr: 0(0); Du: 0(3.6631e-12) 27.7s
+
+Analysis of 54256 iterations (1 to 54256)
+DSE for        54238 ( 99%) iterations
+Dvx for           18 (  0%) iterations
+
+BTRAN Full performed 94 times
+           0 hyper-sparse operations (  0%)
+           0 hyper-sparse results    (  0%)
+    0.933113 density of result (113056 / 121161 nonzeros)
+
+PRICE Full performed 94 times
+          94 hyper-sparse operations (100%)
+           0 hyper-sparse results    (  0%)
+     0.96332 density of result (60235 / 62529 nonzeros)
+
+BTRAN BcFsCg performed 0 times
+
+PRICE BcFsCg performed 0 times
+
+BTRAN e_p  performed 54268 times
+       54268 hyper-sparse operations (100%)
+       54268 hyper-sparse results    (100%)
+ 0.000259716 density of result (31 / 121161 nonzeros)
+
+PRICE a_p  performed 54256 times
+       54256 hyper-sparse operations (100%)
+       46924 hyper-sparse results    ( 86%)
+ 0.000861869 density of result (53 / 62529 nonzeros)
+
+FTRAN      performed 54256 times
+       54256 hyper-sparse operations (100%)
+       54256 hyper-sparse results    (100%)
+  0.00052106 density of result (63 / 121161 nonzeros)
+
+FTRAN BFRT performed 9779 times
+        9779 hyper-sparse operations (100%)
+        9779 hyper-sparse results    (100%)
+ 0.000321012 density of result (38 / 121161 nonzeros)
+
+FTRAN DSE  performed 54256 times
+       44832 hyper-sparse operations ( 82%)
+       41366 hyper-sparse results    ( 76%)
+  0.00145457 density of result (176 / 121161 nonzeros)
+
+BTRAN PSE  performed 0 times
+
+Invert    performed 90 times: average frequency = 602
+          88 ( 97%) Invert operations due to pseudo-clock
+           2 (  2%) Invert operations due to possibly optimal
+
+       54256 Price operations:
+           0 Col Price      (  0%)
+           0 Row Price      (  0%)
+       54256 Row PriceWSw   (100%)
+
+           0 (  0%) costly DSE        iterations
+
+Devex summary
+           1 Devex frameworks
+          18 average number of iterations
+
+Quad/heap CHUZC summary
+       54238 quad CHUZC: average / max = 12 / 403
+
+grepQuadHeapChuzc,uccase12_rel,Solving LP without presolve or useful basis, 54238, ,12,403, 0, ,0,0
+
+Dual_CHUZC: Number of improve CHUZC row calls =  0
+Dual_CHUZC: Number of pivots removed from pack = 0
+
+Flip/shift summary
+        7778   single        cost shifts (sum / max = 0.000427043 / 1e-07)
+
+grepFlipShift,uccase12_rel,Solving LP without presolve or useful basis,0,0,inf,0,0,0,7778,0.000427043,1e-07
+
+ Iteration speed analysis
+        Iter (      FmIter:      ToIter)      Time      Iter/sec | C_Aq R_Ep R_Ap  DSE | EdWt | CostlyDse
+        4096 (           0:        4096)    0.4085         10027 |    7    8    6    6 |  DSE |         0
+        4096 (        4096:        8192)    0.1890         21669 |    6    9    7    7 |  DSE |         1
+        4096 (        8192:       12288)    0.2648         15471 |    5    6    4    3 |  DSE |        -1
+        4096 (       12288:       16384)    4.4141           927 |    3    3    2    1 |  DSE |         0
+        4096 (       16384:       20480)    6.9777           587 |    3    3    2    1 |  DSE |        -1
+        4096 (       20480:       24576)    7.1800           570 |    3    8    7    4 |  DSE |         1
+        4096 (       24576:       28672)    2.0145          2033 |    4    2    2    1 |  DSE |        -1
+        4096 (       28672:       32768)    1.5355          2667 |    5    9    8    7 |  DSE |         3
+        4096 (       32768:       36864)    1.9924          2055 |    7    9    8    7 |  DSE |         0
+        4096 (       36864:       40960)    0.3167         12934 |    6    9    8    6 |  DSE |         0
+        4096 (       40960:       45056)    0.5668          7226 |    6    9    8    7 |  DSE |         0
+        4096 (       45056:       49152)    0.5999          6827 |    7    6    5    4 |  DSE |        -3
+        4096 (       49152:       53248)    0.8231          4976 |    7    6    5    4 |  DSE |        -3
+        1008 (       53248:       54256)    0.4085          2467 |    6    5    5   99 |  Dvx |        99
+
+
+SimplexInner-time  Operation                       :    Time     ( Total;  Ideal;  Local):    Calls  Time/Call
+SimplexInner-time  COMPUTE_DUAL                    :  4.2485e-01 (  1.5%;   1.5%;   1.6%):       96  4.4255e-03
+SimplexInner-time  CORRECT_DUAL                    :  4.4274e-02 (  0.2%;   0.2%;   0.2%):       90  4.9193e-04
+SimplexInner-time  COMPUTE_PRIMAL                  :  2.7572e-01 (  1.0%;   1.0%;   1.0%):       93  2.9647e-03
+SimplexInner-time  COLLECT_PR_IFS                  :  9.7102e-02 (  0.4%;   0.4%;   0.4%):       90  1.0789e-03
+SimplexInner-time  COMPUTE_PR_IFS                  :  6.3622e-02 (  0.2%;   0.2%;   0.2%):       94  6.7683e-04
+SimplexInner-time  COMPUTE_DU_IFS                  :  3.8946e-02 (  0.1%;   0.1%;   0.1%):       95  4.0996e-04
+SimplexInner-time  COMPUTE_DU_OBJ                  :  2.9063e-02 (  0.1%;   0.1%;   0.1%):       93  3.1250e-04
+SimplexInner-time  COMPUTE_PR_OBJ                  :  1.9703e-03 (  0.0%;   0.0%;   0.0%):        5  3.9406e-04
+SimplexInner-time  INVERT                          :  9.9198e-01 (  3.6%;   3.6%;   3.6%):       89  1.1146e-02
+SimplexInner-time  REPORT_REBUILD                  :  1.0109e-03 (  0.0%;   0.0%;   0.0%):       93  1.0870e-05
+SimplexInner-time  PERM_WT                         :  3.8495e-02 (  0.1%;   0.1%;   0.1%):      177  2.1749e-04
+SimplexInner-time  CHUZC_PRIMAL                    :  2.4712e-03 (  0.0%;   0.0%;   0.0%):       20  1.2356e-04
+SimplexInner-time  CHUZC0                          :  9.7969e-03 (  0.0%;   0.0%;   0.0%):    54238  1.8063e-07
+SimplexInner-time  CHUZC1                          :  5.9601e-01 (  2.1%;   2.2%;   2.2%):    54238  1.0989e-05
+SimplexInner-time  CHUZC2                          :  8.1176e-01 (  2.9%;   2.9%;   3.0%):    54238  1.4967e-05
+SimplexInner-time  CHUZC3                          :  1.1143e-01 (  0.4%;   0.4%;   0.4%):    54238  2.0544e-06
+SimplexInner-time  CHUZC4                          :  4.8983e-02 (  0.2%;   0.2%;   0.2%):    54238  9.0311e-07
+SimplexInner-time  CHUZC5                          :  4.8788e-03 (  0.0%;   0.0%;   0.0%):    54238  8.9951e-08
+SimplexInner-time  FTRAN                           :  3.3929e+00 ( 12.2%;  12.3%;  12.5%):    54256  6.2535e-05
+SimplexInner-time  CHUZR_DUAL                      :  5.7052e-01 (  2.1%;   2.1%;   2.1%):    54251  1.0516e-05
+SimplexInner-time  CHUZR1                          :  2.0027e-05 (  0.0%;   0.0%;   0.0%):       18  1.1126e-06
+SimplexInner-time  CHUZR2                          :  9.7752e-06 (  0.0%;   0.0%;   0.0%):       18  5.4306e-07
+SimplexInner-time  BTRAN                           :  2.9495e+00 ( 10.6%;  10.7%;  10.8%):    54268  5.4351e-05
+SimplexInner-time  PRICE                           :  2.9472e+00 ( 10.6%;  10.6%;  10.8%):    54256  5.4320e-05
+SimplexInner-time  FTRAN_BFRT                      :  3.3553e-01 (  1.2%;   1.2%;   1.2%):     9779  3.4311e-05
+SimplexInner-time  FTRAN_DSE                       :  1.1578e+01 ( 41.8%;  41.8%;  42.5%):    54256  2.1340e-04
+SimplexInner-time  BTRAN_FULL                      :  1.6867e-01 (  0.6%;   0.6%;   0.6%):       94  1.7944e-03
+SimplexInner-time  PRICE_FULL                      :  7.2637e-02 (  0.3%;   0.3%;   0.3%):       94  7.7274e-04
+SimplexInner-time  UPDATE_DVX_WEIGHT               :  2.2650e-05 (  0.0%;   0.0%;   0.0%):       18  1.2583e-06
+SimplexInner-time  UPDATE_DSE_WEIGHT               :  1.5381e-01 (  0.6%;   0.6%;   0.6%):    54256  2.8349e-06
+SimplexInner-time  UPDATE_PRIMAL                   :  6.6102e-01 (  2.4%;   2.4%;   2.4%):   216970  3.0466e-06
+SimplexInner-time  UPDATE_DUAL                     :  5.1304e-01 (  1.9%;   1.9%;   1.9%):    46461  1.1042e-05
+SimplexInner-time  UPDATE_PIVOTS                   :  4.5252e-02 (  0.2%;   0.2%;   0.2%):    54256  8.3404e-07
+SimplexInner-time  UPDATE_FACTOR                   :  1.8770e-01 (  0.7%;   0.7%;   0.7%):    54256  3.4596e-06
+SimplexInner-time  UPDATE_MATRIX                   :  4.9914e-02 (  0.2%;   0.2%;   0.2%):    54256  9.1997e-07
+SimplexInner-time  SUM                             :  2.7218e+01 ( 98.2%;  98.3%; 100.0%)
+SimplexInner-time  TOTAL                           :  2.7729e+01
+
+Model name          : uccase12_rel
+Model status        : Optimal
+Simplex   iterations: 54256
+Objective value     :  1.1507285324e+04
+P-D objective error :  9.8791239601e-15
+HiGHS run time      :         27.74
