@@ -1,0 +1,105 @@
+行 960、設定ごと {'def_t1': 240, 'c3_t1': 240, 'c3_t4': 240, 'def_t4': 240}、コミット {'cd10d12f7': 785, '9e493f5c0': 21, '9302df566': 7, '4d84a33cd': 14, '4a334a8ee': 12, '2592d74fe': 14, 'c17e6ce7a': 15, 'b400ba983': 33, '107406786': 30, '1b2c36f6c': 29}
+crash・killed・取得失敗 8: [('neos-5114902-kasavu', 'def_t1', 1, 'killed'), ('rail02', 'c3_t4', 1, 'crash'), ('rail02', 'def_t4', 1, 'crash'), ('neos-3402454-bohle', 'c3_t1', 1, 'killed'), ('neos-5114902-kasavu', 'c3_t4', 1, 'killed'), ('neos-5114902-kasavu', 'def_t4', 1, 'killed'), ('neos-3402454-bohle', 'c3_t4', 1, 'crash'), ('neos-3402454-bohle', 'def_t4', 1, 'crash')]
+
+== 食い違い 0 件
+
+== 1 スレッド (c3_t1 / def_t1、1 より小さければ c3 が速い)
+
+| 集合 | 組 | 比 | 95% 区間 | 解けた数 既定 → c3 | 既定だけ | c3 だけ | 1.25 倍超の遅れ (うち仕組み・未分類) | 0.8 倍未満 | 目安 |
+|---|---:|---:|---|---|---:|---:|---:|---:|---|
+| M 186 問 | 186 | 0.998 | [0.973, 1.024] | 82 → 82 | 3 | 3 | 11 (9) | 13 | 外れ (遅れ) |
+| 240 問全部 | 240 | 0.985 | [0.957, 1.013] | 89 → 90 | 3 | 4 | 11 (9) | 16 | 外れ (遅れ) |
+| 残りの 54 問 | 54 | 0.940 | [0.859, 1.029] | 7 → 8 | 0 | 1 | 0 (0) | 3 | 候補 |
+
+既定だけ解けた 3: n2seq36q (M) 2.21: c3 time_limit 600.0s / 既定 optimal 265.6s; rail507 (M) 1.30: c3 time_limit 600.0s / 既定 optimal 458.2s [原因: 未切り分け (既定も上限の近く、直し k・s でも時間切れ。comboharm 9 節)]; traininstance6 (M) 1.39: c3 time_limit 600.0s / 既定 optimal 429.9s
+c3 だけ解けた 4: bnatt400 (M) 0.86: c3 optimal 511.7s / 既定 time_limit 600.0s; ex9 (残り) 0.09: c3 optimal 42.9s / 既定 time_limit 600.0s; rocI-4-11 (M) 0.37: c3 optimal 213.4s / 既定 time_limit 600.0s; supportcase33 (M) 0.84: c3 optimal 503.4s / 既定 time_limit 600.0s
+
+1.25 倍超の遅れ 11 問 (240 問全部、比の大きい順):
+   n2seq36q (M) 2.21: c3 time_limit 600.0s / 既定 optimal 265.6s
+   neos-3627168-kasai (M) 2.13: c3 optimal 287.3s / 既定 optimal 129.8s
+   h80x6320d (M) 1.82: c3 optimal 60.9s / 既定 optimal 28.8s [道筋] [原因: enum (種 1 だけ、道筋の運。再スタート後の列挙で根の道筋が変わる。種 1〜3 の幾何で 1.03。直しなし、k・s も効かない。comboharm h80x6320d.md)]
+   ns1208400 (M) 1.74: c3 optimal 145.8s / 既定 optimal 79.3s [道筋] [原因: 組み合わせ (nra とほか、直し k でも消えない。comboharm 9 節)]
+   pg5_34 (M) 1.55: c3 optimal 503.4s / 既定 optimal 321.5s [原因: 未切り分け (1 スレッドでも少し遅い、ノード +6%。直し k・s では消えない。comboharm README 10 節)]
+   dano3_3 (M) 1.43: c3 optimal 122.3s / 既定 optimal 82.5s
+   piperout-27 (M) 1.41: c3 optimal 32.4s / 既定 optimal 20.2s
+   traininstance6 (M) 1.39: c3 time_limit 600.0s / 既定 optimal 429.9s
+   neos859080 (M) 1.33: c3 infeasible 7.0s / 既定 infeasible 2.7s
+   neos-4738912-atrato (M) 1.31: c3 optimal 247.8s / 既定 optimal 186.2s
+   rail507 (M) 1.30: c3 time_limit 600.0s / 既定 optimal 458.2s [原因: 未切り分け (既定も上限の近く、直し k・s でも時間切れ。comboharm 9 節)]
+
+効いた (0.8 倍未満) 16 問 (240 問全部、比の小さい順):
+   ex9 (残り) 0.09: c3 optimal 42.9s / 既定 time_limit 600.0s
+   rocI-4-11 (M) 0.37: c3 optimal 213.4s / 既定 time_limit 600.0s
+   fhnw-binpack4-4 (M) 0.58: c3 infeasible 14.9s / 既定 infeasible 33.0s
+   fast0507 (M) 0.61: c3 optimal 288.2s / 既定 optimal 482.6s
+   neos-631710 (残り) 0.65: c3 optimal 82.6s / 既定 optimal 133.4s [仕組み] [原因: nra (NODEROWS_ADAPT=t、木の中の再スタートの判定。直し k で解ける。comboharm 1 節、1 スレッドで確かめ)]
+   ns1830653 (M) 0.65: c3 optimal 239.8s / 既定 optimal 373.9s
+   mushroom-best (M) 0.66: c3 optimal 277.4s / 既定 optimal 425.8s [道筋] [原因: sbpb (強分枝の子の伝播・両方の子の境界で木が 2.1 倍。直しなし。comboharm 3 節)]
+   fiball (M) 0.67: c3 optimal 168.6s / 既定 optimal 256.7s
+   neos-2978193-inde (M) 0.69: c3 optimal 37.2s / 既定 optimal 58.6s [道筋] [原因: sbpb・nra・bfrt の重なり (道筋。証明の木だけ大きい、組は単調でない。3 種の幾何で 46.5 → 75.1 秒。直しなし、k・s も効かない。comboharm neos-2978193-inde.md)]
+   netdiversion (残り) 0.69: c3 optimal 377.7s / 既定 optimal 548.0s
+   roll3000 (M) 0.71: c3 optimal 40.4s / 既定 optimal 61.4s
+   beasleyC3 (M) 0.71: c3 optimal 53.2s / 既定 optimal 78.7s [仕組み] [原因: nra (種 1〜4 で同じ向き。葉が下界で閉じて f ≈ 0、プールを選び直すラウンドが約 270 回回り、戻した行で 1 ノード 15 → 25 ms。直し案 w・e は効かない。comboharm beasleyC3.md。直し案 NODEROWS_ADAPT=r0k23 (選び直しのラウンドを止め、判定と持ち越しを直す、既定オフ) で 1 スレッドの 6 問 (mc11・neos-631710・fhnw・mik-250・roll3000・beasleyC3) はすべて既定より速い (comboharm README 10.6〜10.9・11 節))]
+   rococoC10-001000 (M) 0.73: c3 optimal 412.4s / 既定 optimal 568.7s [仕組み] [原因: nra・sbpb・bfrt の重なり (nra の害は r0・r0k23 で消える: +nra は既定 519 に対し r0 394・r0k23 423 秒。combo は r0 で 1040、r0k23 で 1229 秒と、なお既定の約 2 倍で、残りは sbpb・bfrt の分 (木の中の再スタートが遅れ持ち越すカットが増える)。ラウンドを止めた 506 秒の回は道筋の運。揺れではない。comboharm rococoC10-001000.md 6 節)]
+   mcsched (M) 0.75: c3 optimal 439.3s / 既定 optimal 590.9s
+   seymour1 (M) 0.78: c3 optimal 158.7s / 既定 optimal 206.8s
+   neos5 (M) 0.79: c3 optimal 77.6s / 既定 optimal 100.9s
+
+== 4 スレッド (c3_t4 / def_t4、1 より小さければ c3 が速い)
+
+| 集合 | 組 | 比 | 95% 区間 | 解けた数 既定 → c3 | 既定だけ | c3 だけ | 1.25 倍超の遅れ (うち仕組み・未分類) | 0.8 倍未満 | 目安 |
+|---|---:|---:|---|---|---:|---:|---:|---:|---|
+| M 186 問 | 186 | 1.017 | [0.980, 1.055] | 100 → 102 | 3 | 5 | 18 (17) | 17 | 外れ (区間上端・遅れ) |
+| 240 問全部 | 240 | 1.010 | [0.974, 1.047] | 110 → 111 | 5 | 6 | 21 (20) | 19 | 外れ (遅れ) |
+| 残りの 54 問 | 54 | 0.985 | [0.890, 1.090] | 10 → 9 | 2 | 1 | 3 (3) | 2 | 外れ (区間上端・解けた数・遅れ) |
+| 240 問全部、両方無効の組を除く | 237 | 1.010 | [0.973, 1.048] | 110 → 111 | 5 | 6 | 21 (20) | 19 | 外れ (遅れ) |
+| M 186 問、両方無効の組を除く | 186 | 1.017 | [0.980, 1.055] | 100 → 102 | 3 | 5 | 18 (17) | 17 | 外れ (区間上端・遅れ) |
+
+両方とも記録が無効な組 3: neos-3402454-bohle (c3 crash / 既定 crash); neos-5114902-kasavu (c3 killed / 既定 killed); rail02 (c3 crash / 既定 crash)
+
+既定だけ解けた 5: ex10 (残り) 3.34: c3 time_limit 600.0s / 既定 optimal 172.5s; gmu-35-40 (M) 4.09: c3 time_limit 600.0s / 既定 optimal 139.0s [原因: はっきりしない (1 スレッドでは両方時間切れ。comboharm 5 節)]; net12 (M) 1.13: c3 time_limit 600.0s / 既定 optimal 530.6s; netdiversion (残り) 1.04: c3 time_limit 600.0s / 既定 optimal 575.6s; tbfp-network (M) 1.85: c3 time_limit 600.0s / 既定 optimal 319.8s [原因: 未切り分け (1 スレッドでは差なし。comboharm 9 節)]
+c3 だけ解けた 6: csched008 (M) 0.58: c3 optimal 341.0s / 既定 time_limit 600.0s; ex9 (残り) 0.09: c3 optimal 46.5s / 既定 time_limit 600.0s; gen-ip002 (M) 0.96: c3 optimal 573.1s / 既定 time_limit 600.0s [揺れ] [原因: 揺れ (既定は 3 回中 2 回が上限すれすれ、combo の時間切れの界も同じ幅。comboharm gen-ip002.md)]; glass4 (M) 0.36: c3 optimal 211.1s / 既定 time_limit 600.0s; rocII-5-11 (M) 0.79: c3 optimal 472.7s / 既定 time_limit 600.0s; wachplan (M) 0.44: c3 optimal 258.4s / 既定 time_limit 600.0s
+
+1.25 倍超の遅れ 21 問 (240 問全部、比の大きい順):
+   gmu-35-40 (M) 4.09: c3 time_limit 600.0s / 既定 optimal 139.0s [原因: はっきりしない (1 スレッドでは両方時間切れ。comboharm 5 節)]
+   ex10 (残り) 3.34: c3 time_limit 600.0s / 既定 optimal 172.5s
+   fiball (M) 2.87: c3 optimal 60.2s / 既定 optimal 14.5s
+   30n20b8 (M) 2.13: c3 optimal 260.5s / 既定 optimal 117.2s [道筋] [原因: sbpb (4 スレッド − sbpb は既定並み、+ sbpb 349・431 秒。ppi は無関係。対策案: sbpb を SB_ADAPT=1 に置き換え (127・175 秒)。comboharm 30n20b8.md)]
+   tbfp-network (M) 1.85: c3 time_limit 600.0s / 既定 optimal 319.8s [原因: 未切り分け (1 スレッドでは差なし。comboharm 9 節)]
+   neos-3627168-kasai (M) 1.84: c3 optimal 115.1s / 既定 optimal 57.9s
+   roi2alpha3n4 (残り) 1.64: c3 optimal 398.0s / 既定 optimal 238.1s [原因: 未切り分け (1 スレッドでは差が小さい。comboharm 9 節)]
+   dano3_3 (M) 1.64: c3 optimal 136.6s / 既定 optimal 79.3s
+   h80x6320d (M) 1.63: c3 optimal 32.7s / 既定 optimal 16.2s
+   fast0507 (M) 1.50: c3 optimal 406.3s / 既定 optimal 267.3s [原因: 未切り分け (1 スレッドでは combo のほうが速い 517 → 345 秒、害は 4 スレッドだけ。comboharm README 10 節)]
+   nw04 (残り) 1.49: c3 optimal 42.8s / 既定 optimal 25.5s
+   neos-1582420 (M) 1.47: c3 optimal 51.0s / 既定 optimal 31.4s [仕組み] [原因: heur (FP の第 3 段を暫定解なしのサブ MIP でも回し、根の再スタートを逃す。直し案 HEUR_ADAPT=1m で 46 秒・既定並み。comboharm neos-1582420.md)]
+   chromaticindex1024-7 (M) 1.47: c3 optimal 563.3s / 既定 optimal 380.9s [仕組み] [原因: enum (ENUM_ADAPT の 1 周目が 449 秒列挙。直し s で根を抜ける。comboharm 2 節)]
+   neos-4722843-widden (M) 1.39: c3 optimal 62.0s / 既定 optimal 41.7s
+   mc11 (M) 1.36: c3 optimal 30.6s / 既定 optimal 19.9s
+   app1-1 (M) 1.33: c3 optimal 17.3s / 既定 optimal 10.6s [仕組み] [原因: heur (同じ仕組み。直し案 LMIP_SCORE_TICKS=1 で 36.2 → 25.1 秒。comboharm app1-1.md。数え違いは combo・HEUR_ADAPT の下でサブ MIP の robust FJ が回るときだけ当たり、既定の道にはほぼ当たらない: 既定 + LMIP_SCORE_TICKS は 15 問で変化なし、P 58 問 × 種 3 で 1.000 [0.997, 1.002]・解けた数 119 → 120・遅れ 0。analysis/lmipticks_20261125)]
+   piperout-27 (M) 1.32: c3 optimal 22.3s / 既定 optimal 14.5s [仕組み] [原因: enum と heur の重なり (根の手間。直し s で 32 → 24 秒、heur の分は 1m・LMIP_SCORE_TICKS でも消えない。comboharm piperout-27.md)]
+   rail507 (M) 1.30: c3 optimal 217.9s / 既定 optimal 164.9s
+   pk1 (M) 1.26: c3 optimal 25.3s / 既定 optimal 17.9s
+   beasleyC3 (M) 1.26: c3 optimal 16.2s / 既定 optimal 10.8s
+   unitcal_7 (M) 1.26: c3 optimal 240.6s / 既定 optimal 189.6s
+
+効いた (0.8 倍未満) 19 問 (240 問全部、比の小さい順):
+   ex9 (残り) 0.09: c3 optimal 46.5s / 既定 time_limit 600.0s
+   glass4 (M) 0.36: c3 optimal 211.1s / 既定 time_limit 600.0s
+   physiciansched6-2 (M) 0.37: c3 optimal 32.1s / 既定 optimal 103.8s
+   ns1830653 (M) 0.40: c3 optimal 108.8s / 既定 optimal 285.0s
+   wachplan (M) 0.44: c3 optimal 258.4s / 既定 time_limit 600.0s
+   rocI-4-11 (M) 0.48: c3 optimal 82.9s / 既定 optimal 182.5s
+   csched008 (M) 0.58: c3 optimal 341.0s / 既定 time_limit 600.0s
+   bnatt400 (M) 0.59: c3 optimal 163.5s / 既定 optimal 281.9s
+   fastxgemm-n2r6s0t2 (M) 0.66: c3 optimal 35.1s / 既定 optimal 58.0s [揺れ] [原因: 再現しない (揺れ。1・4 スレッドとも combo が速い。comboharm fastxgemm-n2r6s0t2.md)]
+   mas74 (M) 0.67: c3 optimal 73.0s / 既定 optimal 114.1s
+   rococoC10-001000 (M) 0.70: c3 optimal 171.1s / 既定 optimal 249.9s
+   neos-3402294-bobin (残り) 0.70: c3 optimal 187.8s / 既定 optimal 271.5s
+   ran14x18-disj-8 (M) 0.70: c3 optimal 408.2s / 既定 optimal 583.4s
+   graphdraw-domain (M) 0.72: c3 optimal 250.2s / 既定 optimal 351.2s [原因: はっきりしない (4 スレッドの道筋の揺れが大きい。cutu・enum・sbpb は抜くと既定並み、heur・nra は抜くと時間切れ。種 1〜3 とも combo が遅い向き。comboharm graphdraw-domain.md)]
+   istanbul-no-cutoff (M) 0.73: c3 optimal 216.6s / 既定 optimal 300.6s
+   ns1208400 (M) 0.74: c3 optimal 45.8s / 既定 optimal 65.6s
+   neos-911970 (M) 0.74: c3 optimal 10.2s / 既定 optimal 17.2s [仕組み] [原因: nra r0k23 の外す側 (combo の計測では得 0.74。r0k23 では φ が木の進みで上がり外す側に切り替わって 1.3〜1.7 倍の害。comboharm README 10.10 節)]
+   traininstance6 (M) 0.79: c3 optimal 242.4s / 既定 optimal 309.7s
+   rocII-5-11 (M) 0.79: c3 optimal 472.7s / 既定 time_limit 600.0s

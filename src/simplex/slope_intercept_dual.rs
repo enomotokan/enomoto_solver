@@ -417,6 +417,12 @@ mod prof_phases {
                 lu::PROF_BTRAN_L_SCATTER.load(Relaxed),
                 lu::PROF_BTRAN_L_GATHER.load(Relaxed),
             );
+            let bp: Vec<usize> = lu::PROF_BTRAN_PATH.iter().map(|a| a.load(Relaxed)).collect();
+            let nb = (bp[0] + bp[1] + bp[2] + bp[3] + bp[4]).max(1) as f64;
+            eprintln!(
+                "  btran_path no_hyper={} u_abort={} dense_reta={} hyper_ok={} l_abort={} calls={} avg_density={:.5} avg_result={:.5}",
+                bp[0], bp[1], bp[2], bp[3], bp[4], nb, bp[5] as f64 / 1e6 / nb, bp[6] as f64 / 1e6 / nb
+            );
             // Markowitz ピボット探索のカウンタ(`ENOMOTO_PROF_TRIANGULAR` で `lu.rs` の走査タイマーが有効)。
             let steps = lu::PROF_TOTAL_STEPS.load(Relaxed);
             eprintln!(
