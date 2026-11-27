@@ -31263,7 +31263,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // 試作 `ROOTPAR_PH` の `f` (`POLISH_WARM=e` と組): 木の中は見積りだけで受け取り、研磨の LP は返す前のここで 1 回だけ解く。
                     // 期限は `d` と同じ求解の期限 (時間切れで終わるときは解かず、見積りを足して返す = `e` と同じ)
                     // `g` (`f` の変形): 返す値を確かにするため、最後の 1 回の研磨には期限を渡さない (時間切れで終わる回も解く。上限を越える分はこの 1 回の LP)
-                    let dl = if warm == 3 && polish_final('g') {
+                    // 試作 `ENOMOTO_MIP_OVERRUN240` の `p` (analysis/overrun240_20261127): 時間切れで終わるときは、最後の研磨にも求解の期限を渡す
+                    // (期限の後に研磨の LP を 1 回解いて上限を 10〜41 秒越えていた: cuanza・neos-873061・thor50dday・dano3_5・snp-02-004-104)。
+                    // 解けなければ、ほかの形と同じく見積りを足した値で返す
+                    let over_p = overrun240('p') && self.time_up();
+                    let dl = if over_p {
+                        self.deadline
+                    } else if warm == 3 && polish_final('g') {
                         None
                     } else if warm == 2 || (warm == 3 && rootpar_ph('f')) {
                         self.deadline
@@ -31315,7 +31321,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 verified => {
                                     let t = Instant::now();
                                     let b = self.lp.basis();
-                                    let r2 = super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), None);
+                                    let dl2 = if overrun240('p') && self.time_up() { self.deadline } else { None };
+                                    let r2 = super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), dl2);
                                     super::WARM_POLISH[9].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                     super::WARM_POLISH[10].fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
                                     match (r2, verified) {
@@ -32156,6 +32163,17 @@ pub(crate) fn objprop_redo(c: char) -> bool {
 /// (`ENOMOTO_MIP_SB_PROP`・`SB_PROBEBD`) で、`ENOMOTO_MIP_OBJ_PROP` が切でも目的の行を伝播する
 fn sb_objprop() -> bool {
     env_str!("ENOMOTO_MIP_SB_OBJPROP").is_some()
+}
+
+/// 試作 `ENOMOTO_MIP_OVERRUN240` (analysis/overrun240_20261127、既定では使わない): 時間の上限を越える分を減らす。値の文字で部品を選ぶ。
+/// `p` 時間切れで終わるとき、最後の研磨にも求解の期限を渡す
+fn overrun240(c: char) -> bool {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| match env_str!("ENOMOTO_MIP_OVERRUN240") {
+        Some(v) if v != "0" && v != "off" => v.to_string(),
+        _ => String::new(),
+    })
+    .contains(c)
 }
 
 /// `ENOMOTO_MIP_PARSB` (analysis/parsb_20261126): 強分枝の子の LP を空いたスレッドで先に解く (2 スレッド以上のときだけ働く)。
