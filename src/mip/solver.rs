@@ -1305,6 +1305,8 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 木で使う変数上下限 (`vbounds` + 根の LP 解で張り付いていた含意だけ)
     pub(super) vb_impl_added: Vec<(usize, bool, usize, f64, f64)>,
     pub(super) vb_impl_rootx: Option<std::sync::Arc<Vec<f64>>>,
+    /// 試作 `ENOMOTO_MIP_LSDIVE` ([`lsdive_on`]): 根の最後の LP 解 (SCIP の `SCIPvarGetRootSol`。木のスレッドへも渡す)
+    pub(super) ls_root_x: Option<std::sync::Arc<Vec<f64>>>,
     pub(super) vbounds_impl_tree: Option<Rc<super::cuts::VarBounds>>,
     /// 診断 `ENOMOTO_MIP_INTVUB_DUMP` を出したか
     pub(super) intvub_dumped: bool,
@@ -1692,7 +1694,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     dive_calls: u64,
     dive_succ: u64,
     /// 試作 `ENOMOTO_MIP_DIVEQUOTA` ([`divequota`]): 種類ごと ([`super::heuristics::DiveKind::idx`]) の (呼び出し回数, 解を見つけた回数, LP 反復数)。
-    dive_k: [(u64, u64, u64); 8],
+    dive_k: [(u64, u64, u64); 9],
     /// 証明の段階の検出 (`ENOMOTO_MIP_PROOF_SWITCH`、[`Self::proof_phase_check`]): 木を分け合わないときの印、最初の
     /// 暫定解の目的値、最後に最良値が良くなった (と気づいた) 時刻とその値、前回調べた時刻。
     proof_phase: bool,
@@ -1788,6 +1790,7 @@ pub(crate) struct TreeSnapshot {
     sep_node_off: u16,
     /// 試作 `ENOMOTO_MIP_VB_IMPL` の `t`: 外側の根の最後の分離の LP 解 (木の分離で、張り付いていた含意の変数上下限だけを使う)
     vb_impl_rootx: Option<std::sync::Arc<Vec<f64>>>,
+    ls_root_x: Option<std::sync::Arc<Vec<f64>>>,
     /// 根で測った分離器の効き目 (`ENOMOTO_MIP_SEPSTAT`、[`super::seplearn::SepLearn::for_tree`])
     sepl: super::seplearn::SepLearn,
     /// 完全オービトープと、対称性の行・固定を加える前の問題 (写しから解く求解も orbitopal fixing をし、ヒューリスティクスの
@@ -4179,6 +4182,13 @@ pub(crate) fn incumb_on(c: char) -> bool {
 
 /// 試作 `ENOMOTO_MIP_OBJDIVE` (analysis/objdive_20261121、既定では使わない): 木のダイビングの種類の巡回に目的を外したダイビング
 /// ([`super::heuristics::DiveKind::ObjPscost`]) を足す。
+/// 試作 `ENOMOTO_MIP_LSDIVE` (analysis/lsdive_20261127、既定は切): 木の中のダイビングの種類に、SCIP の linesearchdiving に当たる
+/// [`super::heuristics::DiveKind::LineSearch`] を足す (根の LP 解から今の LP 解への直線を延ばし、先に整数値に届く列から固定する)。
+pub(crate) fn lsdive_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_MIP_LSDIVE").is_some_and(|v| v != "0" && v != "off"))
+}
+
 pub(crate) fn objdive_on() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_str!("ENOMOTO_MIP_OBJDIVE").is_some_and(|v| v != "0" && v != "off"))
@@ -6411,6 +6421,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         vbounds_impl: None,
         vb_impl_added: Vec::new(),
         vb_impl_rootx: snap.as_ref().and_then(|sn| sn.vb_impl_rootx.clone()),
+        ls_root_x: snap.as_ref().and_then(|sn| sn.ls_root_x.clone()),
         vbounds_impl_tree: None,
         intvub_dumped: false,
         failed_heurs: 0,
@@ -6655,7 +6666,7 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         dive_iters: 0,
         dive_calls: 0,
         dive_succ: 0,
-        dive_k: [(0, 0, 0); 8],
+        dive_k: [(0, 0, 0); 9],
         proof_phase: false,
         proof_first_z: f64::INFINITY,
         proof_last_best: (f64::INFINITY, Instant::now()),
@@ -14002,6 +14013,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.dbg_lost("root domain (before redcost fixing)", !self.dbg_contains());
         let dbg_root = self.dbg_contains();
         self.hcm_root_obj = root_obj;
+        // 試作 `ENOMOTO_MIP_LSDIVE`: 根の最後の LP 解を残す (再スタート後は作り直した根のもので置き換える)
+        if lsdive_on() && !self.params.submip {
+            let x = self.lp.col_values();
+            self.ls_root_x = Some(std::sync::Arc::new(x[..self.p.n.min(x.len())].to_vec()));
+        }
         // `ENOMOTO_MIP_BISECT_SHARE_CUTS`: 木の探索のスレッドの一番外の求解は、根で LP に残ったカットを元の問題の空間に戻して
         // 共有する (二分探索のスレッドが求解の最初に入れる)。成り立つ範囲は今の打ち切り値未満 (根の被約費用による固定は
         // 打ち切り値を使うので、それで締めた境界から作ったカットはその範囲でだけ成り立つ)。対称性を崩す行・固定を根で
@@ -16605,7 +16621,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             let bound = if cutoff.is_finite() { lb + quot * (cutoff - lb) } else { f64::INFINITY };
                             let it0 = self.lp.total_iterations();
                             self.dive_calls += 1;
-                            self.heur_label = if kind == K::ObjPscost { "tree objective diving" } else { "tree diving" };
+                            self.heur_label = match kind {
+                                K::ObjPscost => "tree objective diving",
+                                K::LineSearch => "tree line search diving",
+                                _ => "tree diving",
+                            };
                             let ok = self.dive(kind, budget, bound);
                             if ok {
                                 self.dive_succ += 1;
@@ -16619,6 +16639,31 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             e.1 += ok as u64;
                             e.2 += used;
                             }
+                        }
+                    }
+                    // 試作 `ENOMOTO_MIP_LSDIVE` ([`lsdive_on`]): 線探索ダイビング (SCIP の linesearchdiving) を、巡回の種類とは別に
+                    // SCIP と同じ時期 (深さを 10 で割った余りが 6) と、この種類だけの LP 反復の上限 (SCIP の `getDivesetIterLimit`:
+                    // 0.05 × (解を見つけた回数 + 1) / (呼んだ回数 + 1) × ノードの LP 反復 + 1000 − 使った反復) で呼ぶ。巡回に入れると
+                    // 全種類で共有の上限の残りしか回らず、30n20b8 では 1 回 12 反復・深さ 1 で尽きていた (README 3 節)
+                    if heur_ok && !noinc && node.depth % 10 == 6 && lsdive_on() && env_str!("ENOMOTO_MIP_NO_NODE_DIVE").is_none() && self.ls_root_x.as_ref().is_some_and(|r| r.len() == self.p.n) {
+                        use super::heuristics::DiveKind as K;
+                        let st = self.dive_k[K::LineSearch.idx()];
+                        let lim = (0.05 * (st.1 + 1) as f64 / (st.0 + 1) as f64 * self.node_iters as f64) as u64 + 1000;
+                        if st.2 < lim {
+                            let lb = self.queue.best_lower_bound().min(node_obj);
+                            let cutoff = self.prune_limit();
+                            let quot = if self.has_cutoff_value() { 0.8 } else { 0.1 };
+                            let bound = if cutoff.is_finite() { lb + quot * (cutoff - lb) } else { f64::INFINITY };
+                            let it0 = self.lp.total_iterations();
+                            self.heur_label = "tree line search diving";
+                            let ok = self.dive(K::LineSearch, lim - st.2, bound);
+                            self.heur_label = "";
+                            let used = self.lp.total_iterations() - it0;
+                            self.heur_iters += used;
+                            let e = &mut self.dive_k[K::LineSearch.idx()];
+                            e.0 += 1;
+                            e.1 += ok as u64;
+                            e.2 += used;
                         }
                     }
                     if node_obj >= self.prune_limit() {
@@ -28671,7 +28716,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let pool: Vec<(Vec<(usize, f64)>, f64)> = self.cut_pool.iter().map(|(c, r, _)| (c.clone(), *r)).collect();
         let orig = self.orig.as_ref().map(|o| std::sync::Arc::new(if gap4('o') { o.clone_without_implications() } else { (**o).clone() }));
         let root_basis = if tree_root_basis() { Some(self.lp.basis()) } else { None };
-        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), hcm_auto: self.hcm_auto, sep_node_off: self.sep_adapt.node_off, vb_impl_rootx: self.vb_impl_rootx.clone(), sepl: self.sl.for_tree(), orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone(), sst_chain: (*self.sst_chain).clone(), of_gens: self.of_gens.gens.clone(), refl_gens: self.symdyn.as_ref().map(|d| d.refl()).unwrap_or_default(), root_basis, clq_lazy: self.clq_lazy.clone(), gen_lazy: self.gen_lazy.clone() };
+        let snap = TreeSnapshot { serial, p, lo: self.dom.global_lo.clone(), up: self.dom.global_up.clone(), rows, pool, pc: self.pc.clone(), nodes: snodes, valid_below: self.prune_limit(), hcm_auto: self.hcm_auto, sep_node_off: self.sep_adapt.node_off, vb_impl_rootx: self.vb_impl_rootx.clone(), ls_root_x: self.ls_root_x.clone(), sepl: self.sl.for_tree(), orbitopes: (*self.orbitopes).clone(), orig, lex_gens: (*self.lex_gens).clone(), sst_chain: (*self.sst_chain).clone(), of_gens: self.of_gens.gens.clone(), refl_gens: self.symdyn.as_ref().map(|d| d.refl()).unwrap_or_default(), root_basis, clq_lazy: self.clq_lazy.clone(), gen_lazy: self.gen_lazy.clone() };
         if self.params.verbose && env_str!("ENOMOTO_MIP_BISECT_VERBOSE").is_some() {
             eprintln!("MIP: tree snapshot {serial}: {} nodes, {} cut rows, valid below {:.10e} ({:.1}s)", snap.nodes.len(), snap.rows.len(), snap.valid_below, self.start.elapsed().as_secs_f64());
         }
@@ -31366,6 +31411,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             eprintln!("MIP: branching: {} selections, {} without strong branching for dual degeneracy; sb LPs {} iters {}", self.sb_degen_stats[0], self.sb_degen_stats[1], self.sb_lps, self.sb_iters);
             if sbdegen_on() {
                 eprintln!("MIP: SBDEGEN: strong-branching nodes {}, changed the pseudocost pick {} (s = {:.3})", self.sbdg_stats[0], self.sbdg_stats[1], (self.sbdg_stats[1] + 1) as f64 / (self.sbdg_stats[0] + 2) as f64);
+            }
+            if lsdive_on() {
+                eprintln!("MIP: LSDIVE: tree dives by kind (calls, found, iterations) {:?} (tid {})", self.dive_k, self.pool_tid);
             }
             if feat_diag().is_some() {
                 eprintln!("{}", self.feat_line("end"));
