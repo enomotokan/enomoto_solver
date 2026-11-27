@@ -11548,3 +11548,19 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
 - 書き換え: tests・examples・scripts・benchmarks・analysis の台本 (計 38 本) の `Variable(...)` を `M.add_variable(...)` にした。README・DESIGN も直した。
 - 確かめ: Python のテスト 69 件通過 (新しいテスト 5 件を含む)、examples/smoke_test.py、fuzz_slack 50 本 (食い違い 0)。
 - 注意: 書き換えた台本は新しい Python 側 (この版以降) でしか動かない。古いビルドを入れたままの環境では、merge の後に `pip install -e .` が要る。
+
+## 2026-11-27: 締め付けだけの周の前処理のかけ直しを既定に (`ENOMOTO_MIP_PRR_TIGHT=o`、利用者の承認)
+
+- 変更: プロービングが固定 0 本で境界を締めただけの周でも、締めた境界で前処理 (係数の強化) をかけ直し、またプロービングする、を繰り返す
+  (`src/mip/mod.rs` の `represolve_after_probe`・`prr_tight_mode`)。止めは SCIP の `presolving/abortfac` と同じ形 (その周の固定と締め付けが列の数の 0.0008 倍に届かなければやめる)。
+  固定のある周は従来の規則 (`PRR_MIN_FIXED`・`PRR_MIN_ROW_FRAC`・`PROBE_REPRESOLVE_MAX`) のまま。`ENOMOTO_MIP_PRR_TIGHT=0` (か `off`) で従来の形に戻る。新しい閾値はない。
+- 理由 (analysis/rootbound_20261126 の 6 節): istanbul-no-cutoff (連続の信頼度の変数の鎖と Big-M=1 の行) では、プロービングの締め付けが鎖を 1 段ずつしか進まず、
+  かけ直さないと根の LP が弱いまま。`=o` で 11 周回り、根の下界 107.7 → 143.4 (SCIP 129.4)、1 スレッドで既定は 600 秒で解けないものが 535 秒で最適 204.08。
+- P (`analysis/rootbound_20261126/prrto/`、58 問 × 種 1〜3、60 秒、696 回、crash 0、食い違い 0):
+  - 1 スレッド: 1.001 [0.999, 1.003]、解けた 121 → 121、全種 1.25 倍超の遅れなし。ノード数が既定と変わったのは blend2 だけ (1 秒未満)。
+  - 4 スレッド: 1.013 [0.990, 1.037]、解けた 140 → 141。noswot (1.60、全種) と mc11 (1.28) が遅れたが、揺れと切り分けた:
+    1 スレッドでは両方ともノード数が既定と同一。noswot を 4 スレッド・種 1 と 2 で既定と `=o` を並べて解き直すと、ノード数は 17613 / 47826 で両者一致
+    (`=o` は noswot の道筋を変えない)。既定どうしでも種 2 は 9.4 秒 (P) と 46.9 秒 (解き直し) に揺れる。
+  - 前の形 `=1` (固定のある周でも行の減り方の判定を外す) は misc07・dcmulti・nw04 の道筋まで変え、1 スレッド 1.006 [1.002, 1.010] だった。`=o` でこの害を除いた。
+- check_default は全部一致 (6 問とも道筋が変わらない) ので、`ref_default.json` は書き直していない。
+- 確かめ: cargo test 426 通過、fuzz 7 本 (release019 の fuzz.sh と同じ組、既定) は誤答 0。
