@@ -15,7 +15,7 @@ import math
 import random
 import time
 
-from enomoto_solver import Model, Variable
+from enomoto_solver import Model
 
 
 def lin(cs, xs):
@@ -28,7 +28,7 @@ def lin(cs, xs):
 
 def mknap(rng, n=60, m=8):
     M = Model()
-    x = [Variable(int, 0, 1) for _ in range(n)]
+    x = [M.add_variable(int, 0, 1) for _ in range(n)]
     for _ in range(m):
         w = [rng.randint(5, 60) for _ in range(n)]
         M.add_constraint(lin(w, x) <= sum(w) // 3)
@@ -38,7 +38,7 @@ def mknap(rng, n=60, m=8):
 
 def setcover(rng, n=200, m=150):
     M = Model()
-    x = [Variable(int, 0, 1) for _ in range(n)]
+    x = [M.add_variable(int, 0, 1) for _ in range(n)]
     for _ in range(m):
         cols = rng.sample(range(n), rng.randint(2, 5))
         M.add_constraint(lin([1] * len(cols), [x[j] for j in cols]) >= 1)
@@ -48,8 +48,8 @@ def setcover(rng, n=200, m=150):
 
 def facility(rng, nf=12, nc=40):
     M = Model()
-    y = [Variable(int, 0, 1) for _ in range(nf)]
-    x = [[Variable(float, 0, 1) for _ in range(nf)] for _ in range(nc)]
+    y = [M.add_variable(int, 0, 1) for _ in range(nf)]
+    x = [[M.add_variable(float, 0, 1) for _ in range(nf)] for _ in range(nc)]
     cap = [rng.randint(30, 80) for _ in range(nf)]
     dem = [rng.randint(5, 20) for _ in range(nc)]
     for i in range(nc):
@@ -67,7 +67,7 @@ def facility(rng, nf=12, nc=40):
 
 def gap(rng, na=8, nt=40):
     M = Model()
-    x = [[Variable(int, 0, 1) for _ in range(na)] for _ in range(nt)]
+    x = [[M.add_variable(int, 0, 1) for _ in range(na)] for _ in range(nt)]
     w = [[rng.randint(5, 25) for _ in range(na)] for _ in range(nt)]
     for t in range(nt):
         M.add_constraint(lin([1] * na, x[t]) == 1)
@@ -90,9 +90,9 @@ def lotsizing(rng, ni=5, nt=15):
         big = sum(d)
         prev = 0
         for t in range(nt):
-            q = Variable(float, 0, big)
-            s = Variable(float, 0, big)
-            z = Variable(int, 0, 1)
+            q = M.add_variable(float, 0, big)
+            s = M.add_variable(float, 0, big)
+            z = M.add_variable(int, 0, 1)
             M.add_constraint(prev + q - s == d[t])
             M.add_constraint(q - big * z <= 0)
             use[i][t] = q
@@ -106,7 +106,7 @@ def lotsizing(rng, ni=5, nt=15):
 
 def genint(rng, n=30, m=15):
     M = Model()
-    x = [Variable(int, 0, rng.randint(5, 40)) for _ in range(n)]
+    x = [M.add_variable(int, 0, rng.randint(5, 40)) for _ in range(n)]
     for _ in range(m):
         cols = rng.sample(range(n), rng.randint(4, 12))
         a = [rng.randint(-5, 15) for _ in cols]
@@ -117,7 +117,7 @@ def genint(rng, n=30, m=15):
 
 def transport(rng, ns=60, nd=100):
     M = Model()
-    x = [[Variable(float, 0, math.inf) for _ in range(nd)] for _ in range(ns)]
+    x = [[M.add_variable(float, 0, math.inf) for _ in range(nd)] for _ in range(ns)]
     sup = [rng.randint(50, 150) for _ in range(ns)]
     dem = [rng.randint(20, 80) for _ in range(nd)]
     tot = sum(sup)
@@ -136,7 +136,7 @@ def transport(rng, ns=60, nd=100):
 
 def infeasible(rng, n=25):
     M = Model()
-    x = [Variable(int, 0, 1) for _ in range(n)]
+    x = [M.add_variable(int, 0, 1) for _ in range(n)]
     w = [rng.randint(2, 9) * 2 for _ in range(n)]
     M.add_constraint(lin(w, x) == (sum(w) // 2) | 1)  # 偶数の和は奇数になれない
     M.set_objective(lin([1] * n, x))
