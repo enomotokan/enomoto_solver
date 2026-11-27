@@ -200,8 +200,15 @@ jobs:
     permissions:
       id-token: write
     steps:
+      # 配る物 (wheels-* と sdist) だけを集める。build-logs-* の *.log まで dist に入ると、登録が InvalidDistribution で落ちる (0.2.0 の CI)
       - uses: actions/download-artifact@v4
         with:
+          pattern: wheels-*
           merge-multiple: true
           path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+      - run: ls -l dist
       - uses: pypa/gh-action-pypi-publish@release/v1
