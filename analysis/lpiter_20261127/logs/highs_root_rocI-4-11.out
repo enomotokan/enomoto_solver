@@ -1,0 +1,125 @@
+LP root_rocI-4-11 has 2849 rows; 6839 cols; 7956 nonzeros
+Coefficient ranges:
+  Matrix  [4e-03, 1e+06]
+  Cost    [1e+00, 1e+00]
+  Bound   [2e-02, 1e+07]
+  RHS     [2e-15, 1e+01]
+WARNING: Problem has some excessively large column bounds
+WARNING: Problem has some excessively small row bounds
+WARNING:    Consider scaling the    bounds by 1e-2, or setting the user_bound_scale option to -4
+Solving LP without presolve or useful basis
+Using dual simplex solver
+  Iteration        Objective     Infeasibilities num(sum)
+          0     0.0000000000e+00 Ph1: 0(0) 0.0s
+       1058    -1.1090503000e+07 Pr: 0(0) 0.0s
+
+Analysis of 1058 iterations (1 to 1058)
+DSE for         1058 (100%) iterations
+
+BTRAN Full performed 11 times
+           0 hyper-sparse operations (  0%)
+           0 hyper-sparse results    (  0%)
+    0.984872 density of result (2805 / 2849 nonzeros)
+
+PRICE Full performed 11 times
+          11 hyper-sparse operations (100%)
+           0 hyper-sparse results    (  0%)
+    0.206833 density of result (1414 / 6839 nonzeros)
+
+BTRAN BcFsCg performed 0 times
+
+PRICE BcFsCg performed 0 times
+
+BTRAN e_p  performed 1058 times
+        1058 hyper-sparse operations (100%)
+        1058 hyper-sparse results    (100%)
+  0.00139206 density of result (3 / 2849 nonzeros)
+
+PRICE a_p  performed 1058 times
+        1058 hyper-sparse operations (100%)
+        1058 hyper-sparse results    (100%)
+ 0.000952308 density of result (6 / 6839 nonzeros)
+
+FTRAN      performed 1058 times
+        1019 hyper-sparse operations ( 96%)
+         915 hyper-sparse results    ( 86%)
+  0.00853737 density of result (24 / 2849 nonzeros)
+
+FTRAN BFRT performed 145 times
+         145 hyper-sparse operations (100%)
+         111 hyper-sparse results    ( 76%)
+   0.0421271 density of result (120 / 2849 nonzeros)
+
+FTRAN DSE  performed 1058 times
+         656 hyper-sparse operations ( 62%)
+         703 hyper-sparse results    ( 66%)
+   0.0113962 density of result (32 / 2849 nonzeros)
+
+BTRAN PSE  performed 0 times
+
+Invert    performed 10 times: average frequency = 105
+           7 ( 70%) Invert operations due to pseudo-clock
+           3 ( 30%) Invert operations due to possibly optimal
+
+        1058 Price operations:
+           0 Col Price      (  0%)
+           0 Row Price      (  0%)
+        1058 Row PriceWSw   (100%)
+
+           0 (  0%) costly DSE        iterations
+
+Quad/heap CHUZC summary
+        1058 quad CHUZC: average / max = 3 / 20
+
+grepQuadHeapChuzc,root_rocI-4-11,Solving LP without presolve or useful basis, 1058, ,3,20, 0, ,0,0
+
+Dual_CHUZC: Number of improve CHUZC row calls =  0
+Dual_CHUZC: Number of pivots removed from pack = 0
+
+Flip/shift summary
+           4   correct dual primal flips (max = 671.387) for min dual infeasibility = 16.0001
+          18   single        cost shifts (sum / max = 8.16499e-07 / 9.71995e-08)
+
+grepFlipShift,root_rocI-4-11,Solving LP without presolve or useful basis,4,671.387,16.0001,0,0,0,18,8.16499e-07,9.71995e-08
+
+SimplexInner-time  Operation                       :    Time     ( Total;  Ideal;  Local):    Calls  Time/Call
+SimplexInner-time  COMPUTE_DUAL                    :  1.5273e-03 (  4.8%;   4.9%;   6.0%):       14  1.0909e-04
+SimplexInner-time  CORRECT_DUAL                    :  1.8001e-04 (  0.6%;   0.6%;   0.7%):       10  1.8001e-05
+SimplexInner-time  COMPUTE_PRIMAL                  :  8.6713e-04 (  2.7%;   2.8%;   3.4%):       11  7.8830e-05
+SimplexInner-time  COLLECT_PR_IFS                  :  1.4138e-04 (  0.4%;   0.5%;   0.6%):       10  1.4138e-05
+SimplexInner-time  COMPUTE_PR_IFS                  :  2.5558e-04 (  0.8%;   0.8%;   1.0%):       12  2.1299e-05
+SimplexInner-time  COMPUTE_DU_IFS                  :  2.5439e-04 (  0.8%;   0.8%;   1.0%):       12  2.1199e-05
+SimplexInner-time  COMPUTE_DU_OBJ                  :  1.2064e-04 (  0.4%;   0.4%;   0.5%):       12  1.0053e-05
+SimplexInner-time  COMPUTE_PR_OBJ                  :  2.0981e-05 (  0.1%;   0.1%;   0.1%):        2  1.0490e-05
+SimplexInner-time  INVERT                          :  1.3835e-03 (  4.4%;   4.5%;   5.4%):        8  1.7294e-04
+SimplexInner-time  REPORT_REBUILD                  :  4.0293e-05 (  0.1%;   0.1%;   0.2%):       11  3.6630e-06
+SimplexInner-time  PERM_WT                         :  3.5286e-05 (  0.1%;   0.1%;   0.1%):       15  2.3524e-06
+SimplexInner-time  CHUZC0                          :  3.9101e-05 (  0.1%;   0.1%;   0.2%):     1058  3.6957e-08
+SimplexInner-time  CHUZC1                          :  1.6069e-04 (  0.5%;   0.5%;   0.6%):     1058  1.5188e-07
+SimplexInner-time  CHUZC2                          :  2.0719e-04 (  0.7%;   0.7%;   0.8%):     1058  1.9583e-07
+SimplexInner-time  CHUZC3                          :  1.1468e-04 (  0.4%;   0.4%;   0.4%):     1058  1.0839e-07
+SimplexInner-time  CHUZC4                          :  5.0998e-04 (  1.6%;   1.6%;   2.0%):     1058  4.8202e-07
+SimplexInner-time  CHUZC5                          :  3.8385e-05 (  0.1%;   0.1%;   0.1%):     1058  3.6281e-08
+SimplexInner-time  FTRAN                           :  3.8519e-03 ( 12.1%;  12.5%;  15.0%):     1058  3.6407e-06
+SimplexInner-time  CHUZR_DUAL                      :  1.7786e-03 (  5.6%;   5.8%;   6.9%):     1059  1.6795e-06
+SimplexInner-time  BTRAN                           :  1.4291e-03 (  4.5%;   4.6%;   5.6%):     1058  1.3507e-06
+SimplexInner-time  PRICE                           :  4.2462e-04 (  1.3%;   1.4%;   1.7%):     1058  4.0135e-07
+SimplexInner-time  FTRAN_BFRT                      :  1.1342e-03 (  3.6%;   3.7%;   4.4%):      145  7.8218e-06
+SimplexInner-time  FTRAN_DSE                       :  7.5834e-03 ( 23.8%;  24.5%;  29.5%):     1058  7.1677e-06
+SimplexInner-time  BTRAN_FULL                      :  3.8576e-04 (  1.2%;   1.2%;   1.5%):       11  3.5069e-05
+SimplexInner-time  PRICE_FULL                      :  1.9240e-04 (  0.6%;   0.6%;   0.7%):       11  1.7491e-05
+SimplexInner-time  UPDATE_DSE_WEIGHT               :  3.2306e-04 (  1.0%;   1.0%;   1.3%):     1058  3.0535e-07
+SimplexInner-time  UPDATE_PRIMAL                   :  1.6363e-03 (  5.1%;   5.3%;   6.4%):     4232  3.8664e-07
+SimplexInner-time  UPDATE_DUAL                     :  1.1396e-04 (  0.4%;   0.4%;   0.4%):     1039  1.0969e-07
+SimplexInner-time  UPDATE_PIVOTS                   :  2.7323e-04 (  0.9%;   0.9%;   1.1%):     1058  2.5825e-07
+SimplexInner-time  UPDATE_FACTOR                   :  4.7755e-04 (  1.5%;   1.5%;   1.9%):     1058  4.5137e-07
+SimplexInner-time  UPDATE_MATRIX                   :  1.6260e-04 (  0.5%;   0.5%;   0.6%):     1058  1.5369e-07
+SimplexInner-time  SUM                             :  2.5663e-02 ( 80.7%;  83.0%; 100.0%)
+SimplexInner-time  TOTAL                           :  3.1799e-02
+
+Model name          : root_rocI-4-11
+Model status        : Optimal
+Simplex   iterations: 1058
+Objective value     : -1.1090503000e+07
+P-D objective error :  0.0000000000e+00
+HiGHS run time      :          0.03
