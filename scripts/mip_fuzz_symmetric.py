@@ -7,7 +7,7 @@
 一部の問題では機械ごとの負荷の連続変数 y_m = sum_i w_i x_{i,m} を加え (連続列も一緒に入れ替わる対称性)、
 一部では仕事の衝突 (同じ機械に置けない組) を全ての機械に加え、一部では 1 台だけ容量を変えて対称性を崩す。"""
 import random, sys, time, highspy
-from enomoto_solver import Model, Variable
+from enomoto_solver import Model
 
 inf = float('inf')
 
@@ -69,7 +69,7 @@ def highs(lp):
     h.run(); return h.modelStatusToString(h.getModelStatus()), h.getInfo().objective_function_value
 def ours(lp):
     lo,up,c,it,rows,rlo,rup=lp
-    M=Model(); xs=[Variable(int if it[j] else float,lo[j],up[j]) for j in range(len(lo))]
+    M=Model(); xs=[M.add_variable(int if it[j] else float,lo[j],up[j]) for j in range(len(lo))]
     M.set_objective(sum(cc*x for cc,x in zip(c,xs)))
     for r,l,u in zip(rows,rlo,rup):
         e=sum(v*xs[j] for j,v in r)

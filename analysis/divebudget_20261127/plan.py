@@ -13,8 +13,10 @@ for f in glob.glob(str(D.parent / "final_20261118" / "res_P_s*.jsonl")):
         if not l.strip(): continue
         r = json.loads(l)
         if r["cfg"] == "def" and "time" in r["result"]: T[(r["problem"], r["seed"])] = min(r["result"]["time"], 60) if solved(r) else 60
-for out, cf in (("shards_P.json", ["def", "db", "ub"]), ("shards_P1.json", ["def_t1", "db_t1", "ub_t1"])):
-    jobs = [[p, cf[(i + s + j) % 3], s, 60] for i, p in enumerate(PROBS) for s in (1, 2, 3) for j in range(3)]
+# shards_P.json (def・db・ub) は FMjE が回している最中なので書き直さない。P1 は ubg_t1 を足した 4 設定、Pg は ubg (4 スレッド) だけ
+for out, cf in (("shards_P1.json", ["def_t1", "db_t1", "ub_t1", "ubg_t1"]), ("shards_Pg.json", ["ubg"])):
+    n = len(cf)
+    jobs = [[p, cf[(i + s + j) % n], s, 60] for i, p in enumerate(PROBS) for s in (1, 2, 3) for j in range(n)]
     est = sum(T.get((p, s), T.get((p, 1), 60)) + 8 for p, _, s, _ in jobs)
     (D / out).write_text(json.dumps({"shards": [jobs], "est_hours": [round(est / 3600, 2)]}, indent=0))
     print(out, len(jobs), "回", "見積り (時間):", round(est / 3600, 2))
