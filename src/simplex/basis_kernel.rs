@@ -993,6 +993,14 @@ pub(super) fn refac_bal_ticks() -> bool {
     *V.get_or_init(|| env_str!("ENOMOTO_LU_REFAC_BAL").is_some_and(|v| v.contains('k')))
 }
 
+/// `ENOMOTO_LU_REFAC_BAL` に `r` があれば、ticks の時計 ([`crate::ticks`] の LU) には分解の手間の既定の見積りを足す
+/// (再分解の判定だけ `k`・`1` の数え方にし、ticks を使うほかの判定 (予算など) を既定と同じ数え方に保つ。`kr` の切り分け用)。
+#[inline]
+pub(super) fn refac_bal_ticks_est() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_LU_REFAC_BAL").is_some_and(|v| v.contains('r')))
+}
+
 fn refac_bal_due(lu: &sparse_lu::FtLu, hist: &mut Vec<u64>) -> bool {
     if refac_bal_secs() {
         return refac_bal_due_secs(lu, hist);
