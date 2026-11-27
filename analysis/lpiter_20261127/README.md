@@ -146,3 +146,11 @@ uccase12 の `rti` の内訳は合計 69.0 µs/反復 で HiGHS の 1.16 倍 (FT
   根の LP (3 節) の −20〜45% は、根までの時間 (最初の解 13.6 → 12.5 秒 (`t1i`・`rti`)) に少し出るだけ。
 - 結論: 試作は大きな LP の根 (uccase12 型、更新が数千回続く) でだけ効き、P の LP や 4 問のノードの LP では 1 反復を変えない。
   P は 1 節のとおり LP が小さく、`rt` で再分解の回数が変わる場面がほぼないので、P の 1T・4T の計測は行わなかった (行うなら `tinyp.py` の形で 58 問 × 2)。
+
+## 5. 誤答の確かめ (`ENOMOTO_LU_RETA_TICK=1` + `ENOMOTO_LU_TINY_HS=1i`、`FUZZ_VENV=/usr bash analysis/comboharm_20261124/fuzz.sh rti ...`)
+
+- MIP の fuzz 7 本 (fuzz_tiny 400×2・fuzz_highs 300・fuzz_objint 1000×2・fuzz_slack 1000×2) はすべて不一致 0。
+- cargo test は 425 成功・1 失敗 (`simplex::lu::tests::tracked_iteration_matches_untracked_reference`、
+  `solve_sparse_into` と `solve_sparse_into_hyper` の tick が一致しない)。切り分けると `RETA_TICK=1` 単独では成功し、
+  **`LU_TINY_HS=1i` 単独で同じく失敗する** (3bde280e0 で足した `i` が超疎 `U` 段の起点を 1e-14 で切り、通常の経路と tick の数え方が
+  ずれる)。値の誤りではなく tick の一致を確かめるテストで、`RETA_TICK` の試作とは関係しない。`1i` を既定にするなら直す必要がある。
