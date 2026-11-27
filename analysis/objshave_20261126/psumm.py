@@ -1,10 +1,10 @@
 """pharm.jsonl の集計: 試作が働いた (問題, 種) の対で、shave と既定の時間 (時間切れは 60 秒) の比を、shift 1 秒の SGM と問題単位の
 ブートストラップ 95% 区間で出す。解けた数、目的値の食い違い (両方とも最適で値が違う)、全種で 1.25 倍超遅い問題も出す。
-試作が働かない対は既定と同じ設定なので比に入れない (比 1)。python psumm.py > psumm.txt"""
-import json, math, random
+試作が働かない対は既定と同じ設定なので比に入れない (比 1)。python psumm.py > psumm.txt。3 回目 (djc) は python psumm.py pharm3.jsonl > psumm3.txt"""
+import json, math, random, sys
 from pathlib import Path
 D = Path(__file__).resolve().parent
-rows = [json.loads(l) for l in (D / "pharm.jsonl").read_text().splitlines()]
+rows = [json.loads(l) for l in (D / (sys.argv[1] if len(sys.argv) > 1 else "pharm.jsonl")).read_text().splitlines()]
 by = {}
 for r in rows: by.setdefault((r["problem"], r["seed"]), {})[r["cfg"]] = r
 def t(r): return r["result"].get("time", 60.0) if r["result"].get("status") == "optimal" else 60.0
