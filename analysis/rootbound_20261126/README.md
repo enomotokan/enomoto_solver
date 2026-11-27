@@ -79,3 +79,14 @@ python analysis/rootbound_20261126/run.py K analysis/rootbound_20261126/shards.j
 - physiciansched6-2・mas76 (分担 0 の途中で目立った) も、根の下界と根の時間はほぼ同じ (`ours.jsonl`)。木の道筋の違い。
 - 見立て: P では中立 (1 スレッド 1.003・4 スレッド 0.997)。対象の istanbul-no-cutoff (根 71 → 92)・net12 (79.5 → 85) は根が上がる。
   効き目のシグモイドでの適応は、仕組みの害が見つからなかったので入れていない。
+
+## 5. 既定化 (2026-11-27、利用者の承認)
+
+- `pathh_slack` を `env_def!` で既定 `1` にした (src/mip/separation.rs)。`=0`・`off` で前の形 (すき間のある行を使わない)。
+- check_default: 1 スレッドの道筋が 3 問で変わった (目的値は同じ)。`ENOMOTO_MIP_PATHH_SLACK=0` を付けると前の基準と全部一致する。
+  - exp-1-500-5-5: ノード 7 → 5
+  - qnet1: ノード 3 → 4
+  - mik-250-20-75-4: ノード 6277 → 3703
+  - 基準 `analysis/protoscreen_20261124/ref_default.json` を書き直した (`--save`)。書き直した後に 2 回解いて全部一致 (決定性)。
+- fuzz 7 本 (既定、`fuzz.sh`・`fuzz.out`): 誤答 0。4 スレッドの fuzz_objint 1000 ×2 (種 0・7000)・fuzz_slack 1000 ×2 も誤答 0。
+- cargo test --release --lib: 425 通過・0 失敗。

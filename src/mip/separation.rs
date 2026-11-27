@@ -8810,10 +8810,12 @@ fn pathh_bound_dist(vars: &CutVars, j: usize) -> f64 {
 /// [`Solver::path_aggregation_highs`] の行の型 (0 使わない, 1 `<=`, -1 `>=`, 2 等式。代入用の等式は 0)、連続変数か
 /// (境界から離れているもの)、連続変数ごとの行、代入用の等式 (連続変数ごとの (行, 係数))。型が 0 でない行が経路の始点になる
 #[allow(clippy::type_complexity)]
-/// 試作 `ENOMOTO_MIP_PATHH_SLACK` (既定では使わない、analysis/rootbound_20261126): 経路集約 (path_highs) で、LP ですき間のある行も
-/// 出発・相手の行に使う。istanbul-no-cutoff では SCIP の集約 cMIR (すき間のある行も使う) が根を 96 → 132 にする
+/// `ENOMOTO_MIP_PATHH_SLACK` (analysis/rootbound_20261126。**2026-11-27 に既定にした: 値 `1`。`0`・`off` で前の形 (すき間のある行を使わない)**):
+/// 経路集約 (path_highs) で、LP ですき間のある行も出発・相手の行に使う (SCIP の集約 cMIR と同じく、すき間は cMIR の中で連続変数として扱う)。
+/// 根拠: istanbul-no-cutoff の根 71.0 → 91.9、net12 79.5 → 85.0 (1 スレッド・種 1)。P 58 問 × 種 1〜3 × 60 秒: 1 スレッド 1.003 [0.981, 1.025]・
+/// 解けた 120 → 120、4 スレッド 0.997 [0.980, 1.014]・137 → 138、食い違い 0
 fn pathh_slack() -> bool {
-    env_str!("ENOMOTO_MIP_PATHH_SLACK").is_some_and(|v| v != "0")
+    env_def!("ENOMOTO_MIP_PATHH_SLACK", "1").is_some()
 }
 
 fn pathh_row_types(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usize) -> (Vec<i8>, Vec<bool>, Vec<Vec<(usize, f64)>>, Vec<Option<(usize, f64)>>) {
@@ -8831,8 +8833,8 @@ fn pathh_row_types(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usize) -> (
         let r = vars.x[n + i];
         let ls = if l.is_finite() { r - l } else { f64::INFINITY };
         let us = if u.is_finite() { u - r } else { f64::INFINITY };
-        // 試作 `ENOMOTO_MIP_PATHH_SLACK` ([`pathh_slack`]): すき間のある行も、近い側の不等式として経路に使う (SCIP の sepa_aggregation と同じく、
-        // すき間は cMIR の中で連続変数として扱う)。既定では使わない (型 0)
+        // `ENOMOTO_MIP_PATHH_SLACK` ([`pathh_slack`]、2026-11-27 から既定): すき間のある行も、近い側の不等式として経路に使う (SCIP の sepa_aggregation と同じく、
+        // すき間は cMIR の中で連続変数として扱う)。`=0` では使わない (型 0)
         rtype[i] = if ls > feastol && us > feastol && !(pathh_slack() && (ls.is_finite() || us.is_finite())) {
             0
         } else if ls < us {
