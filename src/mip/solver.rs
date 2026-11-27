@@ -767,7 +767,12 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 試作 `ENOMOTO_MIP_ALNS` の `b` ([`super::alns_cp::budget_on`]): 測り始め (暫定解があって初めて予算を決めた時) の (主ギャップ, 手間, 大近傍探索の手間) と、
     /// その後に ALNS-CP が出した相対改善の合計
     pub(super) alns_bud0: Option<(f64, f64, f64)>,
+    /// ALNS-CP が出した Φ の減りの合計 (主ギャップの減り × その時の未処理の重み [`Self::alns_w`])
     pub(super) alns_lns_gain: f64,
+    /// 今のノードでの未処理の重み (Σ 0.5^深さ、[`Self::alns_rates`] が書く。ALNS-CP の改善の重み付けに使う)
+    pub(super) alns_w: f64,
+    /// r_lns の窓: (最後に見た暫定解の値, 1 つ前に暫定解が変わった時の (大近傍探索の手間, ALNS-CP の改善の合計), 最後に変わった時の同じ組)
+    pub(super) alns_win: (f64, (f64, f64), (f64, f64)),
     /// `ENOMOTO_MIP_SUBB_DIV` (試作): 近傍の多様化の状態 ([`super::subb::DivState`])
     pub(super) subb: super::subb::DivState,
     /// `ENOMOTO_MIP_MEMBQ_LNSGROW` (試作、analysis/membq_path_20261105.md): ALNS の腕ごとの、サブ MIP の時間の上限の倍率。
@@ -5015,6 +5020,16 @@ pub(crate) fn better_obj(z: f64, b: f64, scale: f64) -> bool {
     }
 }
 
+/// 試作 `ENOMOTO_MIP_ROOTRESTART2` (既定では使わない。analysis/rootrestart_20261126): 根の再スタートの判定を、固定の割合の閾値
+/// (初回 1%・2 回目以降 2.5%、分母は全部の整数列) から「次の段の手間 W × 縮む割合 s」と「再スタートの手間 C」の比べにする
+/// ([`Solver::rr2_value`])。新しい閾値は置かない。文字:
+/// - `e`: 根の最後の判定 (`maybe_restart`、木の中の再スタートは今のまま)。W = 期限までの残り (木は解けるまで残りの時間を使う)
+/// - `m`: 根のカットのラウンドの頭でも判定する (被約費用で固定できる列も数える)。W = 残りのラウンドの見込みの秒
+/// - `a`: 根の内点法の丸めの初めに、費用 0 の内点法の双対で固定する (`ENOMOTO_MIP_HO4_ACFIX=d` と同じ。HiGHS の解析的中心による固定に当たる)
+pub(crate) fn rootrestart2(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_ROOTRESTART2").is_some_and(|v| v.contains(c))
+}
+
 /// 試作 `ENOMOTO_MIP_LMBOOST` (COMP07、既定では使わない): [`Solver::lmip_boost`]。
 fn lmboost_on() -> bool {
     env_def!("ENOMOTO_MIP_LMBOOST", "1").is_some()
@@ -6124,6 +6139,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         alns_count: [0; 6],
         alns_bud0: None,
         alns_lns_gain: 0.0,
+        alns_w: 1.0,
+        alns_win: (f64::NAN, (0.0, 0.0), (0.0, 0.0)),
         subb: Default::default(),
         lns_grow: [1.0; 6],
         submip_nosol_timeout: false,
@@ -6759,6 +6776,9 @@ pub(super) fn rcloop_has(c: char) -> bool {
 thread_local! {
     /// [`Solver::rcloop_restart_ok`]: 前の再スタートを決めたときの根の下界 (外側の主の求解のスレッド、最初の根で NaN に戻す)
     static RCLOOP_PREV_ROOT_LB: std::cell::Cell<f64> = const { std::cell::Cell::new(f64::NAN) };
+    /// 試作 `ENOMOTO_MIP_ROOTRESTART2` ([`rootrestart2`]): 根の再スタートを決めた時刻 (外側の経過秒) と、前の再スタートに実際にかかった秒
+    /// (決めてから次の根の LP が解けるまで: 前処理のかけ直し + 根の LP の解き直し)
+    static RR2_STATE: std::cell::Cell<(f64, f64)> = const { std::cell::Cell::new((f64::NAN, f64::NAN)) };
 }
 
 pub(super) fn lp_int_bounds() -> bool {
@@ -12226,6 +12246,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // (CMS750_4 の 1 スレッド: 根の LP が前処理の LP の基底から 1 反復で終わり、FP の LP が予算約 1000 反復で 2 回目に打ち切られていた)
         let root_iters = if env_str!("ENOMOTO_MIP_P2RIT").is_some_and(|v| v.contains('a')) || heur_adapt() { self.root_lp_iters } else { root_iters };
         self.root_lp_secs = t_root_lp.elapsed().as_secs_f64();
+        if rootrestart2('e') || rootrestart2('m') {
+            self.rr2_root_done();
+        }
         self.root_lp_ticks = crate::ticks::total() - tk_root_lp;
         if !self.params.submip {
             // 最大を残す (裏のカットの写しの根の LP は主の基底から 1 反復で終わり、0 秒で上書きしてしまうので)。正の f64 のビットは
@@ -16243,7 +16266,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // 割合 (`ENOMOTO_T_MIP_HEUR_ROLE_FRAC`、[`heur_role_count`]) まで上げる (暫定解があるときだけ。役も暫定解があるときだけ就く)
                     // 試作 `ENOMOTO_MIP_ALNS` の `b` ([`super::alns_cp::budget_on`]): 1 スレッドの木で、割合を ALNS-CP の効き目のシグモイドで決める
                     let frac = if super::alns_cp::budget_on() && !self.params.submip && self.pool.is_none() && self.params.threads <= 1 && self.incumbent.is_some() {
-                        self.alns_budget_frac()
+                        self.alns_budget_frac(node.depth)
                     } else {
                         frac
                     };
@@ -26341,6 +26364,49 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 早めの再スタートの判定 ([`Self::proto_restart_ok`] と同じ形、割合は `ENOMOTO_T_MIP_LOSE6_3_CUTRESTART_FRAC` (既定 0.1)) を通るなら、
     /// 固定できる列の数を返す (固定はしない。ループを抜けた後の早めの被約費用の記録で固定される)。p200x1188c では Local-MIP が
     /// カットのループの途中 (25 ラウンド目の前後) で最適解を出しても、強いカットの延長で 85 ラウンドまで回してから再スタートしていた
+    /// 試作 `ENOMOTO_MIP_ROOTRESTART2` の `m`: 根のカットのラウンドの頭で、被約費用で今すぐ固定できる整数列 (暫定解の打ち切り値で) と
+    /// 新たに固定済みの整数列の割合 s (自由だった整数列に対する本数の割合) を数え、残りのラウンドの見込み `w` 秒との比べ ([`Self::rr2_value`])
+    /// が通れば、固定できる本数を返す
+    pub(super) fn rr2_cut_restart_due(&self, w: f64) -> Option<usize> {
+        if self.params.submip || self.snap.is_some() || self.incumbent.is_none() || self.time_up() || env_str!("ENOMOTO_MIP_NO_RESTART").is_some() {
+            return None;
+        }
+        if self.params.restarts >= max_restarts(self.p) {
+            return None;
+        }
+        let would = self.redcost_fixable_now()?;
+        let free = self.p.nint.saturating_sub(self.root_fixed0);
+        let s = (self.newly_fixed_ints() + would) as f64 / free.max(1) as f64;
+        (would > 0 && self.rr2_value(w, s, "cut round")).then_some(would)
+    }
+
+    /// 今の LP (根) の被約費用と打ち切り値で、新たに固定できる整数列の数 (`lose6_3_cut_restart_due` と同じ数え方)。打ち切り値がなければ None
+    fn redcost_fixable_now(&self) -> Option<usize> {
+        let p = self.p;
+        let gap = self.prune_limit() - (self.lp.objective() + p.offset);
+        if !gap.is_finite() || gap < 0.0 {
+            return None;
+        }
+        let b = self.lp.basis_ref();
+        let d = self.lp.reduced_costs_ref();
+        let mut would = 0usize;
+        for j in 0..p.n {
+            if !p.is_int[j] || self.dom.global_lo[j] >= self.dom.global_up[j] {
+                continue;
+            }
+            let (lo, up) = (self.dom.global_lo[j], self.dom.global_up[j]);
+            let fixes = match b.col[j] {
+                VarStatus::Lower if d[j] > 1e-7 => (gap / d[j]).floor() < 1.0 && up - lo >= 1.0,
+                VarStatus::Upper if d[j] < -1e-7 => (gap / -d[j]).floor() < 1.0 && up - lo >= 1.0,
+                _ => false,
+            };
+            if fixes {
+                would += 1;
+            }
+        }
+        Some(would)
+    }
+
     pub(super) fn lose6_3_cut_restart_due(&self) -> Option<usize> {
         if self.params.submip || self.snap.is_some() || self.incumbent.is_none() || self.time_up() || env_str!("ENOMOTO_MIP_NO_RESTART").is_some() {
             return None;
@@ -26795,6 +26861,40 @@ impl<'a, L: MipLp> Solver<'a, L> {
         );
     }
 
+    /// 試作 `ENOMOTO_MIP_ROOTRESTART2` の判定: 縮む割合 `s` (新たに固定した列の非零 / 根の始めに自由だった列の非零) の分だけ次の段の手間
+    /// `w` 秒が軽くなる見込み `w s` と、再スタートの手間 `C` 秒 (前の再スタートで実際にかかった秒、初回はここまでの外側の経過秒 = 前処理 +
+    /// 根の LP + カット) を比べ、シグモイド σ(ln(w s / C)) が 1/2 以上 (w s >= C) なら真
+    pub(super) fn rr2_value(&self, w: f64, s: f64, tag: &str) -> bool {
+        let (_, last) = RR2_STATE.with(|c| c.get());
+        let c = if last.is_finite() && last > 0.0 { last } else { super::outer_elapsed().unwrap_or_else(|| self.start.elapsed().as_secs_f64()).max(1e-3) };
+        let g = if s > 0.0 && w > 0.0 { (w * s / c).ln() } else { f64::NEG_INFINITY };
+        let sig = 1.0 / (1.0 + (-g).exp());
+        if self.params.verbose {
+            eprintln!("MIP: ROOTRESTART2 {tag}: next stage {w:.2}s x shrink {s:.4} vs restart cost {c:.2}s{}: sigmoid {sig:.3} -> restart {}", if last.is_finite() { " (measured)" } else { " (estimated)" }, sig >= 0.5);
+        }
+        sig >= 0.5
+    }
+
+    /// [`rootrestart2`] の再スタートを決めた時刻を置く (次の根の LP の後で [`Self::rr2_root_done`] が手間を測る)
+    fn rr2_mark(&self) {
+        let t = super::outer_elapsed().unwrap_or(f64::NAN);
+        RR2_STATE.with(|c| c.set((t, c.get().1)));
+    }
+
+    /// [`rootrestart2`]: 再スタートの後の根の LP が解けたら、再スタートにかかった秒を記録する
+    pub(super) fn rr2_root_done(&self) {
+        if self.params.submip || self.params.restarts == 0 {
+            if !self.params.submip {
+                RR2_STATE.with(|c| c.set((f64::NAN, f64::NAN)));
+            }
+            return;
+        }
+        let (t0, _) = RR2_STATE.with(|c| c.get());
+        if let (true, Some(now)) = (t0.is_finite(), super::outer_elapsed()) {
+            RR2_STATE.with(|c| c.set((f64::NAN, now - t0)));
+        }
+    }
+
     fn maybe_restart(&mut self) -> Option<MipResult> {
         let p = self.p;
         if self.params.restarts == 0 && !self.params.submip {
@@ -26850,6 +26950,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if !go {
                 return None;
             }
+        } else if rootrestart2('e') && !self.force_restart {
+            // 試作 `ENOMOTO_MIP_ROOTRESTART2` の `e`: 固定の割合の閾値と RSTCRIT の代わりに、次の段 (木: 期限までの残り) の縮む分と再スタートの手間を比べる
+            let (_, nnz_new, nnz_free, _, _) = self.restart_shrink();
+            let s = nnz_new as f64 / nnz_free.max(1) as f64;
+            if nint == 0 || newly == 0 || !self.rr2_value(self.secs_left(), s, "end") {
+                return None;
+            }
         } else {
             // 試作 `ENOMOTO_MIP_RCLOOP` の `r` ([`rcloop_restart_ok`]): 2 回目以降は、前の再スタートで根の下界が上がっていれば数の条件を見ない
             let rc_r = self.rcloop_restart_ok(newly);
@@ -26902,6 +27009,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let ng = self.rcs_apply_pending();
         if ng > 0 && self.params.verbose {
             eprintln!("MIP: RCSTRONG g: applied {ng} pending implied-integer roundings before the restart");
+        }
+        // 試作 `ENOMOTO_MIP_ROOTRESTART2`: 再スタートの手間を測り始める (根の再スタートだけ)
+        if rootrestart2('e') || rootrestart2('m') {
+            self.rr2_mark();
         }
         // 新しい問題: 大域的な境界 + 元の行 + LP に残ったカット (どれも大域的に成り立つ)
         let mut rows = p.rows.clone();
@@ -27854,30 +27965,39 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 試作 `ENOMOTO_MIP_ALNS` の `b`: 1 スレッドの木の大近傍探索の割合 = `LNS_TIME_MIN` + (`HEUR_ROLE_FRAC` − `LNS_TIME_MIN`) × σ(ln(r_lns / r_tree))
     /// = 下限 + 幅 × r_lns / (r_lns + r_tree)。新しい閾値はなく、両端は今の木の大近傍探索の下限 (0.02) と 4 スレッドのヒューリスティクス役の割合 (0.25)。
-    /// - r_tree: 測り始めからの主ギャップ (暫定解 − 下界) / max(|暫定解|, 1) の減り (ALNS-CP の改善の分を除く) ÷ 木の手間 (大近傍探索の手間を除く)
-    /// - r_lns: ALNS-CP の相対改善の合計 ÷ 大近傍探索の手間。r_tree と同じ速さの仮の 1 回 (手間 `LNS_CALL_MIN`) を足しておく
+    /// 残りの仕事を Φ = 主ギャップ (暫定解 − 下界)/max(|暫定解|, 1) × 未処理の重み (Σ 0.5^深さ、今のノードを含む) で測る
+    /// (下界が動かない証明の段階でも、刈って木が進めば Φ が減る。重みは 4 スレッドの `publish_tree_weight` と同じ量)。
+    /// - r_tree: 測り始めからの Φ の減り (ALNS-CP の改善の分を除く) ÷ 木の手間 (大近傍探索の手間を除く)
+    /// - r_lns: ALNS-CP の改善 (主ギャップの減り × その時の重み) ÷ 大近傍探索の手間を、1 つ前に暫定解が変わった時からの窓で数える
+    ///   (昔の改善を忘れ、証明だけが残ると下がる)。r_tree と同じ速さの仮の 1 回 (手間 `LNS_CALL_MIN`) を足しておく
     ///   (呼ぶ前は σ(0) = 0.5 で真ん中から始め、効かなければ下がる)
-    /// どちらも 0 なら真ん中
-    pub(super) fn alns_budget_frac(&mut self) -> f64 {
+    /// どちらも 0 なら真ん中。`depth` は今のノードの深さ
+    pub(super) fn alns_budget_frac(&mut self, depth: usize) -> f64 {
         let lo = tunable!("ENOMOTO_T_MIP_LNS_TIME_MIN", 0.02, f64);
         let hi = tunable!("ENOMOTO_T_MIP_HEUR_ROLE_FRAC", 0.25, f64).max(lo);
-        let Some((r_lns, r_tree)) = self.alns_rates() else { return lo };
+        let Some((r_lns, r_tree)) = self.alns_rates(depth) else { return lo };
         let share = if r_lns + r_tree > 0.0 { r_lns / (r_lns + r_tree) } else { 0.5 };
         lo + (hi - lo) * share
     }
 
     /// 改善の大きさ / 手間 (1 手間 ≒ 1 ns) の (r_lns, r_tree) ([`Self::alns_budget_frac`] の説明のとおり)。暫定解がなければ None。
-    /// 初めて呼んだ時を測り始めにする。ほかの 1 スレッドの解探し (T1PRIMAL など) の効き目の入力にも使える
-    pub(super) fn alns_rates(&mut self) -> Option<(f64, f64)> {
+    /// 初めて呼んだ時を測り始めにする。ほかの 1 スレッドの解探し (T1PRIMAL など) の効き目の入力にも使える。`depth` は今のノードの深さ
+    pub(super) fn alns_rates(&mut self, depth: usize) -> Option<(f64, f64)> {
         let z = self.incumbent.as_ref().map(|(z, _)| *z)?;
-        let gap = ((z - self.global_lower_bound()) / z.abs().max(1.0)).max(0.0);
+        let w = 0.5f64.powi(depth.min(2000) as i32) + self.queue.iter().map(|n| 0.5f64.powi(n.depth.min(2000) as i32)).sum::<f64>();
+        self.alns_w = w;
+        let phi = ((z - self.global_lower_bound()) / z.abs().max(1.0)).max(0.0) * w;
         let tk = crate::ticks::total();
-        let (g0, t0, l0) = *self.alns_bud0.get_or_insert((gap, tk, self.lns_ticks));
+        let (p0, t0, l0) = *self.alns_bud0.get_or_insert((phi, tk, self.lns_ticks));
+        if z != self.alns_win.0 {
+            self.alns_win = (z, self.alns_win.2, (self.lns_ticks, self.alns_lns_gain));
+        }
         let piece = tunable!("ENOMOTO_T_MIP_LNS_CALL_MIN", 0.3, f64) * 1e9;
         let lns_tk = (self.lns_ticks - l0).max(0.0);
         let tree_tk = (tk - t0 - lns_tk).max(piece);
-        let r_tree = ((g0 - gap) - self.alns_lns_gain).max(0.0) / tree_tk;
-        let r_lns = (self.alns_lns_gain + r_tree * piece) / (lns_tk + piece);
+        let r_tree = ((p0 - phi) - self.alns_lns_gain).max(0.0) / tree_tk;
+        let (wl, wg) = self.alns_win.1;
+        let r_lns = (self.alns_lns_gain - wg + r_tree * piece) / ((self.lns_ticks - wl).max(0.0) + piece);
         Some((r_lns, r_tree))
     }
 
