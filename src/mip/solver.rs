@@ -31304,7 +31304,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // 試作 `ENOMOTO_MIP_OVERRUN240` の `p` (analysis/overrun240_20261127): 時間切れで終わるときは、最後の研磨にも求解の期限を渡す
                     // (期限の後に研磨の LP を 1 回解いて上限を 10〜41 秒越えていた: cuanza・neos-873061・thor50dday・dano3_5・snp-02-004-104)。
                     // 解けなければ、ほかの形と同じく見積りを足した値で返す
-                    let over_p = overrun240('p') && self.time_up();
+                    // 「時間切れ」は求解の期限を過ぎたこと (`time_up` は背景の証明・手間の上限などの内部の止めも含むので使わない)
+                    let past_deadline = self.deadline.is_some_and(|d| Instant::now() >= d);
+                    let over_p = overrun240('p') && past_deadline;
                     let dl = if over_p {
                         self.deadline
                     } else if warm == 3 && polish_final('g') {
@@ -31319,7 +31321,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // (木の主のスレッドは 1 にしてある)
                     let prev = (polish_final('j') && self.params.threads > 1).then(|| crate::simplex::mip_lp::set_cold_race_threads(self.params.threads));
                     // 試作 `ENOMOTO_MIP_POLISH_PRESOLVE` ([`super::polish_presolve_mode`]): LP の前処理 + 単体法で先に解く。解けなければ温めた単体法へ
-                    let pre = super::polish_presolve_mode().filter(|&m| m == 'a' || self.time_up()).map(|_| super::polish_presolved(&self.p, &mut x, z, dl));
+                    let pre = super::polish_presolve_mode().filter(|&m| m == 'a' || !matches!(status, MipStatus::Optimal)).map(|_| super::polish_presolved(&self.p, &mut x, z, dl));
                     let r = match pre {
                         Some(r @ (super::WarmPolish::Replaced(_) | super::WarmPolish::Kept)) => r,
                         _ => super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), dl),
@@ -31364,8 +31366,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 verified => {
                                     let t = Instant::now();
                                     let b = self.lp.basis();
-                                    let dl2 = if overrun240('p') && self.time_up() { self.deadline } else { None };
-                                    let pre2 = super::polish_presolve_mode().filter(|&m| m == 'a' || self.time_up()).map(|_| super::polish_presolved(&self.p, &mut x, z, dl2));
+                                    let dl2 = if overrun240('p') && self.deadline.is_some_and(|d| Instant::now() >= d) { self.deadline } else { None };
+                                    let pre2 = super::polish_presolve_mode().filter(|&m| m == 'a' || !matches!(status, MipStatus::Optimal)).map(|_| super::polish_presolved(&self.p, &mut x, z, dl2));
                                     let r2 = match pre2 {
                                         Some(r @ (super::WarmPolish::Replaced(_) | super::WarmPolish::Kept)) => r,
                                         _ => super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), dl2),
