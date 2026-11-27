@@ -4838,6 +4838,8 @@ impl FtLu {
         }
         // 試作 `ENOMOTO_LU_REFAC_BAL` ([`super::basis_kernel`] の `refac_bal_due`): 構築の手間を見積りの係数でなく演算の数で数える
         // (行の走査 m + 因子の非零 + 消去の積和 Σ_s |L 列 s| · |U 行 s|。密なブロックも割り引かない)
+        // `kr`: ticks の時計 ([`crate::ticks`] の LU) には既定の見積りを入れ、再分解の判定だけ下の数え方にする
+        let est_tick = build_tick;
         if super::basis_kernel::refac_bal_on() || lu_cal_on() {
             let flops: u64 = (0..m).map(|s| base.l_col.seg(s).len() as u64 * owner_count[s] as u64).sum();
             if lu_cal_on() {
@@ -4956,7 +4958,7 @@ impl FtLu {
             fill,
             tick: TickCell::new({
                 // 手間の単位 ([`crate::ticks`]): 分解の構築の手間
-                crate::ticks::add(crate::ticks::LU, build_tick);
+                crate::ticks::add(crate::ticks::LU, if super::basis_kernel::refac_bal_ticks_est() { est_tick } else { build_tick });
                 0
             }),
             build_tick,
