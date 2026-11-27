@@ -35,7 +35,8 @@ def one(job):
     th, p, c, s = job
     log = D / "logs" / f"t{th}_{c}_{p}_s{s}.log"
     env = {k: v for k, v in os.environ.items() if not k.startswith("ENOMOTO_")}
-    env.update(CFGS[c]); env.update({"ENOMOTO_MIP_LOG": "1", "ENOMOTO_MIP_THREADS": str(th), "ENOMOTO_T_MIP_SEED": str(s)})
+    env.update(CFGS[c]); env.update(json.loads(os.environ.get("DB_ENV", "{}")))  # DB_ENV: 解き方を変えない環境変数 (ENOMOTO_MIP_DEBUG_DIVESEL など) を JSON で足す
+    env.update({"ENOMOTO_MIP_LOG": "1", "ENOMOTO_MIP_THREADS": str(th), "ENOMOTO_T_MIP_SEED": str(s)})
     with open(log, "w") as f:
         r = subprocess.run([sys.executable, str(R / "scripts/run_miplib_benchmark.py"), "--worker-ours", str(R / ".miplib_cache" / f"{p}.mps"), "--time-limit", str(TL), "--threads", str(th)],
                            cwd=R, env=env, stdout=subprocess.PIPE, stderr=f, text=True, timeout=TL + 600)
