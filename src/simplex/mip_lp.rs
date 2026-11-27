@@ -114,6 +114,12 @@ pub struct TwoStageLp {
     lu: Option<Arc<super::lu::FtLu>>,
     /// 直近の最適基底とその LU (次の warm start で分解を省く)。
     lu_cache: Option<Arc<LuCache>>,
+    /// 試作 `ENOMOTO_MIP_LU_EXTEND` ([`lu_extend_on`]): 行を外した・足したあと標準形を作り直すまでのあいだ持ち越す、今の基底に対する
+    /// 分解の列順・行順・fill の基準と、その基底 (行の追加・削除の中だけで使い、作り直しの直後に [`Self::lu_ext_finish`] が消費する)
+    lu_ext: Option<(Vec<usize>, Vec<usize>, usize, Vec<usize>)>,
+    /// 試作 `ENOMOTO_MIP_LU_EXTEND`: 延ばし・縮めを使ってよいか (木の探索に入ってから真、[`Self::set_lu_extend_tree`])。根の LP・根のカットの
+    /// ループ (と同じ求解の根の前処理・ヒューリスティクス) では偽で、分解は今までどおり一から作る
+    lu_ext_tree: bool,
     iters: u64,
     /// 制約行列の識別子 (作り直すたびに新しい値。PRICE 用の行列の使い回しに使う)。
     price_key: u64,
@@ -153,6 +159,11 @@ pub struct TwoStageLp {
     tw_sync: bool,
     /// 試作 `ENOMOTO_MIP_LPSCALE=h`: 尺度なしの求解が重かったら双子を作る ([`Self::solve_once`])
     tw_lazy: bool,
+    /// 試作 `ENOMOTO_MIP_DSE_COST` ([`sid::dse_cost_skip`]): 直前の求解の反復の数と、この LP の求解の手間・反復の数の合計
+    /// (次の求解の見込みの手間 = 直前の反復の数 × 1 反復の手間)
+    dc_last_it: Option<u64>,
+    dc_ticks: f64,
+    dc_iters: u64,
 }
 
 /// 試作 `ENOMOTO_MIP_LPSCALE` の双子の状態 ([`TwoStageState`]・[`LuSnapshot`] に付ける)。
@@ -363,6 +374,10 @@ pub struct InteriorPoint {
     /// 試作 `ENOMOTO_MIP_FIXMORE` の `u`: 費用つきの点の双対 `y` のラグランジュ下界 `L(y)` (元の単位、MIP の定数項は含まない) と
     /// 構造列の被約費用 `c - A^T y` (`lagrange_std`)。どの `y` でも正しい下界。
     pub lag: Option<(f64, Vec<f64>)>,
+    /// 試作 `ENOMOTO_MIP_HO4_ACFIX` の `d`: 費用 0 の点の双対 `y` (最大の絶対値で 1 に揃えたもの) の、費用 0 のラグランジュ下界 `L(y)`
+    /// (0 以下) と構造列の被約費用 `-A^T y`。実行可能などの点でも `Σ_j d_j (x_j - 境界) = -L` なので、`d_j > 0` の列は
+    /// `x_j - 下限 <= -L / d_j` (`d_j < 0` なら上限の側) を満たす (費用 0・上界 0 の被約費用の固定)
+    pub acdual: Option<(f64, Vec<f64>)>,
 }
 
 /// 状態の保存 (強分岐用)。
@@ -482,6 +497,12 @@ fn xolazy_record(winner: &'static str, t0: std::time::Instant, stamp: Option<&su
 /// 標準形の行の双対 `y` (どの `y` でもよい) からラグランジュ緩和の下界 `L(y) = b·y + Σ_j min_{l_j <= x_j <= u_j} (c - A^T y)_j x_j`
 /// (標準形の目的の単位、浮動小数の誤差の余裕を引いた値) と構造列の被約費用を返す。無限の境界の向きに被約費用がある列があれば `L = -inf`。
 fn lagrange_std(std: &StdForm, n: usize, y: &[f64]) -> Option<(f64, Vec<f64>)> {
+    lagrange_std_c(std, n, y, false)
+}
+
+/// [`lagrange_std`] の費用を選べる形 (`zero_cost` なら費用 0 とみなす)
+fn lagrange_std_c(std: &StdForm, n: usize, y: &[f64], zero_cost: bool) -> Option<(f64, Vec<f64>)> {
+    let cj = |j: usize| if zero_cost { 0.0 } else { std.c[j] };
     if y.len() != std.n_rows || y.iter().any(|v| !v.is_finite()) {
         return None;
     }
@@ -494,9 +515,9 @@ fn lagrange_std(std: &StdForm, n: usize, y: &[f64]) -> Option<(f64, Vec<f64>)> {
             continue;
         }
         let (i, a) = col[0];
-        let d = std.c[j] - a * y[i];
+        let d = cj(j) - a * y[i];
         if (d > 0.0 && !std.lb[j].is_finite()) || (d < 0.0 && !std.ub[j].is_finite()) {
-            y[i] = std.c[j] / a;
+            y[i] = cj(j) / a;
         }
     }
     let y = &y[..];
@@ -505,7 +526,7 @@ fn lagrange_std(std: &StdForm, n: usize, y: &[f64]) -> Option<(f64, Vec<f64>)> {
     let mut abs: f64 = std.b.iter().zip(y).map(|(b, y)| (b * y).abs()).sum();
     let mut dn = vec![0.0; n];
     for j in 0..std.n_total {
-        let mut d = std.c[j];
+        let mut d = cj(j);
         for &(i, a) in std.cols.col(j) {
             d -= a * y[i];
         }
@@ -620,6 +641,12 @@ fn scale_factors(n: usize, rows: &[Vec<(usize, f64)>]) -> (Vec<f64>, Vec<f64>) {
 /// 試作 `ENOMOTO_SIMPLEX_SCALE` の条件 `ENOMOTO_T_SIMPLEX_SCALE_MIN_RANGE` (既定 0 = いつも): 係数の絶対値の最大 / 最小。
 /// 根の LP の 9 問では、尺度の調整が効いたのは 4e4 以上 (uccase12・snp-02-004-104・uccase9)、悪くしたのは 4.2e3 (supportcase42)・1.2e3 (sing326)
 fn coef_range(rows: &[Vec<(usize, f64)>]) -> f64 {
+    let (mn, mx) = coef_minmax(rows);
+    if mx > 0.0 { mx / mn } else { 1.0 }
+}
+
+/// 係数の絶対値の (最小, 最大)。0 の係数は数えない。係数がなければ (∞, 0)
+fn coef_minmax(rows: &[Vec<(usize, f64)>]) -> (f64, f64) {
     let (mut mn, mut mx) = (f64::INFINITY, 0.0f64);
     for r in rows {
         for &(_, v) in r {
@@ -630,7 +657,7 @@ fn coef_range(rows: &[Vec<(usize, f64)>]) -> f64 {
             }
         }
     }
-    if mx > 0.0 { mx / mn } else { 1.0 }
+    (mn, mx)
 }
 
 fn shift_of(lo: f64, up: f64) -> f64 {
@@ -670,17 +697,13 @@ impl TwoStageLp {
         if rs.iter().chain(&cs).all(|&v| v == 1.0) {
             return;
         }
-        let rows: Vec<Vec<(usize, f64)>> = self.rows.iter().enumerate().map(|(i, r)| r.iter().map(|&(j, v)| (j, v * rs[i] * cs[j])).collect()).collect();
-        let row_lo: Vec<f64> = (0..rs.len()).map(|i| self.row_lo[i] * rs[i]).collect();
-        let row_up: Vec<f64> = (0..rs.len()).map(|i| self.row_up[i] * rs[i]).collect();
-        let lo: Vec<f64> = (0..self.n).map(|j| self.lo[j] / cs[j]).collect();
-        let up: Vec<f64> = (0..self.n).map(|j| self.up[j] / cs[j]).collect();
-        let cost: Vec<f64> = (0..self.n).map(|j| self.cost[j] * cs[j]).collect();
-        let tw = TwoStageLp::new_raw(&lo, &up, &cost, &rows, &row_lo, &row_up);
+        let tw = self.scaled_copy(&rs, &cs);
         if env_str!("ENOMOTO_MIP_LPSCALE_LOG").is_some() {
             eprintln!("LPSCALE: scaled twin for {} rows x {} cols (range {range:.3e} -> {:.3e})", self.rows.len(), self.n, coef_range(&tw.rows));
         }
         lpscale_add(8, 1);
+        let mut tw = tw;
+        tw.lu_ext_tree = self.lu_ext_tree;
         self.tw = Some(Box::new(tw));
         self.tw_rs = rs;
         self.tw_cs = Arc::new(cs);
@@ -726,8 +749,13 @@ impl TwoStageLp {
             status: None,
             lu: None,
             lu_cache: None,
+            lu_ext: None,
+            lu_ext_tree: false,
             dse_cache: None,
             dse_age: 0,
+            dc_last_it: None,
+            dc_ticks: 0.0,
+            dc_iters: 0,
             iters: 0,
             price_key: new_price_key(),
             ray: None,
@@ -954,6 +982,58 @@ impl TwoStageLp {
     /// キャッシュを捨てる)、新しい行のスラックを基底に入れる。次の求解は基底を分解し直す (HiGHS は
     /// `kExtendInvertWhenAddingRows` で INVERT を拡張する)。コストの実測 (mik-250、HiGHS 流のカット管理で 40 秒、3192 回の
     /// 追加 + 削除): この関数 0.9 秒、`delete_rows` 0.7 秒、再分解 0.1 秒未満。LP の反復 (16 秒) に比べ小さいので、
+    /// 試作 `ENOMOTO_MIP_LU_EXTEND`: 行の追加・削除の始めに、今の基底に対する分解の列順・行順を用意する (持ち越し中のものか、
+    /// 今の基底と同じ基底の LU のキャッシュから)。使えなければ `None`。
+    fn lu_ext_start(&mut self) -> Option<(Vec<usize>, Vec<usize>, usize, Vec<usize>)> {
+        if !lu_extend_on() || !(self.lu_ext_tree || lu_extend_root()) {
+            return None;
+        }
+        let b = self.basis.as_ref()?;
+        if let Some(o) = self.lu_ext.take() {
+            if o.3 == *b {
+                return Some(o);
+            }
+        }
+        let c = self.lu_cache.as_ref().filter(|c| c.basis == *b)?;
+        let (col, row, fill) = c.lu.pivot_order()?;
+        (col.len() == b.len()).then(|| (col.to_vec(), row.to_vec(), fill, b.clone()))
+    }
+
+    /// 試作 `ENOMOTO_MIP_LU_EXTEND`: 延ばし・縮めを使うかを切り替える (木の探索に入るときに真にする。尺度を調整した写しにも渡す)。
+    /// 根では使わない: nw04 (根で解ける集合分割) では、根のカットのループで延ばした分解から解くと、退化した LP の最適面の別の頂点に
+    /// 落ちてカットが変わり、根で閉じなくなって木に入る (analysis/luxroot_20261124)
+    pub fn set_lu_extend_tree(&mut self, on: bool) {
+        self.lu_ext_tree = on;
+        if !on {
+            self.lu_ext = None;
+        }
+        if let Some(tw) = self.tw.as_mut() {
+            tw.set_lu_extend_tree(on);
+        }
+    }
+
+    /// 試作 `ENOMOTO_MIP_LU_EXTEND`: 標準形を作り直した直後に、持ち越した列順で今の基底を分解し ([`super::basis_kernel::factorize_basis_order`])、
+    /// LU のキャッシュに置く (次の求解の warm start が分解を省く)。分解できなければ何もしない (次の求解が普通に分解する)。
+    fn lu_ext_finish(&mut self) {
+        let Some((col, row, fill, b)) = self.lu_ext.take() else { return };
+        if self.basis.as_ref() != Some(&b) || b.len() != self.rows.len() {
+            return;
+        }
+        let mut pos = vec![None; self.std.n_total];
+        for (p, &v) in b.iter().enumerate() {
+            if v >= pos.len() || pos[v].is_some() {
+                return;
+            }
+            pos[v] = Some(p);
+        }
+        if let Some(lu) = super::basis_kernel::factorize_basis_order(&self.std, &pos, &col, &row, fill) {
+            sid::xcount("n_lu_ext");
+            self.lu_cache = Some(Arc::new(LuCache { basis: b, lu: Arc::new(lu), d: None }));
+        } else {
+            sid::xcount("n_lu_ext_fail");
+        }
+    }
+
     /// LU の拡張は実装していない (`ENOMOTO_MIP_XPROF` の `lp_add_rows` / `lp_del_rows` で測れる)。
     /// 行を加える。既存の基底に新しい行のスラックを足し、DSE 重みも引き継ぐ (新しい行の重みは 1)。
     /// `ENOMOTO_MIP_ROWS_DSE_EXACT` (試作、既定では使わない): 新しい行の重みを 1 ではなく「未知」(`NaN`) にし、次の求解が
@@ -973,6 +1053,8 @@ impl TwoStageLp {
     /// [`Self::delete_and_add_rows`])。
     fn add_rows_inner(&mut self, new_rows: &[(Vec<(usize, f64)>, f64, f64)], rebuild: bool) {
         let m0 = self.rows.len();
+        // 試作 `ENOMOTO_MIP_LU_EXTEND`: 足す前の基底の分解の順 (足した行のスラックは順の最後に置く)
+        let ext = self.lu_ext_start();
         let new_w = if env_str!("ENOMOTO_MIP_ROWS_DSE_EXACT").is_some() { f64::NAN } else { 1.0 };
         for (r, l, u) in new_rows {
             let mut r: Vec<(usize, f64)> = r.iter().filter(|&&(_, v)| v != 0.0).cloned().collect();
@@ -989,6 +1071,15 @@ impl TwoStageLp {
         if let Some(b) = self.basis.as_mut() {
             for i in m0..self.rows.len() {
                 b.push(self.n + i);
+            }
+        }
+        // 試作 `ENOMOTO_MIP_LU_EXTEND`: 順の最後に新しい行のスラック (基底の位置 m0..、行 m0..) を足して持ち越し、作り直していれば分解する
+        if let (Some((mut col, mut row, fill, _)), Some(b)) = (ext, self.basis.as_ref()) {
+            col.extend(m0..self.rows.len());
+            row.extend(m0..self.rows.len());
+            self.lu_ext = Some((col, row, fill, b.clone()));
+            if rebuild {
+                self.lu_ext_finish();
             }
         }
         // DSE 重みも引き継ぎ、新しい行の重みは 1 (スラックが基底の行)
@@ -1052,6 +1143,8 @@ impl TwoStageLp {
     /// 基底の修復 ([`Self::repair_basis`]) は標準形を見ないので、作り直しの前に行ってよい。
     fn delete_rows_inner(&mut self, remove: &[bool], rebuild: bool) {
         let m = self.rows.len();
+        // 試作 `ENOMOTO_MIP_LU_EXTEND`: 外す前の基底の分解の順 (外した行のスラックが基底にあった位置と、その行を順から抜く)
+        let ext = self.lu_ext_start();
         let mut new_index = vec![usize::MAX; m];
         let mut k = 0;
         for i in 0..m {
@@ -1097,12 +1190,35 @@ impl TwoStageLp {
             if same {
                 self.dse_cache = Some(Arc::new((nb.clone(), nw)));
             }
+            // 試作 `ENOMOTO_MIP_LU_EXTEND`: 外した行のスラックがすべて基底にあったときだけ、順から外した位置と行を抜いて番号を詰める
+            // (基底の位置は残った位置の順、行は残った行の順)。外した行の数と外れた基底の位置の数が違えば (基底の外のスラックの行を
+            // 外した) 使わない (基底が足りなくなり、下の修復が列を足す)
+            if let Some((col, row, fill, _)) = ext {
+                let mut new_pos = vec![usize::MAX; b.len()];
+                let mut k2 = 0usize;
+                for (p, &v) in b.iter().enumerate() {
+                    if v < n || !remove[v - n] {
+                        new_pos[p] = k2;
+                        k2 += 1;
+                    }
+                }
+                if k2 == k {
+                    let col: Vec<usize> = col.iter().filter_map(|&p| (new_pos[p] != usize::MAX).then_some(new_pos[p])).collect();
+                    let row: Vec<usize> = row.iter().filter_map(|&r| (new_index[r] != usize::MAX).then_some(new_index[r])).collect();
+                    if col.len() == k && row.len() == k {
+                        self.lu_ext = Some((col, row, fill, nb.clone()));
+                    }
+                }
+            }
             self.basis = Some(nb);
         }
         if rebuild {
             self.rebuild();
         }
         self.repair_basis();
+        if rebuild {
+            self.lu_ext_finish();
+        }
         // 基底を直したら重みは使わない
         if !matches!((&self.basis, self.dse_cache.as_deref()), (Some(b), Some((cb, _))) if b == cb) {
             self.dse_cache = None;
@@ -1341,7 +1457,21 @@ impl TwoStageLp {
         let vertex = r.vertex.map(|(b, xv)| (b, xv.map(|v| to_orig(&v))));
         // 標準形の目的は平行移動した列 `x' = x - shift` のもの: 元の単位は `c·shift` を足す (`xolazy_duals` と同じ)
         let lag = r.y.as_deref().and_then(|y| lagrange_std(&self.std, n, y)).map(|(l, d)| (l + (0..n).map(|j| self.std.c[j] * self.shift[j]).sum::<f64>(), d));
-        Some(InteriorPoint { x, vertex, lag })
+        let acdual = r.y0.as_deref().and_then(|y| {
+            let s = y.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+            (s > 0.0 && s.is_finite()).then(|| y.iter().map(|v| v / s).collect::<Vec<f64>>())
+        });
+        // 内点法の双対の向き (`c + A^T y` か `c - A^T y`) によらないよう、両方の符号で作って `-L` の小さい方を使う (どちらも正しい)
+        let acdual = acdual.and_then(|y| {
+            let neg: Vec<f64> = y.iter().map(|v| -v).collect();
+            let a = lagrange_std_c(&self.std, n, &y, true);
+            let b = lagrange_std_c(&self.std, n, &neg, true);
+            match (a, b) {
+                (Some(a), Some(b)) => Some(if a.0 >= b.0 { a } else { b }),
+                (a, b) => a.or(b),
+            }
+        });
+        Some(InteriorPoint { x, vertex, lag, acdual })
     }
 
     /// 基底を標準形の列番号 (長さ m) で直接与える (特異なら修復する)。`x` を渡すと、次の求解の非基底列の
@@ -1637,6 +1767,18 @@ impl TwoStageLp {
             }
         }
         self.solve_once(lim)
+    }
+
+    /// 試作 `ENOMOTO_MIP_ROOTPAR_PH` の `j` (研磨の LP の重い場合、analysis/rootpar_ph_20261126): 基底のない求解の既存の入口を、
+    /// 大きさの判定 (`G5SEQ_SIZE`) によらず使う。このスレッドの [`set_cold_race_threads`] が 2 以上なら同時実行 ([`Self::solve_race`])、
+    /// そうでなければ二段解法 (反復の上限つき) → 内点法 + クロスオーバー ([`Self::solve_seq_ipm`])
+    pub(crate) fn solve_cold_entry(&mut self, lim: &SolveLimits) -> LpStatus {
+        self.basis = None;
+        let k = COLD_RACE_THREADS.with(|c| c.get());
+        if k >= 2 && crate::cancel::current().is_none() {
+            return self.solve_race(lim, k);
+        }
+        self.solve_seq_ipm(lim)
     }
 
     /// `ENOMOTO_MIP_G5SEQ` (既定、1 スレッドの基底のない大きい求解): 二段解法を反復の上限
@@ -2017,6 +2159,18 @@ impl TwoStageLp {
         (!hi_inf && yb > zhi + tol) || (!lo_inf && yb < zlo - tol)
     }
 
+    /// 行の尺度 `rs`・列の尺度 `cs` ([`scale_factors`]) をかけた写し: 係数 `a_ij rs_i cs_j`、行の範囲 `× rs_i`、列の範囲 `/ cs_j`、
+    /// 費用 `× cs_j`。[`Self::attach_tw`]・[`Self::ipm_scale`]・[`Self::solve_scaled`] の共通部分 (analysis/unify_20261126 の 1 節の 11)
+    fn scaled_copy(&self, rs: &[f64], cs: &[f64]) -> TwoStageLp {
+        let rows: Vec<Vec<(usize, f64)>> = self.rows.iter().enumerate().map(|(i, r)| r.iter().map(|&(j, v)| (j, v * rs[i] * cs[j])).collect()).collect();
+        let row_lo: Vec<f64> = (0..rs.len()).map(|i| self.row_lo[i] * rs[i]).collect();
+        let row_up: Vec<f64> = (0..rs.len()).map(|i| self.row_up[i] * rs[i]).collect();
+        let lo: Vec<f64> = (0..self.n).map(|j| self.lo[j] / cs[j]).collect();
+        let up: Vec<f64> = (0..self.n).map(|j| self.up[j] / cs[j]).collect();
+        let cost: Vec<f64> = (0..self.n).map(|j| self.cost[j] * cs[j]).collect();
+        TwoStageLp::new_raw(&lo, &up, &cost, &rows, &row_lo, &row_up)
+    }
+
     /// 試作 `ENOMOTO_XO_MIP_SCALE` の写し ([`IpmScale`])。環境変数がなければ `None`。
     fn ipm_scale(&self) -> Option<Arc<IpmScale>> {
         if !env_str!("ENOMOTO_XO_MIP_SCALE").is_some_and(|v| v != "0") {
@@ -2024,27 +2178,12 @@ impl TwoStageLp {
         }
         // 係数の幅 (最大 / 最小の絶対値) が `ENOMOTO_T_XO_MIP_SCALE_MIN_RANGE` (既定 1e5) 未満なら使わない (opm2-z10-s4 (幅 4.1e3) は
         // 尺度をそろえた写しで基底の選択が 600 秒戻らなかった。momentum1 は幅 7.9e9、satellites2-40 は 6.6e5)
-        let (mut amin, mut amax) = (f64::INFINITY, 0.0f64);
-        for r in &self.rows {
-            for &(_, v) in r {
-                let a = v.abs();
-                if a > 0.0 {
-                    amin = amin.min(a);
-                    amax = amax.max(a);
-                }
-            }
-        }
+        let (amin, amax) = coef_minmax(&self.rows);
         if !(amax / amin >= tunable!("ENOMOTO_T_XO_MIP_SCALE_MIN_RANGE", 1e5f64, f64)) {
             return None;
         }
         let (rs, cs) = scale_factors(self.n, &self.rows);
-        let rows: Vec<Vec<(usize, f64)>> = self.rows.iter().enumerate().map(|(i, r)| r.iter().map(|&(j, v)| (j, v * rs[i] * cs[j])).collect()).collect();
-        let row_lo: Vec<f64> = (0..rs.len()).map(|i| self.row_lo[i] * rs[i]).collect();
-        let row_up: Vec<f64> = (0..rs.len()).map(|i| self.row_up[i] * rs[i]).collect();
-        let lo: Vec<f64> = (0..self.n).map(|j| self.lo[j] / cs[j]).collect();
-        let up: Vec<f64> = (0..self.n).map(|j| self.up[j] / cs[j]).collect();
-        let cost: Vec<f64> = (0..self.n).map(|j| self.cost[j] * cs[j]).collect();
-        let sc = TwoStageLp::new_raw(&lo, &up, &cost, &rows, &row_lo, &row_up);
+        let sc = self.scaled_copy(&rs, &cs);
         let no_hint = amax / amin >= tunable!("ENOMOTO_T_XO_MIP_SCALE_NOHINT_RANGE", 1e8f64, f64);
         Some(Arc::new(IpmScale { std: sc.std, no_hint, rs, cs, sc_shift: sc.shift, shift: self.shift.clone() }))
     }
@@ -2087,13 +2226,7 @@ impl TwoStageLp {
     fn solve_scaled(&mut self, lim: &SolveLimits) -> LpStatus {
         let t0 = std::time::Instant::now();
         let (rs, cs) = scale_factors(self.n, &self.rows);
-        let rows: Vec<Vec<(usize, f64)>> = self.rows.iter().enumerate().map(|(i, r)| r.iter().map(|&(j, v)| (j, v * rs[i] * cs[j])).collect()).collect();
-        let row_lo: Vec<f64> = (0..rs.len()).map(|i| self.row_lo[i] * rs[i]).collect();
-        let row_up: Vec<f64> = (0..rs.len()).map(|i| self.row_up[i] * rs[i]).collect();
-        let lo: Vec<f64> = (0..self.n).map(|j| self.lo[j] / cs[j]).collect();
-        let up: Vec<f64> = (0..self.n).map(|j| self.up[j] / cs[j]).collect();
-        let cost: Vec<f64> = (0..self.n).map(|j| self.cost[j] * cs[j]).collect();
-        let mut sc = TwoStageLp::new_raw(&lo, &up, &cost, &rows, &row_lo, &row_up);
+        let mut sc = self.scaled_copy(&rs, &cs);
         // 基底があれば (`ENOMOTO_MIP_ROOTLP_SCALE` の warm start) 写しに渡す。基底と非基底の置き場所は尺度によらない。
         // 解 `x` は写しの尺度に直す (`x' = x / c`)。DSE 重みは尺度による (元の LP の重みは写しでは使わない)
         let warm = matches!(&self.basis, Some(b) if b.len() == self.rows.len());
@@ -2629,6 +2762,14 @@ impl TwoStageLp {
             }
         }
         // 仕上げの記録が使えない: 頂点で境界の内側にある列 (足りなければスラック) を基底にして warm start で解き直す
+        self.warm_from_point(xo, lim, debug, t0)
+    }
+
+    /// 元の空間の点 `xo` (長さ `n`) から基底を作って warm start で解き直す: 境界の内側にある列と行のスラックを基底にし
+    /// ([`Self::repair_basis`] で数をそろえる)、`xo` を出発の点にする。[`Self::adopt_ipm_vertex`] の仕上げの記録がないときと、
+    /// 試作 `ENOMOTO_MIP_ROOTLP_PRESOLVE` (LP の経路 (前処理つき) で解いた最適解からの根の LP、[`Self::solve_from_point`]) で使う。
+    fn warm_from_point(&mut self, xo: Vec<f64>, lim: &SolveLimits, debug: bool, t0: std::time::Instant) -> LpStatus {
+        let n = self.n;
         let m = self.rows.len();
         let inside = |v: f64, l: f64, u: f64| v > l + 1e-9 * (1.0 + l.abs()) && v < u - 1e-9 * (1.0 + u.abs());
         let mut b: Vec<usize> = (0..n).filter(|&j| inside(xo[j], self.lo[j], self.up[j])).collect();
@@ -2636,6 +2777,10 @@ impl TwoStageLp {
             if inside(self.slack_value(i, &xo), 0.0, self.std.ub[n + i]) {
                 b.push(n + i);
             }
+        }
+        if debug && env_str!("ENOMOTO_MIP_ROOTLP_PRESOLVE").is_some() {
+            let nc = b.iter().filter(|&&v| v < n).count();
+            eprintln!("MIP: ROOTLP_PRESOLVE: point inside its bounds: columns {nc}, slacks {} (rows {m})", b.len() - nc);
         }
         self.basis = Some(b);
         self.repair_basis();
@@ -2651,6 +2796,58 @@ impl TwoStageLp {
             eprintln!("MIP root race: ipm_crossover won at {:.3}s, no usable basis -> warm re-solve {st:?} in {} iters", t0.elapsed().as_secs_f64(), self.iters - it0);
         }
         st
+    }
+
+    /// 試作 `ENOMOTO_MIP_ROOTLP_PRESOLVE` (analysis/highsonly_20261123): 元の空間の点 `xo` (LP の経路で解いた最適解) から基底を作り、
+    /// warm start で解き直す ([`Self::warm_from_point`])。長さが合わなければ `None`。
+    pub fn solve_from_point(&mut self, xo: &[f64], lim: &SolveLimits) -> Option<LpStatus> {
+        if xo.len() != self.n {
+            return None;
+        }
+        let st = self.warm_from_point(xo.to_vec(), lim, true, std::time::Instant::now());
+        self.status = Some(st);
+        Some(st)
+    }
+
+    /// 試作 `ENOMOTO_MIP_ROOTLP_PRESOLVE=d` (analysis/highsonly_20261123): 元の空間の最適解 `xo` と元の行の双対 `pi` (LP の符号:
+    /// 被約費用 `c - A^T pi`。LP の経路で双対の問題を解いて得たもの) を、この LP の標準形の点 (行は `σ_i` 倍) に直して
+    /// クロスオーバーに与え ([`super::crossover::XoOptions::given_point`])、得た最適基底を採る ([`Self::adopt_ipm_vertex`])。
+    /// クロスオーバーが失敗したら点だけから始める ([`Self::warm_from_point`])。長さが合わなければ `None`。
+    pub fn solve_from_primal_dual(&mut self, xo: &[f64], pi: &[f64], lim: &SolveLimits) -> Option<LpStatus> {
+        let n = self.n;
+        let m = self.rows.len();
+        if xo.len() != n || pi.len() != m {
+            return None;
+        }
+        let t0 = std::time::Instant::now();
+        let mut xs = vec![0.0; n + m];
+        for j in 0..n {
+            xs[j] = (xo[j] - self.shift[j]).clamp(self.std.lb[j], self.std.ub[j]);
+        }
+        for i in 0..m {
+            xs[n + i] = self.slack_value(i, xo).clamp(self.std.lb[n + i], self.std.ub[n + i]);
+        }
+        // 標準形の行 i は σ_i x (元の行) + s なので、LP の符号の双対は σ_i π_i。クロスオーバーに渡す向き: 診断 `ENOMOTO_T_MIP_ROOTLP_DUAL_SIGN`
+        // (既定 1 = LP の符号のまま、-1 = 負にする。neos-873061 では -1 だと非 D の列のほぼすべてが双対実行不能と判定された)
+        let sgn = tunable!("ENOMOTO_T_MIP_ROOTLP_DUAL_SIGN", 1.0, f64);
+        let y: Vec<f64> = (0..m).map(|i| sgn * self.sigma[i] * pi[i]).collect();
+        sid::request_duals(true);
+        let r = crate::cancel::with_deadline(lim.deadline, || {
+            super::crossover::solve_ipm_crossover_with(&self.std, &super::crossover::XoOptions { given_point: Some((&xs, &y, 0.0)), fill_by_s: 4, ..Default::default() })
+        });
+        let duals = sid::take_duals();
+        sid::request_duals(false);
+        let t_xo = t0.elapsed().as_secs_f64();
+        let got = r.filter(|r| r.status == Status::Optimal).and_then(|r| r.x);
+        eprintln!("MIP: ROOTLP_PRESOLVE=d: crossover from the primal-dual point: {} ({t_xo:.2}s)", if got.is_some() { "optimal" } else { "failed" });
+        let it0 = self.iters;
+        let st = match got {
+            Some(x) => self.adopt_ipm_vertex(&x, duals, lim, true, t0),
+            None => self.warm_from_point(xo.to_vec(), lim, true, t0),
+        };
+        eprintln!("MIP: ROOTLP_PRESOLVE=d: {st:?} after {} more iters ({:.2}s)", self.iters - it0, t0.elapsed().as_secs_f64() - t_xo);
+        self.status = Some(st);
+        Some(st)
     }
 
     /// 直前の求解が非有界 (段階 A が `z^1 < 0`、段階 B で実行可能) だったときの切片問題 (論文の式 (8)) の境界を、元の
@@ -2954,7 +3151,34 @@ impl TwoStageLp {
                         eprintln!("TSLP solve: dse_cache basis differs (len {} vs {})", cb.len(), b.len());
                     }
                 }
-                sid::solve_slope_intercept_dual_from_basis(&self.std, &opts, b)
+                // 試作 `ENOMOTO_MIP_DSE_COST`: この求解の見込みの手間を置く (厳密な DSE 重みを作り直すかの判断)
+                let dc = sid::dse_cost_on();
+                if dc {
+                    sid::set_dse_cost_hint(self.dc_last_it.filter(|_| self.dc_iters > 0).map(|e| e as f64 * self.dc_ticks / self.dc_iters as f64));
+                }
+                let dc_t0 = if dc { crate::ticks::total() } else { 0.0 };
+                let dc_it0 = sid::ext_iterations();
+                let r = sid::solve_slope_intercept_dual_from_basis(&self.std, &opts, b);
+                if dc {
+                    sid::set_dse_cost_hint(None);
+                    let it = (sid::ext_iterations() - dc_it0) as u64;
+                    let (dec, cost, budget) = sid::take_dse_cost_last();
+                    if dec != 0 && sid::dse_cost_log_on() {
+                        eprintln!(
+                            "DSE_COST ev {} rebuild {:.0} budget {:.0} last_it {:?} it {} ticks {:.0}",
+                            if dec == 1 { "skip" } else { "built" },
+                            cost,
+                            budget,
+                            self.dc_last_it,
+                            it,
+                            crate::ticks::total() - dc_t0
+                        );
+                    }
+                    self.dc_last_it = Some(it);
+                    self.dc_ticks += crate::ticks::total() - dc_t0;
+                    self.dc_iters += it;
+                }
+                r
             }
             _ => sid::solve_slope_intercept_dual(&self.std, &opts),
         };
@@ -3530,14 +3754,43 @@ impl TwoStageLp {
                         let mv: f64 = alpha.iter().enumerate().filter(|&(p, _)| basis[p] < n).map(|(_, a)| a.abs()).sum::<f64>() + if q < n { 1.0 } else { 0.0 };
                         (t * mv).min(1e12) + if t > 1e-9 { 1e6 } else { 0.0 } + noise
                     }
+                    // 試作 `ENOMOTO_MIP_CUTVERT=q` (analysis/cutrobust_20261124): 整数列の分数の度合い Σ min(f, 1 − f) の増え
+                    // (入る変数と基底の整数列の値の動きから計算する。増えない入れ替えは選ばず、局所最大で止まる)
+                    'q' => {
+                        let phi = |v: usize, zv: f64| -> f64 {
+                            if v >= n || !is_int.get(v).copied().unwrap_or(false) {
+                                return 0.0;
+                            }
+                            let xv = zv + self.shift[v];
+                            let f = xv - xv.floor();
+                            if f < 1e-6 || f > 1.0 - 1e-6 { 0.0 } else { f.min(1.0 - f) }
+                        };
+                        let mut g = phi(q, z[q] + dir * t) - phi(q, z[q]);
+                        if t > 0.0 {
+                            for (p, &a) in alpha.iter().enumerate() {
+                                if a != 0.0 {
+                                    let v = basis[p];
+                                    g += phi(v, z[v] - dir * a * t) - phi(v, z[v]);
+                                }
+                            }
+                        }
+                        g
+                    }
                     _ => noise,
                 };
+                if mode == 'q' && score <= 1e-9 {
+                    continue;
+                }
                 if best.as_ref().is_none_or(|b| score > b.5) {
                     best = Some((q, dir, t, r, alpha, score));
                 }
                 if mode == 'r' && best.is_some() {
                     break;
                 }
+            }
+            if mode == 'q' && best.is_none() {
+                // 分数の度合いを増やす入れ替えがない (局所最大)
+                break;
             }
             let Some((q, dir, t, r, alpha, _)) = best else {
                 // 引いた候補がどれも動けない: 引いた分を除いて続ける
@@ -3925,4 +4178,21 @@ pub(crate) fn nodecut_report() {
 /// `s` 標準形で空の行にせず係数を残してスラックを自由変数にする、`p` 受け渡しの基底の直し (`fix_pool_basis`) で空の行を特別に扱わない
 pub(crate) fn freerow_off(c: char) -> bool {
     env_str!("ENOMOTO_MIP_FREEROW_OFF").is_some_and(|v| v.contains(c))
+}
+
+/// 試作 `ENOMOTO_MIP_LU_EXTEND` (analysis/lpiter_20261123、既定では使わない): LP に行を足した・外したとき、LU のキャッシュを捨てて
+/// 次の求解で一から分解する代わりに、直前の分解の列順を写した順で分解し直してキャッシュに置く ([`TwoStageLp::lu_ext_finish`])。
+/// 足した行のスラック (基底) は列順の最後に置くので、古い基底列の新しい行の係数は `L` に入り、新しいスラックは対角 1 のピボットになる
+/// (HiGHS の `HFactor::addRows` と同じ形の分解。探索なしの左視の再生で作る)。外した行は、そのスラックがすべて基底にあったときだけ
+/// その位置と行を順から抜く。分解の作り直しの条件 (更新の回数の上限・数値の確かめ) は今までどおり
+pub(crate) fn lu_extend_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_MIP_LU_EXTEND").is_some_and(|v| v != "0"))
+}
+
+/// 試作 `ENOMOTO_MIP_LU_EXTEND=r` (確かめ用、analysis/luxroot_20261124): 延ばし・縮めを根の LP・根のカットのループでも使う
+/// (直す前の形。単体法の道筋が分解の違いで変わるかを調べる)
+pub(crate) fn lu_extend_root() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_MIP_LU_EXTEND").is_some_and(|v| v.contains('r')))
 }

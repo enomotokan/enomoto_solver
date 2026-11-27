@@ -1,7 +1,8 @@
 """Model: 問題入力インターフェースの入口。
 
     M = Model()
-    x = Variable(float, 0, 10)   # 現在の Model (M) に属する
+    x = M.add_variable(float, 0, 10)
+    y = M.add_variable(float, 0, 10)
     f = x + 2 * y
     M.set_objective(f)
     M.add_constraint(0 <= f)
@@ -18,7 +19,7 @@ import os
 import time
 import warnings
 from dataclasses import dataclass
-from typing import ClassVar, List, Optional
+from typing import List, Optional
 
 from . import _core
 from .constraint import Constraint
@@ -73,15 +74,10 @@ class Solution:
 
 
 class Model:
-    """最適化モデル。``Model()`` を作るとそれが *現在の* Model になり、``model=`` を
-    指定しない ``Variable(...)`` は、最後に作られた (または ``with model:`` で入った)
-    Model に属する。明示したい場合は ``Variable(..., model=...)`` を使う。"""
-
-    # 現在の Model のスタック (末尾が現在の Model)
-    _stack: ClassVar[List["Model"]] = []
+    """最適化モデル。変数は ``M.add_variable(型, 下限, 上限)`` で、このモデルに作る。"""
 
     def __init__(self):
-        """空のモデルを作り、現在の Model にする。"""
+        """空のモデルを作る。"""
         self._core = _core.PyModel()
         self._variables: List["Variable"] = []  # noqa: F821 - 循環 import を避けるため Variable は遅延 import
         self._objective: Optional[Function] = None
@@ -90,30 +86,24 @@ class Model:
         self._solution: Optional[Solution] = None
         self._name = ""  # 問題の名前 (MPS の NAME。readModel で設定)
         self._names: Optional[dict] = None  # get_variable 用の 名前 -> Variable (遅延して作る)
-        Model._stack.append(self)
 
-    @classmethod
-    def current(cls) -> "Model":
-        """現在の Model を返す。1 つもなければ RuntimeError。"""
-        if not cls._stack:
-            raise RuntimeError(
-                "no active Model — create one with `M = Model()` before defining Variables, "
-                "or pass model=<Model> explicitly to Variable(...)"
-            )
-        return cls._stack[-1]
+    # -- 変数 --------------------------------------------------------------
+    def add_variable(self, vtype, lb: float, ub: float, name: Optional[str] = None) -> "Variable":  # noqa: F821
+        """型 ``vtype`` (``float`` -> 連続、``int`` -> 整数。文字列 ``"continuous"`` / ``"integer"`` も可)、
+        下限 ``lb``・上限 ``ub`` (``±math.inf`` 可) の変数をこのモデルに作って返す。
 
-    def __enter__(self) -> "Model":
-        """``with model:`` の間、このモデルを現在の Model にする。"""
-        Model._stack.append(self)
-        return self
+            x = M.add_variable(float, 0, 10)
+            b = M.add_variable(int, 0, 1, name="b")
 
-    def __exit__(self, exc_type, exc, tb) -> None:
-        """``with`` ブロックを抜けたら現在の Model を元に戻す。"""
-        Model._stack.pop()
+        型が不正なら ValueError / TypeError、境界が NaN や ``lb > ub`` なら ValueError。"""
+        from .types import normalize_vtype
+        from .variable import Variable
 
-    def _register_variable(self, var) -> None:
-        """Variable の生成時に呼ばれ、変数を Python 側の一覧に加える。"""
-        self._variables.append(var)
+        norm_vtype = normalize_vtype(vtype)
+        index = self._core.add_variable(norm_vtype, float(lb), float(ub))
+        v = Variable._attach(self, index, norm_vtype, lb, ub, name)
+        self._variables.append(v)
+        return v
 
     def _variable_value(self, index: int) -> float:
         """変数番号 ``index`` の解の値。解がなければ RuntimeError。"""
@@ -155,7 +145,7 @@ class Model:
         範囲のある行 (``RANGES``) は ``<=`` と ``>=`` の 2 本の制約になる。係数はファイルどおりに読む
         (HiGHS のように絶対値 1e-9 以下の係数を捨てることはしない)。定義されていない行・列への
         参照は警告 (``warnings.warn``) を出して飛ばす。二次の項・半連続変数・SOS は ValueError。
-        読み込んだ後に ``Variable`` や ``add_constraint`` で変数・制約を足してもよい。
+        読み込んだ後に ``add_variable`` や ``add_constraint`` で変数・制約を足してもよい。
         変数・目的関数・制約のどれかが既にある Model では ValueError。"""
         from .variable import Variable
 
@@ -171,16 +161,10 @@ class Model:
             shown = "; ".join(notes[:3]) + (f"; ... ({len(notes)} in total)" if len(notes) > 3 else "")
             warnings.warn(f"readModel({p!r}): {shown}", stacklevel=2)
         lb, ub, is_int = self._core.variable_bounds()
-        # Variable.__init__ は Rust コアに変数を足すので通らず、登録済みの列を指す Variable を作る
+        # Rust コアに登録済みの列を指す Variable を作る
         for j, cname in enumerate(col_names):
-            v = Variable.__new__(Variable)
-            Function.__init__(v, self, {j: 1.0}, 0.0)
-            v.vtype = "integer" if is_int[j] else "continuous"
-            v.lb = lb[j]
-            v.ub = ub[j]
-            v.index = j
-            v.name = cname
-            self._variables.append(v)
+            vtype = "integer" if is_int[j] else "continuous"
+            self._variables.append(Variable._attach(self, j, vtype, lb[j], ub[j], cname))
         coeffs, constant, sense = self._core.objective_terms()
         self._objective = Function(self, dict(coeffs), constant)
         self._sense = sense
@@ -213,6 +197,7 @@ class Model:
         node_limit: Optional[int] = None,
         threads: Optional[int] = None,
         log: bool = True,
+        seed: Optional[int] = None,
         *,
         root_solver: Optional[str] = None,
     ) -> Solution:
@@ -260,6 +245,12 @@ class Model:
         同時実行の勝敗、整数最適化では根の LP・切除平面・探索の経過) を、最後に結果を標準出力に出す。
         False なら何も出さない。
 
+        ``seed``: 整数最適化の乱数の種 (0 以上 2**64 未満の整数)。``None`` (既定) なら環境変数 ``ENOMOTO_T_MIP_SEED``
+        (計測の台本用) の値、それもなければ 0 (以前と同じ動き)。木の中のヒューリスティクスや、並列の Feasibility Jump・Local-MIP の
+        スレッドの乱数に混ぜる。1 スレッド (``threads=1``) なら同じ種で同じ結果 (ノード数・目的値) になり再現できる。2 スレッド以上では
+        同じ種でもスレッドのタイミングで探索の道筋が揺れうる。種を変えて回すと、問題ごとの時間の揺れを確かめられる。負の値・2**64 以上は
+        ``ValueError``、整数でなければ (``bool`` を含む) ``TypeError``。LP (整数変数のないモデル) では使わない。
+
         ``root_solver``: ``lp_solver`` の以前の名前 (互換のため残す。使うと ``DeprecationWarning`` を出す)。
         ``lp_solver`` と同時に指定すると ``TypeError``。
         """
@@ -279,6 +270,11 @@ class Model:
                 UserWarning,
                 stacklevel=2,
             )
+        if seed is not None:
+            if isinstance(seed, bool) or not isinstance(seed, int):
+                raise TypeError(f"seed must be an int or None, got {type(seed).__name__}")
+            if not 0 <= seed < 2**64:
+                raise ValueError(f"seed must be in [0, 2**64), got {seed}")
         if log and self._objective is not None:
             self._log_header(threads)
         t0 = time.perf_counter()
@@ -290,6 +286,7 @@ class Model:
             node_limit=node_limit,
             threads=threads,
             log=log,
+            seed=seed,
         )
         elapsed = time.perf_counter() - t0
         status = result["status"]

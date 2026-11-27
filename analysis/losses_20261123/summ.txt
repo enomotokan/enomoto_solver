@@ -1,0 +1,93 @@
+行数 240、問題 48、種 [1]、上限 [600] 秒、設定 ['ours_t1', 'ours_t4', 'scip', 'highs_t1', 'highs_t4']
+版: {'{"enomoto-solver": "0.1.10", "highspy": "1.15.1", "ours_so_sha1": "e2cf1200582bf7b30f47d4e7ffea158b153f2a1a", "pyscipopt": "6.3.0"}': 40, '{"enomoto-solver": "0.1.10", "highspy": "1.15.1", "ours_so_sha1": "f027665a1a6dda5dd6b622a6255c99d24d1888e3", "pyscipopt": "6.3.0"}': 40, '{"enomoto-solver": "0.1.10", "highspy": "1.15.1", "ours_so_sha1": "c8babad5c5abd24c7698c67f2f76aeb66e20760e", "pyscipopt": "6.3.0"}': 40, '{"enomoto-solver": "0.1.10", "highspy": "1.15.1", "ours_so_sha1": "3432a10158485fa7eb4387f48e3f60350670bfb2", "pyscipopt": "6.3.0"}': 40, '{"enomoto-solver": "0.1.10", "highspy": "1.15.1", "ours_so_sha1": "fd9e4a30f62a626313db0d61fd19cd571a71d068", "pyscipopt": "6.3.0"}': 40, '{"enomoto-solver": "0.1.10", "highspy": "1.15.1", "ours_so_sha1": "cd2f35eb8883999ee413c3e6adfce499de78dc4a", "pyscipopt": "6.3.0"}': 40}
+当方の .so の sha1 ごとの行の数: {'e2cf1200': 16, 'f027665a': 16, 'c8babad5': 16, '3432a101': 16, 'fd9e4a30': 16, 'cd2f35eb': 16} (--so 先頭 8 文字 で当方の行をその .so だけにできる)
+
+== 状態の内訳
+  ours_t1: {'time_limit': 15, 'optimal': 31, 'infeasible': 2}
+  ours_t4: {'time_limit': 10, 'optimal': 36, 'infeasible': 2}
+  scip: {'time_limit': 10, 'optimal': 35, 'infeasible': 2, 'killed': 1}
+  highs_t1: {'optimal': 37, 'time_limit': 10, 'infeasible': 1}
+  highs_t4: {'optimal': 37, 'time_limit': 10, 'infeasible': 1}
+  crash・killed・取得失敗 1: [('satellites2-40', 'scip', 1, 'killed')]
+
+== 解けた数 (全設定がそろった (問題, 種) で)
+  48 組: ours_t1 33, ours_t4 38, scip 37, highs_t1 38, highs_t4 38
+
+== 最大 RSS
+  ours_t1: 1818 MB (tbfp-network)
+  ours_t4: 2865 MB (uccase12)
+  scip: 1564 MB (uccase12)
+  highs_t1: 1703 MB (rail507)
+  highs_t4: 1733 MB (rail507)
+
+== 食い違い
+  0 件
+
+== ours_t1 / scip: 48 組、解けた ours_t1 33・scip 37 (ours_t1 だけ 1、scip だけ 5)
+  SGM の比 (どちらかが解けた 38 問、shift 1 秒): 1.296 (95% [0.879, 1.931])  1 より小さければ ours_t1 が速い
+  2 倍以上負けた問題 14:
+    10teams: 16.00 (種 1: optimal 92.7 秒 / optimal 4.9 秒)
+    neos-1171448: 15.96 (種 1: optimal 238.1 秒 / optimal 14.0 秒)
+    CMS750_4: 14.40 (種 1: time_limit 600.0 秒 / optimal 40.7 秒)
+    fhnw-binpack4-4: 5.85 (種 1: infeasible 55.9 秒 / infeasible 8.7 秒)
+    istanbul-no-cutoff: 4.54 (種 1: time_limit 600.0 秒 / optimal 131.5 秒)
+    bnatt400: 4.06 (種 1: time_limit 600.0 秒 / optimal 147.0 秒)
+    swath1: 3.30 (種 1: optimal 46.3 秒 / optimal 13.3 秒)
+    30n20b8: 2.82 (種 1: time_limit 600.0 秒 / optimal 212.3 秒)
+    rocI-4-11: 2.67 (種 1: optimal 411.9 秒 / optimal 153.8 秒)
+    dano3_5: 2.41 (種 1: optimal 526.4 秒 / optimal 218.1 秒)
+    seymour1: 2.35 (種 1: optimal 187.3 秒 / optimal 79.2 秒)
+    neos8: 2.33 (種 1: optimal 6.0 秒 / optimal 2.0 秒)
+    mcsched: 2.12 (種 1: optimal 535.1 秒 / optimal 252.0 秒)
+    ns1830653: 2.06 (種 1: optimal 302.3 秒 / optimal 146.2 秒)
+  2 倍以上勝った問題 8:
+    noswot: 0.05 (種 1: optimal 19.1 秒 / optimal 372.7 秒)
+    qnet1: 0.18 (種 1: optimal 4.4 秒 / optimal 29.1 秒)
+    hypothyroid-k1: 0.19 (種 1: optimal 0.9 秒 / optimal 9.2 秒)
+    h80x6320d: 0.19 (種 1: optimal 31.9 秒 / optimal 171.7 秒)
+    neos-933966: 0.20 (種 1: optimal 120.6 秒 / time_limit 600.0 秒)
+    decomp2: 0.31 (種 1: optimal 0.1 秒 / optimal 2.6 秒)
+    p200x1188c: 0.37 (種 1: optimal 1.9 秒 / optimal 7.0 秒)
+    mzzv42z: 0.41 (種 1: optimal 84.4 秒 / optimal 209.3 秒)
+
+== ours_t1 / highs_t1: 48 組、解けた ours_t1 33・highs_t1 38 (ours_t1 だけ 4、highs_t1 だけ 9)
+  SGM の比 (どちらかが解けた 42 問、shift 1 秒): 1.134 (95% [0.769, 1.632])  1 より小さければ ours_t1 が速い
+  2 倍以上負けた問題 6:
+    10teams: 62.62 (種 1: optimal 92.7 秒 / optimal 0.5 秒)
+    mzzv11: 5.32 (種 1: optimal 425.6 秒 / optimal 79.2 秒)
+    neos-1171448: 4.47 (種 1: optimal 238.1 秒 / optimal 52.5 秒)
+    qnet1: 2.76 (種 1: optimal 4.4 秒 / optimal 1.0 秒)
+    pg: 2.74 (種 1: optimal 16.3 秒 / optimal 5.3 秒)
+    swath1: 2.04 (種 1: optimal 46.3 秒 / optimal 22.1 秒)
+  2 倍以上勝った問題 6:
+    graph20-20-1rand: 0.01 (種 1: optimal 7.4 秒 / time_limit 600.0 秒)
+    fhnw-binpack4-4: 0.09 (種 1: infeasible 55.9 秒 / time_limit 600.0 秒)
+    hypothyroid-k1: 0.12 (種 1: optimal 0.9 秒 / optimal 15.3 秒)
+    noswot: 0.13 (種 1: optimal 19.1 秒 / optimal 150.4 秒)
+    misc07: 0.21 (種 1: optimal 4.0 秒 / optimal 23.3 秒)
+    decomp2: 0.27 (種 1: optimal 0.1 秒 / optimal 3.1 秒)
+
+== ours_t4 / highs_t4: 48 組、解けた ours_t4 38・highs_t4 38 (ours_t4 だけ 8、highs_t4 だけ 8)
+  SGM の比 (どちらかが解けた 46 問、shift 1 秒): 0.710 (95% [0.497, 0.960])  1 より小さければ ours_t4 が速い
+  2 倍以上負けた問題 4:
+    neos859080: 3.36 (種 1: infeasible 7.2 秒 / infeasible 1.5 秒)
+    10teams: 3.05 (種 1: optimal 3.6 秒 / optimal 0.5 秒)
+    csched008: 2.07 (種 1: time_limit 600.0 秒 / optimal 289.4 秒)
+    qnet1: 2.02 (種 1: optimal 2.8 秒 / optimal 0.9 秒)
+  2 倍以上勝った問題 16:
+    graph20-20-1rand: 0.01 (種 1: optimal 4.1 秒 / time_limit 600.0 秒)
+    noswot: 0.09 (種 1: optimal 11.9 秒 / optimal 146.2 秒)
+    misc07: 0.12 (種 1: optimal 1.9 秒 / optimal 23.5 秒)
+    hypothyroid-k1: 0.12 (種 1: optimal 1.0 秒 / optimal 15.8 秒)
+    fhnw-binpack4-4: 0.12 (種 1: infeasible 72.6 秒 / time_limit 600.0 秒)
+    30n20b8: 0.20 (種 1: optimal 121.3 秒 / time_limit 600.0 秒)
+    rocI-4-11: 0.27 (種 1: optimal 161.5 秒 / time_limit 600.0 秒)
+    decomp2: 0.28 (種 1: optimal 0.1 秒 / optimal 3.0 秒)
+    mc11: 0.30 (種 1: optimal 14.3 秒 / optimal 50.0 秒)
+    rail507: 0.30 (種 1: optimal 180.4 秒 / time_limit 600.0 秒)
+    mcsched: 0.36 (種 1: optimal 123.6 秒 / optimal 347.0 秒)
+    neos-1171448: 0.36 (種 1: optimal 17.8 秒 / optimal 51.2 秒)
+    bnatt400: 0.40 (種 1: optimal 238.6 秒 / time_limit 600.0 秒)
+    CMS750_4: 0.41 (種 1: optimal 245.2 秒 / time_limit 600.0 秒)
+    ns1830653: 0.42 (種 1: optimal 100.3 秒 / optimal 237.4 秒)
+    istanbul-no-cutoff: 0.49 (種 1: optimal 292.3 秒 / time_limit 600.0 秒)

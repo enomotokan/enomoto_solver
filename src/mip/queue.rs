@@ -63,21 +63,33 @@ pub struct OpenNode {
     pub sb: Option<Rc<SbInherit>>,
     /// 試作 `ENOMOTO_MIP_TC` の `s`: 祖先から引き継いだ固定 (`TC` の `a`・`b`・`r`) を、親の鎖を共有する連結で持つ ([`InhChain`])。
     /// 待ち行列から取り出して根から積み直すときだけ当てる (ほかの使い道では見えないが、見落としても定義域が広いだけで正しさは変わらない)
-    pub inh: Option<Rc<InhChain>>,
+    pub inh: Option<std::sync::Arc<InhChain>>,
     /// 試作 `ENOMOTO_MIP_CWM` ([`super::cwm`]): 衝突の重みの倍率と、対で比べている部分木の札。子は親のものを引き継ぐ
     pub cwm: Option<std::sync::Arc<super::cwm::CwmTag>>,
+    /// 試作 `ENOMOTO_MIP_NODE_ROWSCOPE`: 根からこのノードまでの道筋で LP に加えた行の鎖 ([`RowScope`])。`None` は道筋の行なし
+    pub scope: Option<Rc<RowScope>>,
+    /// 試作 `ENOMOTO_MIP_POOL_SEL` の `e`: 親のノードでプールから戻したカットが目的値を伸ばさなかった (このノードではプールから戻さない)
+    pub nopool: bool,
+}
+
+/// 試作 `ENOMOTO_MIP_NODE_ROWSCOPE` ([`super::solver`] の `rowscope_sync`): 木の中でノードが LP に加えた行 (カットの番号と中身) の鎖。
+/// 子は親の鎖に、親のノードで加えた行の環を足したものを持つ。鎖の行はそのノードの部分木の LP にだけ置く
+pub struct RowScope {
+    pub parent: Option<Rc<RowScope>>,
+    pub rows: Vec<(u64, Rc<(Vec<(usize, f64)>, f64, f64)>)>,
 }
 
 /// [`OpenNode::inh`] の鎖の 1 つの環: このノードで足した引き継ぎの固定と、親の環。
+/// 共有の待ち行列 ([`super::solver`] の `SnapNode`) にも平らに展開せずに渡せるよう `Arc` で持つ (analysis/biglp_20261121/ の 8 節)。
 #[derive(Debug)]
 pub struct InhChain {
-    pub parent: Option<Rc<InhChain>>,
+    pub parent: Option<std::sync::Arc<InhChain>>,
     pub fixes: Vec<BoundChange>,
 }
 
 impl InhChain {
     /// 鎖の全部の固定を、根に近い環から順に `f` に渡す。
-    pub fn for_each(this: &Option<Rc<InhChain>>, mut f: impl FnMut(&BoundChange)) {
+    pub fn for_each(this: &Option<std::sync::Arc<InhChain>>, mut f: impl FnMut(&BoundChange)) {
         let mut rings: Vec<&InhChain> = Vec::new();
         let mut cur = this.as_deref();
         while let Some(r) = cur {
@@ -885,7 +897,7 @@ mod tests {
         let mut q = NodeQueue::new();
         q.pack_basis = true;
         let b = Rc::new(Basis { col: vec![VarStatus::Basic, VarStatus::Upper], row: vec![VarStatus::Lower] });
-        let mk = |lb: f64| OpenNode { changes: Vec::new(), lower_bound: lb, estimate: lb, depth: 1, basis: Some(b.clone()), basis_epoch: 0, dse: None, branch: None, prot: None, tags: None, sb: None, inh: None, cwm: None };
+        let mk = |lb: f64| OpenNode { changes: Vec::new(), lower_bound: lb, estimate: lb, depth: 1, basis: Some(b.clone()), basis_epoch: 0, dse: None, branch: None, prot: None, tags: None, sb: None, inh: None, cwm: None, scope: None, nopool: false };
         q.push(mk(1.0));
         q.push(mk(2.0));
         assert!(q.iter().all(|n| n.basis.is_none()));

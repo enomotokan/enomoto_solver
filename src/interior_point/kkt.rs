@@ -1824,10 +1824,10 @@ impl IpmKkt {
     pub fn new(a: &FaerCsr) -> Option<Self> {
         if env_str!("ENOMOTO_IPM_AUGMENTED").is_none() {
             if let Some(nk) = NormalKkt::new(a) {
-                // 試作 `ENOMOTO_IPM_KKT_AUG_RATIO=r` (既定 0 = 比べない。analysis/rootlp_ipm_fail_20261105.md): 正規方程式の分解の演算量が
+                // `ENOMOTO_IPM_KKT_AUG_RATIO=r` (既定 4、2026-11-22 から。`=0` で比べない。analysis/rootlp_ipm_fail_20261105.md・analysis/shelved_20261122): 正規方程式の分解の演算量が
                 // 1e9 以上なら拡大系の記号分解もして、正規方程式が拡大系の r 倍より重ければ拡大系を使う。sorrell3 の根の LP
                 // (構造列 1,024 本・行 52,801) は正規方程式 1.8e10 flops (1 反復 15 秒、15 反復で期限)、拡大系 3.5e8 flops (49 反復 38 秒)。
-                let r = tunable!("ENOMOTO_IPM_KKT_AUG_RATIO", 0.0f64, f64);
+                let r = tunable!("ENOMOTO_IPM_KKT_AUG_RATIO", 4.0f64, f64);
                 let fl_n = chol_flops(&nk.chol_symbolic);
                 if r > 0.0 && fl_n >= 1e9 {
                     if let Some(ak) = AugKkt::try_new(a, max_factor_nnz()) {

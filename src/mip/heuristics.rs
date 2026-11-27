@@ -119,6 +119,9 @@ thread_local! {
     pub(super) static FJ_NOSOL_CAP: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
     /// 主のスレッドが暫定解を持ったら立つ印 (立てば `FJ_NOSOL_CAP` の延長をやめる)
     pub(super) static FJ_HAS_INC: std::cell::RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>> = const { std::cell::RefCell::new(None) };
+    /// 試作 `ENOMOTO_MIP_T1MIX` ([`Solver::t1_fj_lmip_mix`]): [`fj_lmip_mix`] を、最後の改善 (始めからは始め) からこの秒数 (時計は
+    /// [`fj_lmip_mix`] と同じ) 良い解が出なければ打ち切る (0 = 使わない。並列の FJ のスレッドでは使わない)
+    pub(super) static MIX_STALL: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
 }
 
 /// 主のスレッドが暫定解を持っているか (`FJ_HAS_INC`)。
@@ -575,6 +578,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// になったら反対側を試し、両側とも駄目なら前の決定に戻って反対側に変える (後戻り、最大
     /// `ENOMOTO_T_MIP_DIVE_BACKTRACKS` 回)。`budget` は LP 反復の上限。定義域と LP は戻す。
     pub(super) fn dive(&mut self, kind: DiveKind, budget: u64, search_bound: f64) -> bool {
+        if kind == DiveKind::ObjPscost {
+            return self.obj_pscost_dive(budget);
+        }
         let p = self.p;
         let verbose = self.params.verbose && (self.nodes <= 1 || env_str!("ENOMOTO_MIP_DEBUG_DIVE").is_some());
         let cols = &p.cols;
@@ -585,6 +591,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 暫定解がない間は木の中でも根と同じだけ後戻りする
         let noinc = self.incumbent.is_none() && env_str!("ENOMOTO_MIP_NOINC_HEUR").is_some();
         let max_bt = if self.nodes <= 1 || noinc { tunable!("ENOMOTO_T_MIP_DIVE_BACKTRACKS", 10usize, usize) } else { tunable!("ENOMOTO_T_MIP_NODE_DIVE_BACKTRACKS", 0usize, usize) };
+        let ls_root = if kind == DiveKind::LineSearch { self.ls_root_x.clone().filter(|r| r.len() == p.n) } else { None };
+        if kind == DiveKind::LineSearch && ls_root.is_none() {
+            return false;
+        }
         let guide = if kind == DiveKind::Guided { self.incumbent.as_ref().map(|(_, x)| x.clone()) } else { None };
         if kind == DiveKind::Guided && guide.is_none() {
             return false;
@@ -651,7 +661,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             // 丸める列と最初に試す向きを選ぶ (スコアの小さいもの)
             let mut pick: Option<(usize, f64, bool, f64)> = None; // (列, 値, 上へ, スコア)
-            let multi = if multi_div > 0 && !no_multi && frac.len() >= multi_min { frac.len() / multi_div } else { 1 };
+            // 線探索は SCIP の `lpsolvefreq` 0 と同じく、同じ LP 解の候補を点数の順に続けて固定し、変わった境界が列の
+            // `lpresolvedomchgquot` (SCIP の既定 0.15) を超えたら LP を解き直す (下の「まとめて固定する分」で止める)
+            // 試作 `ENOMOTO_MIP_DIVEBUDGET` ([`super::solver::divebudget_on`]) の木の中のダイビングは、全種類をこの形にする
+            let ls_multi = (kind == DiveKind::LineSearch || self.dive_scip) && !no_multi;
+            let multi = if ls_multi {
+                frac.len()
+            } else if multi_div > 0 && !no_multi && frac.len() >= multi_min {
+                frac.len() / multi_div
+            } else {
+                1
+            };
             scored.clear();
             for &(j, v) in &frac {
                 let f = v - v.floor();
@@ -689,7 +709,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let trivial = if dl == 0 || ul == 0 { 1e6 } else { 0.0 };
                         (up, trivial + lk as f64 + dist + if binary { 0.0 } else { 0.5 })
                     }
-                    DiveKind::Pseudocost => {
+                    DiveKind::Pseudocost | DiveKind::ObjPscost => {
                         // SCIP の pscostdiving: 端に近ければその側、そうでなければ擬費用の小さい側へ。
                         // (この側の費用) / (反対側の費用) の小さい、向きのはっきりした列から
                         let (cu, cd) = (self.pc.cost_up(j) * (1.0 - f), self.pc.cost_down(j) * f);
@@ -715,6 +735,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let up = if c != 0.0 { c < 0.0 } else { f >= 0.5 };
                         let dist = if up { 1.0 - f } else { f };
                         (up, -c.abs() / (1.0 + cmax) + 0.01 * dist + if binary { 0.0 } else { 0.5 })
+                    }
+                    DiveKind::LineSearch => {
+                        // SCIP の linesearchdiving (`divesetGetScoreLinesearchdiving`): 根の LP 解 r から今の値 v への直線を
+                        // 延ばした向きへ丸め、整数値に届くまでの距離 / |v - r| の小さい列から。その向きに自明に丸められる列は
+                        // 1000 倍で後回し、根と同じ値の列は最後 (SCIP は無限大)
+                        let r = ls_root.as_ref().unwrap()[j];
+                        let eps = 1e-6;
+                        if v < r - eps {
+                            let q = (f + 1e-12) / (r - v);
+                            (false, if dl == 0 { 1000.0 * q } else { q })
+                        } else if v > r + eps {
+                            let q = (1.0 - f + 1e-12) / (v - r);
+                            (true, if ul == 0 { 1000.0 * q } else { q })
+                        } else {
+                            (false, 1e300)
+                        }
                     }
                     DiveKind::Conflict => {
                         // 衝突制約の lock の少ない向きへ (同数なら通常の lock、それも同数なら近い側)
@@ -756,9 +792,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 scored.select_nth_unstable_by(k - 1, ord);
                 scored.truncate(k);
                 scored.sort_by(ord);
+                let ls_cap = (0.15 * p.n as f64) as usize;
                 for &(_, ej, ev, eup) in scored.iter() {
                     if ej == j {
                         continue;
+                    }
+                    if ls_multi && self.dom.stack_len() - before > ls_cap {
+                        break;
                     }
                     let b2 = self.dom.stack_len();
                     if eup {
@@ -822,6 +862,190 @@ impl<'a, L: MipLp> Solver<'a, L> {
         found
     }
 
+    /// 試作 `ENOMOTO_MIP_OBJDIVE` (analysis/objdive_20261121): 目的を外したダイビング (SCIP の objpscostdiving の簡略版)。
+    /// 境界を締める代わりに LP の目的関数を変えて潜る。LP の目的は w × c / max|c| に押した列の項 (上へなら -s、下へなら +s) を
+    /// 足したもので、w は 1 から段ごとに `ENOMOTO_T_MIP_OBJDIVE_DEPTHFAC` (0.5) 倍に減らす (元の目的を段々外す)。押す列と向きは
+    /// 擬費用ダイビングと同じ選び方 (端に近ければその側、そうでなければ擬費用の小さい側、向きのはっきりした列から)。
+    /// 同じ向きにもう一度選ばれた列は押す強さ s を 2 倍にし (1 から始めて `ENOMOTO_T_MIP_OBJDIVE_PUSHES` (3) 回まで)、
+    /// 反対の向きに選ばれた列・押し切った列・押す向きの境界が無限の列 (押すと非有界になりうる) は、その向きの整数に境界を締めて
+    /// 伝播し LP を解く (伝播か LP が駄目なら反対側、両側とも駄目なら止める)。LP 解が整数になったら元の目的に戻して解として試す
+    /// ([`Self::try_lp_solution`]: 整数を固定して連続の列を元の目的で解き直すのも含む)。目的値の打ち切りは使わない。
+    /// `budget` は LP 反復の上限。定義域・LP・目的は戻す。
+    pub(super) fn obj_pscost_dive(&mut self, budget: u64) -> bool {
+        let p = self.p;
+        let n = p.n;
+        let verbose = self.params.verbose && (self.nodes <= 1 || env_str!("ENOMOTO_MIP_DEBUG_DIVE").is_some());
+        let saved = self.lp.save_state();
+        let pos = self.dom.stack_len();
+        let it_start = self.lp.total_iterations();
+        let cmax = p.cost.iter().fold(0.0f64, |m, c| m.max(c.abs()));
+        let scale = if cmax > 0.0 { 1.0 / cmax } else { 0.0 };
+        let depthfac = tunable!("ENOMOTO_T_MIP_OBJDIVE_DEPTHFAC", 0.5, f64);
+        let max_push = tunable!("ENOMOTO_T_MIP_OBJDIVE_PUSHES", 8u32, u32);
+        let mut w = 1.0f64;
+        // 列ごとの (押した向き (0 なし・1 上・2 下), 押した回数) と目的の項
+        let mut pushed = vec![(0u8, 0u32); n];
+        let mut push = vec![0.0f64; n];
+        let mut found = false;
+        let mut steps = 0usize;
+        let (mut npush, mut nfix, mut nflip, mut nback) = (0usize, 0usize, 0usize, 0usize);
+        let multi_div = tunable!("ENOMOTO_T_MIP_OBJDIVE_MULTI_DIV", 10usize, usize);
+        let mut why = "budget";
+        let (mut frac0, mut frac_min) = (0usize, usize::MAX);
+        self.heur_close = 0.0;
+        let lims = |s: &Self| SolveLimits { iteration_limit: budget.saturating_sub(s.lp.total_iterations() - it_start).max(100), cutoff: f64::INFINITY, deadline: s.deadline };
+        loop {
+            steps += 1;
+            if steps > 4 * n + 10 || self.time_up() || self.lp.total_iterations() - it_start > budget {
+                break;
+            }
+            if self.poll_found_solution() {
+                why = "other thread found a solution";
+                break;
+            }
+            let x = self.lp.col_values();
+            let frac = self.fractional(&x);
+            if steps == 1 {
+                frac0 = frac.len();
+            }
+            frac_min = frac_min.min(frac.len());
+            if frac0 > 0 {
+                self.heur_close = 1.0 - frac_min as f64 / frac0 as f64;
+            }
+            if frac.is_empty() {
+                self.lp.set_costs(&p.cost);
+                found = self.try_lp_solution();
+                why = "integral";
+                if env_str!("ENOMOTO_MIP_DEBUG_OBJDIVE").is_some() {
+                    let z: f64 = (0..n).map(|k| p.cost[k] * x[k]).sum::<f64>() + p.offset;
+                    eprintln!("MIP:   objective pseudocost dive: integral point objective {z:.6e} (incumbent {:?})", self.incumbent.as_ref().map(|(z, _)| *z));
+                }
+                break;
+            }
+            // 押す列: スコアの小さい方から k = max(1, 分数の列の数 / `ENOMOTO_T_MIP_OBJDIVE_MULTI_DIV` (10)) 本
+            let mut cands: Vec<(f64, usize, f64, bool)> = frac
+                .iter()
+                .map(|&(j, v)| {
+                    let f = v - v.floor();
+                    let binary = self.dom.global_lo[j] == 0.0 && self.dom.global_up[j] == 1.0;
+                    let (cu, cd) = (self.pc.cost_up(j) * (1.0 - f), self.pc.cost_down(j) * f);
+                    let up = if f < 0.3 {
+                        false
+                    } else if f > 0.7 {
+                        true
+                    } else {
+                        cu < cd
+                    };
+                    let (this, other) = if up { (cu, cd) } else { (cd, cu) };
+                    ((this + 1e-6) / (other + 1e-6) + if binary { 0.0 } else { 1.0 }, j, v, up)
+                })
+                .collect();
+            let k = (frac.len() / multi_div.max(1)).max(1).min(cands.len());
+            let ord = |a: &(f64, usize, f64, bool), b: &(f64, usize, f64, bool)| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1));
+            if k < cands.len() {
+                cands.select_nth_unstable_by(k - 1, ord);
+                cands.truncate(k);
+            }
+            cands.sort_by(ord);
+            w *= depthfac;
+            let step_pos = self.dom.stack_len();
+            let mut hard_any = false;
+            for &(_, j, v, up) in &cands {
+                let dirbit = if up { 1u8 } else { 2u8 };
+                let open_inf = if up { self.dom.up[j].is_infinite() } else { self.dom.lo[j].is_infinite() };
+                let (pd, pk) = pushed[j];
+                // `ENOMOTO_MIP_OBJDIVE` に `f` を含む: 反対の向きに選ばれた列も締める (既定は向きを変えて押し直す)
+                if open_inf || (pd != 0 && pd != dirbit && objdive_flag('f')) || pk >= max_push {
+                    // 境界を締める (伝播が駄目なら反対側、それも駄目なら締めない)
+                    push[j] = 0.0;
+                    for dir in [up, !up] {
+                        let before = self.dom.stack_len();
+                        if dir {
+                            self.dom.tighten_lower(p, j, v.ceil());
+                        } else {
+                            self.dom.tighten_upper(p, j, v.floor());
+                        }
+                        if self.dom.propagate(p) {
+                            hard_any = true;
+                            nfix += 1;
+                            nflip += (dir != up) as usize;
+                            break;
+                        }
+                        self.dom.backtrack_to(p, before);
+                    }
+                } else {
+                    pushed[j] = (dirbit, pk + 1);
+                    let s = (1u64 << pk.min(30)) as f64;
+                    push[j] = if up { -s } else { s };
+                    npush += 1;
+                }
+            }
+            if hard_any {
+                self.sync_lp();
+            }
+            let c: Vec<f64> = (0..n).map(|k| w * scale * p.cost[k] + push[k]).collect();
+            self.lp.set_costs(&c);
+            let it0 = self.lp.total_iterations();
+            let mut st = if hard_any { self.lp.solve(&lims(self)) } else { self.lp.solve_primal(&lims(self)) };
+            self.heur_iters += self.lp.total_iterations() - it0;
+            if st == LpStatus::Infeasible && hard_any {
+                // この段の締めを全部戻し、締めた列を 1 本ずつ (スコアの順) 通常のダイビングと同じく両側を試して締める。
+                // 最初に LP が最適になった所でこの段を終える。どの列も両側とも駄目なら止める
+                self.dom.backtrack_to(p, step_pos);
+                self.sync_lp();
+                nback += 1;
+                let hard: Vec<(usize, f64, bool)> = cands.iter().filter(|&&(_, j, _, _)| push[j] == 0.0).map(|&(_, j, v, up)| (j, v, up)).collect();
+                'one: for &(j, v, up) in &hard {
+                    for dir in [up, !up] {
+                        let before = self.dom.stack_len();
+                        if dir {
+                            self.dom.tighten_lower(p, j, v.ceil());
+                        } else {
+                            self.dom.tighten_upper(p, j, v.floor());
+                        }
+                        if !self.dom.propagate(p) {
+                            self.dom.backtrack_to(p, before);
+                            continue;
+                        }
+                        self.sync_lp();
+                        let it0 = self.lp.total_iterations();
+                        st = self.lp.solve(&lims(self));
+                        self.heur_iters += self.lp.total_iterations() - it0;
+                        if st == LpStatus::Optimal {
+                            break 'one;
+                        }
+                        self.dom.backtrack_to(p, before);
+                        self.sync_lp();
+                        if st != LpStatus::Infeasible {
+                            break 'one;
+                        }
+                    }
+                }
+            }
+            if st != LpStatus::Optimal {
+                why = match st {
+                    LpStatus::IterationLimit | LpStatus::TimeLimit => "budget",
+                    LpStatus::Infeasible => "infeasible",
+                    _ => "LP failed",
+                };
+                break;
+            }
+        }
+        if verbose || env_str!("ENOMOTO_MIP_DEBUG_OBJDIVE").is_some() {
+            eprintln!(
+                "MIP:   objective pseudocost dive: {why} (found {found}, {steps} steps, {npush} pushes, {nfix} fixes ({nflip} flipped, {nback} undone), fractional {frac0} -> {}, {} iterations of {budget}, node {})",
+                if frac_min == usize::MAX { 0 } else { frac_min },
+                self.lp.total_iterations() - it_start,
+                self.nodes
+            );
+        }
+        self.lp.set_costs(&p.cost);
+        self.dom.backtrack_to(p, pos);
+        self.sync_lp();
+        self.lp.restore_state(&saved);
+        found
+    }
+
     /// ダイビングの 1 つの決定: 列 `j` を `v` の上 (下) の整数に締め、伝播して LP を解く。LP が最適で目的値が
     /// `search_bound` と打ち切り値より小さければ真。駄目なら定義域を戻して偽。
     fn dive_try(&mut self, j: usize, v: f64, up: bool, budget: u64, it_start: u64, search_bound: f64) -> bool {
@@ -843,7 +1067,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if prop_ok && !past {
             self.sync_lp();
             let it0 = self.lp.total_iterations();
-            let lim = budget.saturating_sub(self.lp.total_iterations() - it_start).max(1000);
+            // 試作 `ENOMOTO_MIP_DIVEBUDGET` の木の中のダイビングは、SCIP の `solveLP` と同じく LP 1 回に最低 `MINLPITER`
+            let lp_min = if self.dive_scip { super::solver::DIVE_MINLPITER } else { 1000 };
+            let lim = budget.saturating_sub(self.lp.total_iterations() - it_start).max(lp_min);
             let st = self.lp.solve(&self.limits_k(lim, 2));
             self.heur_iters += self.lp.total_iterations() - it0;
             if st == LpStatus::Optimal && self.lp.objective() + p.offset < search_bound.min(self.prune_limit()) {
@@ -876,6 +1102,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut alpha = if cnorm > 0.0 { 1.0f64 } else { 0.0 };
         // 近さの指標 ([`Solver::heur_close`]): LP 解と丸めた点の距離の、最初の回に対する最小の割合
         let (mut d0, mut dmin) = (0.0f64, f64::INFINITY);
+        // 試作 `ENOMOTO_MIP_FP_STAGE3` の点: LP 解にいちばん近かった丸めの点
+        let mut best_r: Option<Vec<f64>> = None;
         self.heur_close = 0.0;
         for _pass in 0..100 {
             if self.time_up() || self.lp.total_iterations() - it_start > budget || self.poll_found_solution() {
@@ -897,6 +1125,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let d: f64 = ints.iter().map(|&j| (x[j] - r[j]).abs()).sum();
             if d0 == 0.0 {
                 d0 = d;
+            }
+            if d <= dmin {
+                best_r = Some(r.clone());
             }
             dmin = dmin.min(d);
             if d0 > 0.0 {
@@ -977,6 +1208,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let st = self.lp.solve_primal(&SolveLimits { iteration_limit: lim, cutoff: f64::INFINITY, deadline: self.deadline });
             self.heur_iters += self.lp.total_iterations() - it0;
             if st != LpStatus::Optimal || self.lp.total_iterations() == it0 {
+                if env_str!("ENOMOTO_MIP_FP_STATS").is_some() && self.params.verbose {
+                    eprintln!("MIP: FP_STATS: LP stop at pass {_pass}: status {st:?}, {} iterations (limit {lim})", self.lp.total_iterations() - it0);
+                }
                 end = 10;
                 break;
             }
@@ -987,7 +1221,169 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         self.lp.set_costs(&p.cost);
         self.lp.restore_state(&saved);
+        // 試作 `ENOMOTO_MIP_HEUR_ADAPT` の `m` ([`super::solver::heur_adapt_flag`]): 外側の根から出したサブ MIP の中では第 3 段を回さない
+        // (サブ MIP には暫定解がなく f_g = 1 で、第 3 段の孫 MIP がサブ MIP の時間を食う。analysis/comboharm_20261124/neos-1582420.md)
+        let stage3_sub_off = self.params.submip && super::solver::heur_adapt_flag('m') && env_str!("ENOMOTO_MIP_FP_STAGE3").is_none();
+        if !found && !self.time_up() && !stage3_sub_off && (env_str!("ENOMOTO_MIP_FP_STAGE3").is_some_and(|v| v != "0") || super::solver::heur_adapt()) {
+            if let Some(r) = best_r {
+                found = self.fp_stage3(&r);
+            }
+        }
         found
+    }
+
+    /// 試作 `ENOMOTO_MIP_FP_STAGE3=1` (既定では使わない。analysis/presym_20261123): Feasibility Pump が解を出さずに終わったら、
+    /// LP 解にいちばん近かった丸めの点 `r` の周りをサブ MIP で探す (SCIP の heur_feaspump の stage 3)。元の行をそのまま持ち、目的は `r` からの
+    /// 0-1 列の距離 (r = 下限の列は x、r = 上限の列は 上限 − x)。暫定解があれば「元の目的値が暫定解より良い」行を足す。ノードは 500 まで
+    /// (他のサブ MIP と同じ)、時間は残りの 0.1 倍・10 秒まで (min relaxation と同じ)。得た解は元の問題の解なので暫定解の候補にする。
+    /// 当方の FP は、連続列のある問題 (CMS750_4) で「整数列を全部固定すると連続列の LP が実行不能」で 179 回とも解を出さなかった
+    fn fp_stage3(&mut self, r: &[f64]) -> bool {
+        let p = self.p;
+        let n = p.n;
+        let (lo, up) = (self.dom.lo.clone(), self.dom.up.clone());
+        let remaining = self.secs_left();
+        // 試作 `ENOMOTO_MIP_HEUR_ADAPT` ([`super::solver::heur_adapt`]): ノードと時間の上限に f_g を掛ける (`FP_STAGE3` だけなら 1)
+        let fa = if super::solver::heur_adapt() && env_str!("ENOMOTO_MIP_FP_STAGE3").is_none() { self.adapt_gap_f() } else { 1.0 };
+        // 試作 `ENOMOTO_MIP_SUBMIP_TICKS` の `f` (analysis/workcount_20261125): 残り時間を手間で数える (手間の期限があればその残り、なければ
+        // 元の時間の上限 − 手間の経過。`ENOMOTO_MIP_TICKS` の `s`・`u` と同じ)。サブ MIP は手間の期限で止め、時間の上限は 10 倍の安全網。
+        // 壁時計の残りで上限を決めると、サブ MIP の中で第 3 段を回したとき、止まる所が回ごとに変わっていた (neos-1582420)
+        let tk_f = crate::ticks::submip_ticks('f');
+        let remaining = if tk_f {
+            if crate::ticks::has_budget() {
+                crate::ticks::left() * 1e-9
+            } else {
+                (self.params.frac_tl() - (crate::ticks::total() - self.ticks0) * 1e-9).max(0.0)
+            }
+        } else {
+            remaining
+        };
+        let wall_left = self.secs_left();
+        let mut cap = fa * (0.1 * remaining).min(10.0);
+        // 試作 `ENOMOTO_MIP_FP_STAGE3_LS` (既定では使わない。analysis/fpstage3ls_20261125): 第 3 段を、`r` を出発点にした FJ2・Local-MIP
+        // (前処理の早めの探索 [`super::feas_fj_lmip_early`] の 1 本の形、手間の期限も同じ物差し) で解く。予算は第 3 段のサブ MIP と同じ秒の上限。
+        // `a` (や `1`) = FJ2・Local-MIP だけ、`b` = まず FJ2・Local-MIP (Local-MIP が出発点の周りで行き詰まってやり直すまで)、
+        // 解がなければ残りの上限でサブ MIP
+        let ls = env_str!("ENOMOTO_MIP_FP_STAGE3_LS").filter(|v| *v != "0");
+        if let Some(mode) = ls {
+            let t = std::time::Instant::now();
+            let tk_ls0 = crate::ticks::total();
+            if self.fp_stage3_ls(r, &lo, &up, cap, mode == "b") {
+                return true;
+            }
+            if mode != "b" {
+                return false;
+            }
+            cap -= if tk_f { (crate::ticks::total() - tk_ls0) * 1e-9 } else { t.elapsed().as_secs_f64() };
+            if cap <= 0.0 || self.time_up() {
+                return false;
+            }
+        }
+        let mut cost = vec![0.0; n];
+        let mut offset = 0.0;
+        let mut nd = 0usize;
+        for j in 0..n {
+            if !p.is_int[j] || lo[j] >= up[j] || !(lo[j] == 0.0 && up[j] == 1.0) {
+                continue;
+            }
+            if r[j] <= 0.5 {
+                cost[j] = 1.0;
+            } else {
+                cost[j] = -1.0;
+                offset += 1.0;
+            }
+            nd += 1;
+        }
+        if nd == 0 {
+            return false;
+        }
+        let mut rows = p.rows.clone();
+        let mut row_lo = p.row_lo.clone();
+        let mut row_up = p.row_up.clone();
+        if let Some((z, _)) = self.incumbent.as_ref() {
+            // 目的値 (定数項込み・最小化形) が暫定解より良い: c x + offset <= z - 刻み (刻みは目的の整数性が分かればそれ、なければ相対 1e-6)
+            let step = self.p.objective_step().unwrap_or(0.0);
+            let delta = if step > 0.0 { step } else { 1e-6 * z.abs().max(1.0) };
+            let row: Vec<(usize, f64)> = (0..n).filter(|&j| p.cost[j] != 0.0).map(|j| (j, p.cost[j])).collect();
+            if !row.is_empty() {
+                rows.push(row);
+                row_lo.push(f64::NEG_INFINITY);
+                row_up.push(z - p.offset - delta);
+            }
+        }
+        let sub = super::problem::MipProblem::from_rows(lo, up, cost, offset, 1.0, p.is_int.clone(), rows, row_lo, row_up);
+        // `SUBMIP_TICKS` の `f`: 時間の上限は手間の上限の 10 倍 (壁時計の残りで頭打ち) の安全網
+        let time_limit = if tk_f { (10.0 * cap).min(wall_left) } else { cap };
+        let params = super::solver::MipParams::submip_base(time_limit, ((500.0 * fa).round() as u64).max(1), self.params.seed);
+        let tk_prev = tk_f.then(|| crate::ticks::push_budget(cap.max(0.0) * 1e9));
+        let res = super::solve_problem(&sub, params, true);
+        if let Some(prev) = tk_prev {
+            crate::ticks::pop_budget(prev);
+        }
+        self.heur_iters += res.lp_iterations;
+        let ok = match res.x {
+            Some(x) => {
+                let keep = self.heur_label;
+                self.heur_label = "FP stage 3";
+                let ok = self.try_incumbent(x);
+                self.heur_label = keep;
+                ok
+            }
+            None => false,
+        };
+        if self.params.verbose {
+            eprintln!("MIP:   FP stage 3: {nd} binary distance terms, status {:?}, nodes {}, objective (distance) {:?}, accepted {ok}", res.status, res.nodes, res.objective);
+        }
+        ok
+    }
+
+    /// 試作 `ENOMOTO_MIP_FP_STAGE3_LS` ([`Self::fp_stage3`]): 今の境界 `lo`/`up` の上で、丸めの点 `r` を出発点に FJ2 と Local-MIP を
+    /// 交互に回す ([`super::feas_fj_lmip_early_from`] の 1 本の形。`ENOMOTO_MIP_TICKS` の `f` なら上限 `cap` 秒を手間で数え、時間は 10 倍の
+    /// 安全網と求解の期限)。目的は元の目的 (サブ MIP の「r からの距離」は分枝限定を r の周りに留めるための目的で、局所探索は出発点で
+    /// もう r の周りにいる。見つけた解はそのまま暫定解の候補なので、元の目的で磨く方が得)。暫定解があれば、サブ MIP と同じく
+    /// 「目的値が暫定解より良い」行を足す。`until_restart` なら Local-MIP のやり直しの判断で止める
+    fn fp_stage3_ls(&mut self, r: &[f64], lo: &[f64], up: &[f64], cap: f64, until_restart: bool) -> bool {
+        let p = self.p;
+        let n = p.n;
+        if cap <= 0.0 || n == 0 {
+            return false;
+        }
+        let mut rows = p.rows.clone();
+        let mut row_lo = p.row_lo.clone();
+        let mut row_up = p.row_up.clone();
+        if let Some((z, _)) = self.incumbent.as_ref() {
+            let step = self.p.objective_step().unwrap_or(0.0);
+            let delta = if step > 0.0 { step } else { 1e-6 * z.abs().max(1.0) };
+            let row: Vec<(usize, f64)> = (0..n).filter(|&j| p.cost[j] != 0.0).map(|j| (j, p.cost[j])).collect();
+            if !row.is_empty() {
+                rows.push(row);
+                row_lo.push(f64::NEG_INFINITY);
+                row_up.push(z - p.offset - delta);
+            }
+        }
+        let q = super::problem::MipProblem::from_rows(lo.to_vec(), up.to_vec(), p.cost.clone(), p.offset, 1.0, p.is_int.clone(), rows, row_lo, row_up);
+        let salt = 0xF953_0000_0000_0003u64 ^ self.params.seed ^ self.rng;
+        self.rand();
+        let t = Instant::now();
+        let debug = env_str!("ENOMOTO_MIP_FP_STAGE3_LS_DEBUG").is_some();
+        let res = super::with_presolve_deadline(self.deadline, || super::feas_fj_lmip_early_from(&q, 1, cap, debug, salt, Some(r), until_restart));
+        let ok = match res {
+            Some(x) => {
+                let keep = self.heur_label;
+                self.heur_label = "FP stage 3 LS";
+                let ok = self.try_incumbent(x);
+                self.heur_label = keep;
+                ok
+            }
+            None => false,
+        };
+        if self.params.verbose || debug {
+            let ncont = (0..n).filter(|&j| !p.is_int[j] && lo[j] < up[j]).count();
+            eprintln!(
+                "MIP:   FP stage 3 LS: cap {cap:.2}s, {:.2}s (ticks: the early FJ/Local-MIP line above), {ncont} free continuous columns, until restart {until_restart}, accepted {ok}",
+                t.elapsed().as_secs_f64()
+            );
+        }
+        ok
     }
 
     /// Feasibility Jump (重み付きの局所探索、LP 不要)。`effort` は列の評価回数の目安。
@@ -999,7 +1395,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
             None => fj_search(self.p, &self.dom.lo, &self.dom.up, effort, time_cap, seed, None),
         };
         match found {
-            Some(x) => self.try_incumbent(x),
+            Some(x) => {
+                // 試作 `ENOMOTO_MIP_FJSYNC_LABEL=1` (既定では使わない。analysis/presym_20261123): 主のスレッドで同期して回した FJ (1 スレッドの道) の解にも、
+                // FJ のスレッドの解と同じ名札を付ける。名札がないと「FJ の解だけ」(`inc_only_fj`) にならず、質の悪い FJ の解でも
+                // 暫定解なし用のヒューリスティクス (`ENOMOTO_MIP_FJ_POOR_NOINC` など) が働かない (CMS750_4 の 1 スレッドは FJ の 767 から 600 秒動けなかった)
+                let label = env_str!("ENOMOTO_MIP_FJSYNC_LABEL").is_some_and(|v| v != "0") || super::solver::heur_adapt();
+                if label {
+                    self.heur_label = "feasibility jump";
+                }
+                let r = self.try_incumbent(x);
+                if label {
+                    self.heur_label = "";
+                }
+                r
+            }
             None => false,
         }
     }
@@ -1031,7 +1440,7 @@ pub(super) fn local_search(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64
     // 試作 `ENOMOTO_MIP_TICKS` の `l` ([`super::ticks_on`]): 時間の上限 `time_cap` 秒を同じ量の手間 (ヒューリスティクスの重みで割った work) の
     // 上限にし、時間は 10 倍の安全網にする
     let tk_l = super::ticks_on('l');
-    let t_end = Instant::now() + Duration::from_secs_f64(time_cap * if tk_l { 10.0 } else { 1.0 });
+    let t_end = Instant::now() + crate::cancel::secs(time_cap * if tk_l { 10.0 } else { 1.0 });
     if n == 0 {
         return (None, None);
     }
@@ -1039,8 +1448,12 @@ pub(super) fn local_search(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64
     let mut obj_bound = f64::INFINITY;
     let row_lo = |i: usize| if i < m { p.row_lo[i] } else { f64::NEG_INFINITY };
     let row_up = |i: usize, ob: f64| if i < m { p.row_up[i] } else { ob };
+    let fix_f = super::solver::unify_fix('f');
     let viol = |i: usize, a: f64, ob: f64| -> f64 {
         let (rl, ru) = (row_lo(i), row_up(i, ob));
+        if fix_f {
+            return viol_narrow(a, rl, ru);
+        }
         let tol = FEASTOL * (1.0 + a.abs().min(1e6));
         if a > ru + tol {
             a - ru
@@ -1092,10 +1505,7 @@ pub(super) fn local_search(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64
         let mut vset: Vec<usize> = Vec::new();
         let mut vpos = vec![usize::MAX; m + 1];
         for i in 0..=m {
-            if viol(i, act[i], obj_bound) > 0.0 {
-                vpos[i] = vset.len();
-                vset.push(i);
-            }
+            super::idxset::set_member(&mut vset, &mut vpos, i, viol(i, act[i], obj_bound) > 0.0);
         }
         let mut stall = 0u64;
         let mut best_round = f64::INFINITY;
@@ -1207,19 +1617,7 @@ pub(super) fn local_search(p: &MipProblem, lo: &[f64], up: &[f64], time_cap: f64
             tabu_until[j] = step + 3 + (rand() * 10.0) as u64;
             for &(r, b) in &cols[j] {
                 act[r] += b * d;
-                let is_v = viol(r, act[r], obj_bound) > 0.0;
-                if is_v && vpos[r] == usize::MAX {
-                    vpos[r] = vset.len();
-                    vset.push(r);
-                } else if !is_v && vpos[r] != usize::MAX {
-                    let k = vpos[r];
-                    let last = *vset.last().unwrap();
-                    vset.swap_remove(k);
-                    if last != r {
-                        vpos[last] = k;
-                    }
-                    vpos[r] = usize::MAX;
-                }
+                super::idxset::set_member(&mut vset, &mut vpos, r, viol(r, act[r], obj_bound) > 0.0);
             }
         }
     }
@@ -1367,7 +1765,7 @@ fn fj_search_old(p: &MipProblem, lo: &[f64], up: &[f64], effort: u64, time_cap: 
         if n == 0 {
             return None;
         }
-        let t_end = Instant::now() + Duration::from_secs_f64(time_cap);
+        let t_end = Instant::now() + crate::cancel::secs(time_cap);
         // 試作 `ENOMOTO_MIP_TICKS` の `j` ([`crate::ticks::vclock`]): 手間で数えて止める (手間の門も見る)
         let vc = crate::ticks::vclock();
         let tk_end = crate::ticks::total() + time_cap.max(0.0) * 1e9;
@@ -1383,7 +1781,11 @@ fn fj_search_old(p: &MipProblem, lo: &[f64], up: &[f64], effort: u64, time_cap: 
             .collect();
         let mut act: Vec<f64> = (0..m).map(|i| p.rows[i].iter().map(|&(j, a)| a * x[j]).sum()).collect();
         let mut w = vec![1.0f64; m];
+        let fix_f = super::solver::unify_fix('f');
         let viol = |i: usize, a: f64| -> f64 {
+            if fix_f {
+                return viol_narrow(a, p.row_lo[i], p.row_up[i]);
+            }
             let tol = FEASTOL * (1.0 + a.abs().min(1e6));
             if a > p.row_up[i] + tol {
                 a - p.row_up[i]
@@ -1397,10 +1799,7 @@ fn fj_search_old(p: &MipProblem, lo: &[f64], up: &[f64], effort: u64, time_cap: 
         let mut vset: Vec<usize> = Vec::new();
         let mut vpos = vec![usize::MAX; m];
         for i in 0..m {
-            if viol(i, act[i]) > 0.0 {
-                vpos[i] = vset.len();
-                vset.push(i);
-            }
+            super::idxset::set_member(&mut vset, &mut vpos, i, viol(i, act[i]) > 0.0);
         }
         let mut last_move = vec![0u64; n];
         let mut work = 0u64;
@@ -1476,19 +1875,7 @@ fn fj_search_old(p: &MipProblem, lo: &[f64], up: &[f64], effort: u64, time_cap: 
                     last_move[j] = step;
                     for &(r, a) in &p.cols[j] {
                         act[r] += a * d;
-                        let is_v = viol(r, act[r]) > 0.0;
-                        if is_v && vpos[r] == usize::MAX {
-                            vpos[r] = vset.len();
-                            vset.push(r);
-                        } else if !is_v && vpos[r] != usize::MAX {
-                            let k = vpos[r];
-                            let last = *vset.last().unwrap();
-                            vset.swap_remove(k);
-                            if last != r {
-                                vpos[last] = k;
-                            }
-                            vpos[r] = usize::MAX;
-                        }
+                        super::idxset::set_member(&mut vset, &mut vpos, r, viol(r, act[r]) > 0.0);
                     }
                 }
                 _ => {
@@ -1523,6 +1910,34 @@ pub enum DiveKind {
     Farkas,
     /// 衝突ダイビング (SCIP の conflictdiving の簡略版: 衝突制約の lock の少ない向きへ、その lock の少ない列から)。
     Conflict,
+    /// 目的を外したダイビング (SCIP の objpscostdiving の簡略版、試作 `ENOMOTO_MIP_OBJDIVE`): 境界の代わりに LP の目的関数を
+    /// 変えて潜る ([`Solver::obj_pscost_dive`])。
+    ObjPscost,
+    /// 線探索ダイビング (SCIP の linesearchdiving、試作 `ENOMOTO_MIP_LSDIVE`): 根の LP 解から今の LP 解への直線を延ばし、
+    /// 根の値から離れる向きへ、先に整数値に届く (整数値までの距離 / 根からの移動量 の小さい) 列から丸める。
+    LineSearch,
+}
+
+/// 試作 `ENOMOTO_MIP_OBJDIVE` の値に文字 `c` を含むか ([`Solver::obj_pscost_dive`] の切り替え)。
+fn objdive_flag(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_OBJDIVE").is_some_and(|v| v.contains(c))
+}
+
+impl DiveKind {
+    /// 種類ごとの記録 ([`Solver`] の `dive_k`) の添字。
+    pub(super) fn idx(self) -> usize {
+        match self {
+            DiveKind::Fractional => 0,
+            DiveKind::VectorLength => 1,
+            DiveKind::Coefficient => 2,
+            DiveKind::Pseudocost => 3,
+            DiveKind::Guided => 4,
+            DiveKind::Farkas => 5,
+            DiveKind::Conflict => 6,
+            DiveKind::ObjPscost => 7,
+            DiveKind::LineSearch => 8,
+        }
+    }
 }
 
 impl<'a, L: MipLp> Solver<'a, L> {
@@ -1557,10 +1972,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     pub(super) fn submip_time_limit(&self) -> (f64, Option<f64>) {
-        let remaining = match self.deadline {
-            Some(d) => d.saturating_duration_since(Instant::now()).as_secs_f64(),
-            None => f64::INFINITY,
-        };
+        let remaining = self.secs_left();
         // 試作 `ENOMOTO_MIP_TICKS` の `s`: 手間の期限の中のサブ MIP では、残り時間を手間の残り (秒に直したもの) にする
         let remaining = match self.tk_s_left() {
             Some(l) => l,
@@ -1659,6 +2071,31 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 sub = s2;
             }
         }
+        // 試作 `ENOMOTO_MIP_HEUR1T` の `d` ([`super::solver::heur1t`]): 1 スレッドの外側の根で、前と同じ問題のサブ MIP は解かない
+        if super::solver::heur1t('d') && !self.params.submip && self.snap.is_none() && self.pool.is_none() && self.params.threads <= 1 && self.nodes <= 1 && !self.parallel_submips {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for j in 0..sub.n {
+                // (+ 0.0 で -0.0 を 0.0 にそろえる: 10teams の被約費用のサブ MIP と LP face は同じ固定でも 0 の符号が違う)
+                (sub.col_lo[j] + 0.0).to_bits().hash(&mut h);
+                (sub.col_up[j] + 0.0).to_bits().hash(&mut h);
+                sub.is_int[j].hash(&mut h);
+            }
+            (sub.n, sub.m).hash(&mut h);
+            sub.cost.iter().for_each(|c| (c + 0.0).to_bits().hash(&mut h));
+            cutoff.unwrap_or_else(|| self.prune_limit()).to_bits().hash(&mut h);
+            let key = h.finish();
+            if self.heur1t_seen.contains(&key) {
+                if self.params.verbose {
+                    eprintln!("MIP:   HEUR1T d: the sub-MIP ({}) is the same as an earlier root sub-MIP; skipped", self.heur_label);
+                }
+                return Some((super::solver::MipStatus::NotSolved, false));
+            }
+            if self.params.verbose {
+                eprintln!("MIP:   HEUR1T d: sub-MIP ({}) key {key:016x}", self.heur_label);
+            }
+            self.heur1t_seen.push(key);
+        }
         // 診断用 `ENOMOTO_MIP_SUBMIP_DUMP=<接頭辞>`: 根 (外側の求解) のサブ MIP を `<接頭辞><番号>.mps` に書き出す
         if let Some(pre) = env_str!("ENOMOTO_MIP_SUBMIP_DUMP") {
             if !self.params.submip && self.nodes <= 1 {
@@ -1717,15 +2154,15 @@ impl<'a, L: MipLp> Solver<'a, L> {
         };
         let time_limit = match tk_u_budget {
             Some(b) => {
-                let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
+                let remaining = self.secs_left();
                 (10.0 * b * 1e-9).min(remaining)
             }
             None => time_limit,
         };
-        // 試作 `ENOMOTO_MIP_DET1T` の `n` (analysis/det1t_20261120): 手間の期限の中 (木の大近傍探索の `ENOMOTO_MIP_TICKS` の `n` など) で解く
+        // `ENOMOTO_MIP_DET1T` (既定 `onil`) の `n` (analysis/det1t_20261120): 手間の期限の中 (木の大近傍探索の `ENOMOTO_MIP_TICKS` の `n` など) で解く
         // サブ MIP は、時間の上限を 10 倍の安全網にする (手間の期限より先に壁時計で止まり、同じ種でも止まる所が回ごとに変わっていた。neos-1456979)
         let time_limit = if super::solver::det1t('n') && tk_u_budget.is_none() && crate::ticks::has_budget() && !self.parallel_submips {
-            let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
+            let remaining = self.secs_left();
             (10.0 * time_limit).min(remaining)
         } else {
             time_limit
@@ -1734,9 +2171,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if env_str!("ENOMOTO_MIP_DET_DIAG").is_some() && !self.params.submip {
             eprintln!("DET_DIAG submip: tk_u {tk_u} budget {:?} time_limit {time_limit:.3} u_set {u_set} parallel {} has_budget {} nodes {}", tk_u_budget.map(|b| b * 1e-9), self.parallel_submips, crate::ticks::has_budget(), self.nodes);
         }
+        // 診断 `ENOMOTO_MIP_WORKCOUNT_DIAG` (analysis/workcount_20261125): サブ MIP の中のサブ MIP も含め、手間の期限と時間の上限を出す
+        if env_str!("ENOMOTO_MIP_WORKCOUNT_DIAG").is_some() {
+            eprintln!("WCDIAG submip start{} ({}): budget {:?} time_limit {time_limit:.3} ticks left {:.3} wall left {:?}", if self.params.submip { " (in a sub-MIP)" } else { "" }, self.heur_label, tk_u_budget.map(|b| b * 1e-9), crate::ticks::left() * 1e-9, self.deadline.map(|d| d.saturating_duration_since(Instant::now()).as_secs_f64()));
+        }
         let time_limit = if u_set {
             super::solver::SUBMIP_ITER_CAP.with(|c| c.set(u_cap));
-            let remaining = self.deadline.map_or(f64::INFINITY, |d| d.saturating_duration_since(Instant::now()).as_secs_f64());
+            let remaining = self.secs_left();
             (10.0 * time_limit).min(remaining)
         } else {
             time_limit
@@ -1773,14 +2214,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             abs_gap: self.params.abs_gap.max(1e-6),
             // 診断用: `ENOMOTO_MIP_SUBMIP_VERBOSE` ならサブ MIP の経過も出す
             verbose: self.params.verbose && env_str!("ENOMOTO_MIP_SUBMIP_VERBOSE").is_some(),
-            submip: true,
             cutoff: cutoff.unwrap_or_else(|| self.prune_limit()),
-            restarts: 0,
-            skip_heurs: 0,
-            threads: 1,
-            distinguish: false,
             fc_submip: self.fc_submip,
-            tl_base: f64::NAN,
+            // 時間・ノードの上限は上で与えた (土台の値は使わない)
+            ..super::solver::MipParams::submip_base(time_limit, 0, self.params.seed)
         };
         // 今の LP の基底 (列の状態) をサブ MIP の根の LP の初めの基底にする (HiGHS の `rootbasis`。`ENOMOTO_MIP_NO_SUBMIP_BASIS` で
         // 使わない)。停滞による打ち切り (`ENOMOTO_T_MIP_SUBMIP_STALL`) と合わせて 93 問 (4 スレッド・60 秒、2 回): 主ギャップの和
@@ -1828,7 +2265,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 成果連動の打ち切り (`ENOMOTO_MIP_NO_SUBMIP_OUTCOME_STOP` で使わない): 根の (主のスレッドで解く) サブ MIP も成果で打ち切る ([`super::solver::submip_outcome_stop`])
         // 試作 `ENOMOTO_MIP_HEUR4` の `o`: `r` で足した既定の形の RENS だけは成果連動で打ち切らない ([`heur4_on`])
         if super::solver::submip_outcome_stop() && !self.params.submip && self.snap.is_none() && self.nodes <= 1 && !HEUR4_NO_OUTCOME.with(|c| c.get()) {
-            let c = super::solver::SubmipCtl::new(self.prune_limit()).with_nosol(nosol).with_subcap(self.root_lp_secs).with_subcap_t(self.params.time_limit);
+            let c = super::solver::SubmipCtl::new(self.prune_limit()).with_nosol(nosol).with_subcap(self.root_lp_secs).with_subcap_t(self.params.time_limit)
+                .with_outer_t1(super::solver::heur1t('n') && self.params.threads <= 1 && self.pool.is_none());
             // 試作 `ENOMOTO_MIP_LOSE6_2_SUBLB`: 目的関数を変えないサブ MIP に外側の下界を渡す
             let c = if super::solver::lose6_2_sublb() && cutoff.is_none() { c.with_outer_lb(self.root_lb_now(), self.bg_watch_job()) } else { c };
             super::solver::ROOT_SUBMIP_CTL.with(|s| *s.borrow_mut() = Some(std::sync::Arc::new(c)));
@@ -1847,6 +2285,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut paused = None;
         let (nfree_all, nint_all) = ((0..p.n).filter(|&j| sub.col_lo[j] < sub.col_up[j]).count(), sub.is_int.iter().filter(|&&b| b).count());
         let nfree_int = (0..sub.n).filter(|&j| sub.is_int[j] && sub.col_lo[j] < sub.col_up[j]).count();
+        super::wc_mark("before the sub-MIP", false);
         let r = if resumable {
             // 前の一時停止は捨てる (同時に取っておくのは 1 本だけ)
             self.drop_rens_paused("a new RENS");
@@ -1865,6 +2304,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if let Some(prev) = tk_prev {
             crate::ticks::pop_budget(prev);
         }
+        super::wc_mark("after the sub-MIP (postsolve etc.)", false);
         if u_set {
             // 前処理だけで終わって求解が上限を受け取らなかったときに残さない
             super::solver::SUBMIP_ITER_CAP.with(|c| c.set(0));
@@ -2204,9 +2644,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 lm.set_start(inc);
             }
         }
+        // 試作 `ENOMOTO_MIP_LMIP_SCORE_TICKS` (analysis/workcount_20261125): 手数の上限 (予算 / 1 手の見当) の代わりに、仕事の量
+        // ([`super::localmip::LocalMip::real_work`]、列の走査で実際に見た非零を含む) が予算に届いたら止める (`run` の中でも `work_cap` で止める)
+        let score_ticks = env_str!("ENOMOTO_MIP_LMIP_SCORE_TICKS").is_some_and(|v| v != "0");
+        let max_steps = if score_ticks {
+            lm.work_cap = budget as u64;
+            u64::MAX
+        } else {
+            max_steps
+        };
         let mut found = false;
         let mut slices = 0u64;
-        while !lm.done && lm.res.steps < max_steps && !self.time_up() {
+        while !lm.done && lm.res.steps < max_steps && !(score_ticks && lm.real_work(step_work as u64) >= budget as u64) && !self.time_up() {
             let mut until = Instant::now() + std::time::Duration::from_secs_f64(slice);
             if let Some(d) = self.deadline {
                 until = until.min(d);
@@ -2221,10 +2670,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         if self.params.verbose || env_str!("ENOMOTO_MIP_DEBUG_SUBHEUR").is_some() {
             eprintln!(
-                "MIP:   SUBHEUR Local-MIP (sub-MIP depth {}): steps {} of {max_steps} (work {:.3e}, step work {step_work:.0}), {slices} slices, found {found}, incumbent {:?} ({:.2}s)",
+                "MIP:   SUBHEUR Local-MIP (sub-MIP depth {}): steps {} of {max_steps} (work {:.3e}, step work {step_work:.0}, real work {:.3e}), {slices} slices, found {found}, incumbent {:?} ({:.2}s)",
                 SUBMIP_DEPTH.with(|d| d.get()),
                 lm.res.steps,
                 budget,
+                lm.real_work(step_work as u64) as f64,
                 self.incumbent.as_ref().map(|(z, _)| *z),
                 t0.elapsed().as_secs_f64()
             );
@@ -3230,36 +3680,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 整数列を `x` の値 (丸めたもの) に固定し、連続列を元の費用の LP で解き直した点を暫定解の候補にする。
     /// LP の状態は戻す。
     pub(super) fn fixed_int_lp(&mut self, x: &[f64]) -> bool {
-        let p = self.p;
         if self.time_up() {
             return false;
         }
-        let saved = self.lp.save_state();
-        let it0 = self.lp.total_iterations();
         let cost = self.lp.costs();
-        let swap = cost != p.cost;
-        if swap {
-            self.lp.set_costs(&p.cost);
-        }
-        for j in 0..p.n {
-            let (lo, up) = if p.is_int[j] { (x[j].round(), x[j].round()) } else { (self.dom.global_lo[j], self.dom.global_up[j]) };
-            self.lp.set_col_bounds(j, lo, up);
-        }
-        let st = self.lp.solve(&SolveLimits { deadline: self.deadline, ..Default::default() });
-        let y = (st == LpStatus::Optimal).then(|| {
-            let mut y = self.lp.col_values();
-            for j in 0..p.n {
-                if p.is_int[j] {
-                    y[j] = x[j].round();
-                }
-            }
-            y
-        });
-        if swap {
-            self.lp.set_costs(&cost);
-        }
-        self.lp.restore_state(&saved);
-        self.lp.set_total_iterations(it0);
+        let (_, _, y) = self.with_fixed_int_lp(x, true, cost, |s, j| (s.dom.global_lo[j], s.dom.global_up[j]), self.deadline, |_, y| y);
         y.is_some_and(|y| self.try_incumbent(y))
     }
 
@@ -3406,6 +3831,45 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.incumbent.is_none() {
             return false;
         }
+        // `ENOMOTO_MIP_ALNS` (既定) ([`super::alns_cp`]): CP-SAT の難しさを合わせる 3 本の近傍 (rins・random・graph) を使う。
+        // 呼ぶ時期・予算の決め方が今の腕の成功率を使うので、腕 0〜2 の回数・報酬にも足す
+        // サブ MIP (RENS などの中の木) では使わない: 中では手間の期限があるので分けたループが期限を使い切り、全スレッドで 1 つの近傍の状態も
+        // サブ MIP の呼び出しで汚れる (analysis/alns_20261126/README.md 8 節。0b4133149〜c99d75d20 はサブ MIP でも使っていた)
+        if super::alns_cp::on() && !self.params.submip {
+            // 1 回の呼び出しの手間の期限 (木の大近傍探索の予算から決まる、[`crate::ticks::push_budget`]) があるときは、それを
+            // `ENOMOTO_T_MIP_LNS_CALL_MIN` (既定 0.3 秒に当たる手間、今の 1 回の下限と同じ値) ずつに分けて近傍を続けて試す
+            // (改善するか期限が尽きたら止める)。初めの近傍 (d = 0.5) が 1 回で期限を全部使って時間切れになり、d が下がる前に
+            // 予算を使い切るのを防ぐ。期限がない (ヒューリスティクス役の時間の上限で回る) ときは今までどおり 1 本だけ
+            let piece = tunable!("ENOMOTO_T_MIP_LNS_CALL_MIN", 0.3, f64) * 1e9;
+            let split = crate::ticks::has_budget() && super::alns_cp::split_on();
+            let mut any = false;
+            loop {
+                let k = super::alns_cp::pick();
+                let z0 = self.incumbent.as_ref().map(|(z, _)| *z).unwrap();
+                self.heur_label = ["tree ALNS-CP rins", "tree ALNS-CP random", "tree ALNS-CP graph"][k];
+                let ok = if split {
+                    let _g = crate::ticks::budget_guard(piece.min(crate::ticks::left()));
+                    self.alns_cp_run(k, x)
+                } else {
+                    self.alns_cp_run(k, x)
+                };
+                self.heur_label = "";
+                let z1 = self.incumbent.as_ref().map(|(z, _)| *z).unwrap();
+                self.alns_count[k] += 1;
+                self.alns_reward[k] += if ok && z1 < z0 { 1.0 + ((z0 - z1) / z0.abs().max(1.0)).min(1.0) } else { 0.0 };
+                any |= ok;
+                if z1 < z0 {
+                    // Φ ([`Self::alns_rates`]) の減り: 主ギャップの減り × 未処理の重み (相対改善でなく、Φ と同じ式で測る)
+                    let lb = self.global_lower_bound();
+                    let gap = |z: f64| ((z - lb) / z.abs().max(1.0)).max(0.0);
+                    self.alns_lns_gain += (gap(z0) - gap(z1)).max(0.0) * self.alns_w;
+                }
+                if !split || ok || crate::ticks::left() <= 0.0 || self.time_up() || self.incumbent.is_none() {
+                    break;
+                }
+            }
+            return any;
+        }
         const ARMS: usize = 6;
         let total: f64 = self.alns_count.iter().sum::<u32>() as f64;
         let arm = match (0..ARMS).find(|&a| self.alns_count[a] == 0) {
@@ -3498,6 +3962,28 @@ impl<'a, L: MipLp> Solver<'a, L> {
         self.root_reduced_cost_inner()
     }
 
+    /// 試作 `ENOMOTO_MIP_HEUR1T` の `r`: 今の LP の被約費用を lurking bound ([`super::solver::Solver::heur1t_lurk`]) に足す
+    pub(super) fn heur1t_collect_lurking(&mut self) {
+        // (ラウンドの初めの LP は最適に解けている: 解けなければカットのループを抜ける。候補は解を確かめるサブ MIP の近傍にだけ使う)
+        let p = self.p;
+        if self.heur1t_lurk.len() != p.n {
+            self.heur1t_lurk = vec![[f64::NEG_INFINITY; 2]; p.n];
+        }
+        let z = self.lp.objective();
+        let b = self.lp.basis();
+        let d = self.lp.reduced_costs();
+        for j in 0..p.n {
+            if !p.is_int[j] || self.dom.lo[j] >= self.dom.up[j] {
+                continue;
+            }
+            match b.col[j] {
+                super::lp::VarStatus::Lower if d[j] > 1e-7 => self.heur1t_lurk[j][0] = self.heur1t_lurk[j][0].max(z + d[j]),
+                super::lp::VarStatus::Upper if d[j] < -1e-7 => self.heur1t_lurk[j][1] = self.heur1t_lurk[j][1].max(z - d[j]),
+                _ => {}
+            }
+        }
+    }
+
     fn root_reduced_cost_inner(&mut self) -> bool {
         let p = self.p;
         if self.params.submip {
@@ -3533,6 +4019,33 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if self.params.verbose {
                 eprintln!("MIP:   HEURGAP d: root reduced cost: {} lurking bounds from reduced costs, {} from degenerate duals ({} to the upper bound)", ndeg0, lurking.len() - ndeg0, lurking[ndeg0..].iter().filter(|t| !t.2).count());
+            }
+        }
+        // 試作 `ENOMOTO_MIP_HEUR1T` の `r`: 根のカットの各回の LP からためた候補を足す (同じ列・向きは大きい方)
+        if super::solver::heur1t('r') && self.heur1t_lurk.len() == p.n && self.nodes <= 1 {
+            let z = self.lp.objective();
+            let mut best: std::collections::HashMap<(usize, bool), usize> = std::collections::HashMap::new();
+            for (k, t) in lurking.iter().enumerate() {
+                best.insert((t.1, t.2), k);
+            }
+            let n0 = lurking.len();
+            for &j in &ints {
+                for (side, upper) in [(0usize, true), (1usize, false)] {
+                    let v = self.heur1t_lurk[j][side] - z;
+                    if !(v > 1e-7) {
+                        continue;
+                    }
+                    match best.get(&(j, upper)) {
+                        Some(&k) => lurking[k].0 = lurking[k].0.max(v),
+                        None => {
+                            best.insert((j, upper), lurking.len());
+                            lurking.push((v, j, upper, if upper { self.dom.lo[j] } else { self.dom.up[j] }));
+                        }
+                    }
+                }
+            }
+            if self.params.verbose {
+                eprintln!("MIP:   HEUR1T r: root reduced cost: {n0} lurking bounds from the last LP, {} after adding the cut rounds' LPs", lurking.len());
             }
         }
         // HiGHS は lurking bound が整数列の 1 割未満なら使わない
@@ -3737,7 +4250,15 @@ pub(super) fn fj_lmip_mix(p: &MipProblem, lo: &[f64], up: &[f64], cap: f64, seed
     // (Local-MIP の改善を根のカットのループの終わりまで)
     let ext_all = env_def!("ENOMOTO_MIP_FJ_NOSOL_EXTEND", "2") == Some("2");
     let end_now = |b: &Option<(f64, Vec<f64>)>| if (b.is_none() || ext_all) && !main_has_incumbent() { t_ext } else { t_end };
+    let stall = MIX_STALL.with(|c| c.get());
+    let mut t_imp = 0.0f64;
+    let mut stalled = false;
     while now() < end_now(&best) && !stop.load(Ordering::Relaxed) {
+        // `MIX_STALL` (`ENOMOTO_MIP_T1MIX`): 最後の改善からその秒数、良い解が出なければ打ち切る
+        if stall > 0.0 && now() - t_imp >= stall {
+            stalled = true;
+            break;
+        }
         let t_end = end_now(&best);
         let lm_share = match leader {
             0 => 0.5,
@@ -3763,12 +4284,13 @@ pub(super) fn fj_lmip_mix(p: &MipProblem, lo: &[f64], up: &[f64], cap: f64, seed
         };
         if let Some(x) = got {
             let z = p.objective(&x);
-            if best.as_ref().is_none_or(|(bz, _)| z < *bz - 1e-9 * bz.abs().max(1.0)) {
+            if best.as_ref().is_none_or(|(bz, _)| super::solver::better_obj(z, *bz, *bz)) {
                 let who = if use_lm { 2 } else { 1 };
                 leader = who;
                 wins[(who - 1) as usize] += 1;
                 first.get_or_insert((now(), who));
                 on_sol(&x);
+                t_imp = now();
                 if !use_lm {
                     if let Some(l) = lm.as_mut() {
                         l.inject(&x);
@@ -3784,7 +4306,7 @@ pub(super) fn fj_lmip_mix(p: &MipProblem, lo: &[f64], up: &[f64], cap: f64, seed
     }
     if env_str!("ENOMOTO_MIP_FJ_DEBUG").is_some() {
         eprintln!(
-            "MIP:   FJ/Local-MIP mix: FJ {n_fj} runs {t_fj:.2}s ({} improvements), Local-MIP {n_lm} slices {t_lm:.2}s ({} improvements, least violated rows {}), leader {}, first {:?}, best {} (wall {:.2}s, ticks {:.2}s)",
+            "MIP:   FJ/Local-MIP mix: FJ {n_fj} runs {t_fj:.2}s ({} improvements), Local-MIP {n_lm} slices {t_lm:.2}s ({} improvements, least violated rows {}), leader {}, first {:?}, best {}, last improvement {t_imp:.2}s, stalled {stalled} (wall {:.2}s, ticks {:.2}s)",
             wins[0],
             wins[1],
             lm.as_ref().map_or(usize::MAX, |l| l.res.least_viol),
@@ -3831,8 +4353,7 @@ pub(super) fn suba_rate(c: char) -> bool {
 ///   既定の RENS (LP で整数値の列を全部固定) も 1 回回す ([`Solver::rens`])
 ///   - `o`: `r` で足す RENS は成果連動の打ち切り (`ENOMOTO_MIP_NO_SUBMIP_OUTCOME_STOP`) を使わない (neos-1171448 種 4 では 50 ノードで止まり −239 だった)
 pub(super) fn heur4_on(c: char) -> bool {
-    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_str!("ENOMOTO_MIP_HEUR4").map_or(String::new(), |v| v.to_string())).contains(c)
+    env_str!("ENOMOTO_MIP_HEUR4").is_some_and(|v| v.contains(c))
 }
 
 thread_local! {
@@ -3851,4 +4372,17 @@ thread_local! {
     static RINS_DROP: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
     /// `ENOMOTO_MIP_ROBUST_LNSFREQ` (試作): Mutation の固定の割合 (スレッドごと。最初は `ENOMOTO_T_MIP_MUTATION_RATE`)
     static ROBUST_MUT_RATE: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+}
+
+/// 行 `lo <= a <= up` の違反量。許容誤差は [`super::problem::MipProblem::is_feasible`] (`1e-6 + 1e-9 |b|`) より少し狭い
+/// `0.5e-6 + 1e-10 |b|` (Local-MIP の `viol_at` と同じ。違反 0 とした点が `is_feasible` で落ちないように)。`ENOMOTO_MIP_UNIFY_FIX` の `f`
+#[inline]
+fn viol_narrow(a: f64, lo: f64, up: f64) -> f64 {
+    if a > up + 0.5 * FEASTOL + 1e-10 * up.abs() {
+        a - up
+    } else if a < lo - 0.5 * FEASTOL - 1e-10 * lo.abs() {
+        lo - a
+    } else {
+        0.0
+    }
 }

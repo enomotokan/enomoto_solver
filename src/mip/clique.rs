@@ -8,6 +8,17 @@ use std::collections::HashSet;
 /// 衝突グラフ (文字ごとに隣接する文字、昇順)。
 pub struct CliqueGraph {
     adj: Vec<Vec<u32>>,
+    /// 試作 `ENOMOTO_MIP_CLQROW` ([`clqrow_on`]): 上限 ([`MAX_ROW_LITS`]・[`MAX_ROW_EDGES`]) で辺にしなかった行のうち、行全体が clique
+    /// (どの 2 文字も衝突する) のものの文字 (昇順)。辺の組の形では持てない長い集合分割の行 (nw04 は 81.6 億組) を行の形のまま持ち、分離だけで使う
+    crows: Vec<Vec<u32>>,
+    /// 文字ごとに、その文字を含む `crows` の番号 (昇順)。`ENOMOTO_MIP_CLQROW` でなければ空
+    lit_crows: Vec<Vec<u32>>,
+}
+
+/// 試作 `ENOMOTO_MIP_CLQROW` (既定では使わない、analysis/cutrobust_20261124): 長い行の clique を行の形のまま持ち、clique カットの分離で
+/// 「同じ長い行に入っている 2 文字は隣接」とみなす (nw04 は長い集合分割の行の衝突が全部落ちていて、clique のカットの候補が 0 本だった)
+pub fn clqrow_on() -> bool {
+    env_str!("ENOMOTO_MIP_CLQROW").is_some_and(|v| v != "0")
 }
 
 /// 1 行から衝突の組を作るときの文字数の上限 (これより長い行は使わない)。
@@ -40,6 +51,8 @@ impl CliqueGraph {
     #[allow(clippy::too_many_arguments)]
     pub fn build_with_stop(n: usize, rows: &[Vec<(usize, f64)>], row_lo: &[f64], row_up: &[f64], binary: &[bool], lo: &[f64], up: &[f64], extra: &[(u32, u32)], stop: &dyn Fn() -> bool) -> Option<Self> {
         let mut adj: Vec<HashSet<u32>> = vec![HashSet::new(); 2 * n];
+        let clqrow = clqrow_on();
+        let mut crows: Vec<Vec<u32>> = Vec::new();
         for (k, &(a, b)) in extra.iter().enumerate() {
             if k % 65536 == 0 && stop() {
                 return None;
@@ -79,7 +92,7 @@ impl CliqueGraph {
                         }
                     }
                 }
-                if !ok || lits.len() < 2 || lits.len() > max_row_lits() {
+                if !ok || lits.len() < 2 {
                     continue;
                 }
                 let slack = b - minact;
@@ -87,6 +100,20 @@ impl CliqueGraph {
                 lits.sort_by(|a, b| b.0.total_cmp(&a.0));
                 // 増分の大きい順: 先頭 2 つでも行を破らなければ組はない
                 if lits[0].0 + lits[1].0 <= slack + tol {
+                    continue;
+                }
+                let k = lits.len();
+                // 上限で辺にしきれない行: `ENOMOTO_MIP_CLQROW` なら、行全体が clique (増分の小さい 2 つでも行を破る) のときだけ行の形で持つ
+                let whole = lits[k - 1].0 + lits[k - 2].0 > slack + tol;
+                let capped = k > max_row_lits() || k * (k - 1) / 2 > max_row_edges();
+                if capped && whole && clqrow {
+                    let mut l: Vec<u32> = lits.iter().map(|t| t.1).collect();
+                    l.sort_unstable();
+                    l.dedup_by(|a, b| *a / 2 == *b / 2);
+                    crows.push(l);
+                    continue;
+                }
+                if k > max_row_lits() {
                     continue;
                 }
                 let mut edges = 0usize;
@@ -116,7 +143,13 @@ impl CliqueGraph {
                 v
             })
             .collect();
-        Some(CliqueGraph { adj })
+        let mut lit_crows: Vec<Vec<u32>> = if crows.is_empty() { Vec::new() } else { vec![Vec::new(); 2 * n] };
+        for (r, l) in crows.iter().enumerate() {
+            for &u in l {
+                lit_crows[u as usize].push(r as u32);
+            }
+        }
+        Some(CliqueGraph { adj, crows, lit_crows })
     }
 
     /// 診断 (CLQPRB の続き、クリーク表の持ち方の数え上げ): [`Self::build_with`] の行の上限 ([`MAX_ROW_LITS`]・[`MAX_ROW_EDGES`]) で
@@ -189,6 +222,31 @@ impl CliqueGraph {
         self.adj[u as usize].binary_search(&v).is_ok()
     }
 
+    /// [`Self::adjacent`] に、`ENOMOTO_MIP_CLQROW` の長い行 (`crows`) を共有する組も含めたもの (分離だけで使う)
+    fn adjacent_rows(&self, u: u32, v: u32) -> bool {
+        if self.adjacent(u, v) {
+            return true;
+        }
+        if self.lit_crows.is_empty() || u / 2 == v / 2 {
+            return false;
+        }
+        let (a, b) = (&self.lit_crows[u as usize], &self.lit_crows[v as usize]);
+        let (mut i, mut k) = (0, 0);
+        while i < a.len() && k < b.len() {
+            match a[i].cmp(&b[k]) {
+                std::cmp::Ordering::Equal => return true,
+                std::cmp::Ordering::Less => i += 1,
+                std::cmp::Ordering::Greater => k += 1,
+            }
+        }
+        false
+    }
+
+    /// `ENOMOTO_MIP_CLQROW` の長い行の数 (診断の表示用)
+    pub fn num_long_rows(&self) -> usize {
+        self.crows.len()
+    }
+
     /// LP 解 `x` で破れる clique カットを最大 `max_cuts` 本探す。
     pub fn separate(&self, x: &[f64], max_cuts: usize) -> Vec<RawCut> {
         let n = x.len();
@@ -202,17 +260,38 @@ impl CliqueGraph {
         starts.sort_by(|&a, &b| val(b).total_cmp(&val(a)));
         let mut cuts: Vec<RawCut> = Vec::new();
         let mut seen: HashSet<Vec<u32>> = HashSet::new();
+        // `ENOMOTO_MIP_CLQROW`: 長い行ごとに、値が正の文字 (行の形で持つので、始点ごとに行を全部たどらないよう先にまとめる)
+        let rows_on = !self.lit_crows.is_empty();
+        let mut row_pos: Vec<Vec<u32>> = Vec::new();
+        if rows_on {
+            row_pos = vec![Vec::new(); self.crows.len()];
+            for l in 0..2 * n as u32 {
+                if val(l) > 1e-9 {
+                    for &r in &self.lit_crows[l as usize] {
+                        row_pos[r as usize].push(l);
+                    }
+                }
+            }
+        }
+        let adjf = |a: u32, b: u32| if rows_on { self.adjacent_rows(a, b) } else { self.adjacent(a, b) };
         for &u in starts.iter().take(500) {
             if cuts.len() >= max_cuts {
                 break;
             }
             // 貪欲: 隣接する文字を値の大きい順に、clique の全員と隣接するものだけ加える
             let mut cand: Vec<u32> = self.adj[u as usize].iter().copied().filter(|&v| val(v) > 1e-9).collect();
+            if rows_on {
+                for &r in &self.lit_crows[u as usize] {
+                    cand.extend(row_pos[r as usize].iter().copied().filter(|&v| v / 2 != u / 2));
+                }
+                cand.sort_unstable();
+                cand.dedup();
+            }
             cand.sort_by(|&a, &b| val(b).total_cmp(&val(a)));
             let mut clique = vec![u];
             let mut w = val(u);
             for v in cand {
-                if clique.iter().all(|&c| self.adjacent(c, v)) {
+                if clique.iter().all(|&c| adjf(c, v)) {
                     clique.push(v);
                     w += val(v);
                 }
@@ -223,8 +302,26 @@ impl CliqueGraph {
             }
             // 値 0 の文字も全員と隣接すれば加える (カットが強くなる、少しだけ)
             for &v in self.adj[u as usize].iter().take(200) {
-                if val(v) <= 1e-9 && !clique.contains(&v) && clique.iter().all(|&c| self.adjacent(c, v)) {
+                if val(v) <= 1e-9 && !clique.contains(&v) && clique.iter().all(|&c| adjf(c, v)) {
                     clique.push(v);
+                }
+            }
+            // `ENOMOTO_MIP_CLQROW`: 長い行の値 0 の文字も同じ上限 (始点の行から 200 文字) まで見る
+            if rows_on {
+                let mut seen0 = 0usize;
+                'ext: for &r in &self.lit_crows[u as usize] {
+                    for &v in &self.crows[r as usize] {
+                        if seen0 >= 200 {
+                            break 'ext;
+                        }
+                        if val(v) > 1e-9 || v / 2 == u / 2 {
+                            continue;
+                        }
+                        seen0 += 1;
+                        if !clique.contains(&v) && clique.iter().all(|&c| adjf(c, v)) {
+                            clique.push(v);
+                        }
+                    }
                 }
             }
             let mut key = clique.clone();
@@ -245,7 +342,7 @@ impl CliqueGraph {
                 }
             }
             coefs.sort_by_key(|&(j, _)| j);
-            cuts.push(RawCut { coefs, rhs: 1.0 - neg });
+            cuts.push(RawCut { coefs, rhs: 1.0 - neg, kind: 0 });
         }
         cuts
     }

@@ -3,7 +3,7 @@
 (ENOMOTO_MIP_VB01=1・ENOMOTO_MIP_LOG=1 を付けて回すと、VB01 が根で回った数・解を出した数も数える。比較は ENOMOTO_MIP_REL_GAP=1e-9 で)"""
 import os, random, sys, tempfile, time
 import highspy
-from enomoto_solver import Model, Variable
+from enomoto_solver import Model
 inf = float("inf")
 
 def gen(seed):
@@ -46,7 +46,7 @@ def highs(lp):
 
 def ours(lp):
     n, c, rows = lp
-    M = Model(); xs = [Variable(int, 0, 1) for _ in range(n)]
+    M = Model(); xs = [M.add_variable(int, 0, 1) for _ in range(n)]
     M.set_objective(sum(cc * x for cc, x in zip(c, xs)))
     for r, l, u in rows:
         e = sum(v * xs[j] for j, v in r)

@@ -11,6 +11,13 @@ use super::problem::MipProblem;
 /// 実行可能性の許容誤差。
 pub const FEASTOL: f64 = 1e-6;
 
+/// 診断用 (デバッグ解、analysis/rootgap_20261121 の 8.3): リテラルの組 (列, 上限か, 値) をデバッグ解 `x` がどれだけ外れるかの最大
+/// (正なら外れ、0 以下なら全部成り立つ)。衝突がデバッグ解を「切る」かの確かめは許容 1e-6 で見るので、許容の内側の外れ (0 < 外れ <= 1e-6) は
+/// 厳密には切っていない見かけの出力になる。これが 1e-9 以下なら本物 (`MIP_DEBUG_SOL:`)、それより大きければ見かけ (`MIP_DBGTOL:`) として分けて出す
+pub(crate) fn dbg_lits_gap(x: &[f64], lits: impl Iterator<Item = (usize, bool, f64)>) -> f64 {
+    lits.map(|(j, up, v)| if up { x[j] - v } else { v - x[j] }).fold(f64::NEG_INFINITY, f64::max)
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Change {
     col: usize,
@@ -27,7 +34,7 @@ const PROOF_REASON_BASE: i32 = -1001;
 /// カットのプールの伝播の、写しの表の番号を入れた理由の値の始まり ([`Domain::set_cut_tag`])。
 const CUT_REASON_BASE: i32 = -1_000_000_001;
 
-/// 診断用: 衝突解析で、カットの写しの番号を持つ理由 (試作 `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN` のカットプールの伝播、試作 `ENOMOTO_MIP_ORBITOPE_STATIC=r` の
+/// 診断用: 衝突解析で、カットの写しの番号を持つ理由 (`ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN` (既定) のカットプールの伝播、試作 `ENOMOTO_MIP_ORBITOPE_STATIC=r` の
 /// オービトープの固定) を行から説明した回数 (全スレッドの合計)。
 pub static CUT_REASON_EXPLAINED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -41,7 +48,7 @@ pub fn cut_reason_id(r: i32) -> Option<usize> {
     (r <= CUT_REASON_BASE).then(|| (CUT_REASON_BASE - r) as usize)
 }
 
-/// 試作 `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN`: 衝突解析で、理由の値 (双対証明の通し番号・カットの写しの番号を入れたもの) から
+/// `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN` (既定): 衝突解析で、理由の値 (双対証明の通し番号・カットの写しの番号を入れたもの) から
 /// 行を引く関数 (係数と右辺 `sum a_j x_j <= rhs`。もうなければ `None`)。
 pub type ProofLookup<'a> = &'a dyn Fn(i32) -> Option<(Vec<(usize, f64)>, f64)>;
 
@@ -102,6 +109,8 @@ pub struct Domain {
     low_water: usize,
     /// 根に戻ったときに適用する大域的な境界の締め付け (列, 上限か, 値)。
     pending_global: Vec<(usize, bool, f64)>,
+    /// `ENOMOTO_MIP_GLOBALFIX` (2026-11-25 から既定) の `b`: 根の伝播が矛盾した (打ち切り値より良い解がない)。以後 `reset_to_root` のたびに矛盾にする
+    pub root_dead: bool,
     /// 診断用: デバッグ解 (含意の伝播がデバッグ解を切ったら表示する)。
     pub dbg_sol: Option<std::sync::Arc<Vec<f64>>>,
     /// 根に戻った回数 (活動量の誤差の蓄積を防ぐための定期的な再計算に使う)。
@@ -120,9 +129,28 @@ pub struct Domain {
     impl_adj: Option<std::sync::Arc<Vec<Vec<u32>>>>,
     /// 固定されて、含意を伝播するのを待つ 2 値列。
     impl_queue: Vec<usize>,
+    /// 試作 `ENOMOTO_MIP_ROOT_OBJ_PROBE_HULL=2` (analysis/objprobehull_20261124): 0-1 列の値から 0-1 でない列の境界への含意
+    /// (`x_j = v ⇒ y >= b` / `y <= b`、変数の境界の式 `y >= l0 + (l1 - l0) x_j` を 2 本の含意に分けたもの) の表。[`BoundImpl`]
+    bimpl: Option<std::sync::Arc<BoundImpl>>,
+    /// [`Self::bimpl`] の伝播を待つ列 (固定された 0-1 列 = 向き、境界が動いた y = 対偶)
+    bimpl_queue: Vec<usize>,
+    /// [`Self::bimpl`] で締めた回数 [x_j の固定から y, y の範囲から x_j (対偶)]
+    pub bimpl_stats: [u64; 2],
+}
+
+/// 0-1 列の値から列の境界への含意の表 ([`Domain::add_bound_implications`])。
+#[derive(Clone, Debug, Default)]
+pub struct BoundImpl {
+    /// 文字 `2j + v` (x_j = v) ごとの (y, 上限か, 値): x_j = v ⇒ y <= 値 (上限) / y >= 値
+    pub by_lit: Vec<Vec<(u32, bool, f64)>>,
+    /// y ごとの (文字 `2j + v`, 上限か, 値): 同じ含意を y の側から引く (対偶: y の範囲が値を外れたら x_j = 1 - v)
+    pub by_col: Vec<Vec<(u32, bool, f64)>>,
 }
 
 thread_local! {
+    /// 診断 `ENOMOTO_MIP_CONFDEEP_DIAG` ([`super::conflict_pool::confdeep_diag`]): [`Domain::analyze_multi_bumps`] が返した衝突ごとの形
+    /// (返した順)。呼ぶ側が取り出す
+    pub static CONF_META: std::cell::RefCell<Vec<super::conflict_pool::DeepMeta>> = const { std::cell::RefCell::new(Vec::new()) };
     static DEBUG_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// 境界を変える・戻すときに更新した行の活動の数 (列の長さの合計、スレッドごと)。`ENOMOTO_MIP_PRESOLVE_WORK` のプロービングの
     /// 手間に足す (行の走査だけでは、長い列の固定が連鎖する問題 (neos-860300) の時間を数えきれない)
@@ -146,6 +174,49 @@ pub fn chg_count() -> u64 {
 /// [`ACT_WORK`] の値。
 pub fn act_work() -> u64 {
     ACT_WORK.with(|w| w.get())
+}
+
+/// `ENOMOTO_MIP_GLOBALFIX` (analysis/globalfix_20261124): 値の文字で部品を選ぶ。
+/// `a` 根のノード (深さ 0) の整数列の締め付けを大域的な境界に入れる、`b` `reset_to_root` で保留中の大域的な締め付けを置いた後に伝播し切って
+/// 大域的な境界にする、`c` 長さ 1 のリテラルの衝突を大域的な固定にする、`k` `c` を整数列だけにしたもの。
+/// **2026-11-25 に既定にした: 値 `abc`。`0`・`off` で前の動き (どれも使わない)。** 根拠は analysis/objprop_20261124 の P
+/// (同じビルド・同じ機械の既定 d2 との比が 1・4 スレッドとも 0.993、解けた数 128→131・141→140、食い違い 0) と analysis/globalfix_20261124 4 節。
+/// 4 スレッドの noswot・10teams の出入りは道筋が変わったことによる揺れ (既定どうしでも 10teams 0.55・noswot 1.35) と見なした
+/// (利用者の方針「道筋が変わったことによる害は本質的な害とは見なさない」)。
+pub(crate) fn globalfix(c: char) -> bool {
+    env_def!("ENOMOTO_MIP_GLOBALFIX", "abc").is_some_and(|v| v.contains(c))
+}
+
+/// [`globalfix`] の数え (全スレッドの合計、`ENOMOTO_MIP_LOG` の終わりに出す): [`b` の伝播の回数, `b` で締めた整数列の境界の数,
+/// `b` で固定した整数列の数, `b` の矛盾の回数, `a` を当てた回数, `a` で大域にした整数列の境界の数, `a` で固定した整数列の数,
+/// `c`・`k` で大域に置いた固定の数, そのうち連続列の数]
+pub(crate) static GF_STATS: [std::sync::atomic::AtomicU64; 9] = [const { std::sync::atomic::AtomicU64::new(0) }; 9];
+
+/// 診断 `ENOMOTO_MIP_DIAG_GLOBALAUDIT` (analysis/globalaudit_20261124、既定では使わない。解き方は変えない): 大域的に分かった情報を
+/// 捨てている量を数えて `ENOMOTO_MIP_LOG` に出す
+pub(crate) fn globalaudit_on() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| env_str!("ENOMOTO_MIP_DIAG_GLOBALAUDIT").is_some_and(|v| v != "0"))
+}
+
+/// [`globalaudit_on`] の数え (全スレッドの合計): [保留中の大域的な締め付けを置いた根への戻りの回数, 置いた締め付けの数,
+/// 捨てた待ち行列を伝播すると締まる整数列の境界の数 (大域的な境界にない), そのうち固定になる整数列の数, その伝播が矛盾した回数,
+/// 締まる連続列の境界の数]
+pub(crate) static GA_RESET: [std::sync::atomic::AtomicU64; 6] = [const { std::sync::atomic::AtomicU64::new(0) }; 6];
+
+/// [`globalaudit_on`] の数え (全スレッドの合計): [リテラルの衝突をプールに足した数, そのうち (大域的に成り立つリテラルを除いて) 長さ 1 のもの
+/// (= 大域的な固定だが、プールに入れるだけで大域的な境界には置かない), 長さ 1 のうち取り込み (ほかのスレッドから) のもの]
+pub(crate) static GA_CONF: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+
+/// [`Domain::tighten_le_row`] の結果
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LeRowTighten {
+    /// 最小活動度の無限の項が 2 つ以上で、何もしなかった
+    Skip,
+    /// 最小活動度が右辺を越えた (行が満たせない)
+    Infeasible,
+    /// 締めた列の数 (締めて空になったら `infeasible` が立つ)
+    Done(usize),
 }
 
 impl Domain {
@@ -179,12 +250,16 @@ impl Domain {
             proof_reason_budget: u64::MAX,
             low_water: 0,
             pending_global: Vec::new(),
+            root_dead: false,
             dbg_sol: None,
             resets: 0,
             global_lo: p.col_lo.clone(),
             global_up: p.col_up.clone(),
             impl_adj: None,
             impl_queue: Vec::new(),
+            bimpl: None,
+            bimpl_queue: Vec::new(),
+            bimpl_stats: [0; 2],
             cong: super::hnf::table_for(p),
             row_cap: if env_str!("ENOMOTO_MIP_NO_ROWCAP").is_some() { vec![f64::INFINITY; p.m] } else { p.rows.iter().map(|r| r.iter().map(|&(j, a)| a.abs() * (p.col_up[j] - p.col_lo[j])).fold(0.0f64, f64::max)).collect() },
         };
@@ -279,6 +354,11 @@ impl Domain {
             }
         }
         (lo, up)
+    }
+
+    /// LP へ反映していない境界の変更があるか ([`Self::take_changed`] の前)。
+    pub fn has_changed(&self) -> bool {
+        !self.changed.is_empty()
     }
 
     /// 前回呼んでから境界が変わった列を取り出す (LP への反映用)。
@@ -399,6 +479,11 @@ impl Domain {
         if self.impl_adj.is_some() && self.lo[j] == self.up[j] && (self.lo[j] == 0.0 || self.lo[j] == 1.0) && p.is_int[j] {
             self.impl_queue.push(j);
         }
+        if let Some(b) = &self.bimpl {
+            if !b.by_col[j].is_empty() || (p.is_int[j] && self.lo[j] == self.up[j] && (self.lo[j] == 0.0 || self.lo[j] == 1.0) && !b.by_lit[2 * j + self.lo[j] as usize].is_empty()) {
+                self.bimpl_queue.push(j);
+            }
+        }
         if self.lo[j] > self.up[j] + bound_tol(self.lo[j]) {
             if !self.infeasible {
                 self.conflict = Some(ConflictSrc::Col(j));
@@ -467,6 +552,28 @@ impl Domain {
         }
     }
 
+    /// 試作 `ENOMOTO_MIP_ROOT_OBJ_PROBE_HULL=2`: 含意 (x_j = v ⇒ y <= b (上限) / y >= b) を表に足す。`list` は (j, v, y, 上限か, b)。
+    /// 足したら、今の定義域で成り立つ向き (固定済みの x_j・範囲を外れた y) も待ち行列に積む。呼び手が [`Self::propagate`] する。根で呼ぶこと
+    pub fn add_bound_implications(&mut self, p: &MipProblem, list: &[(usize, usize, usize, bool, f64)]) {
+        if list.is_empty() {
+            return;
+        }
+        let n = p.n;
+        let arc = self.bimpl.get_or_insert_with(|| std::sync::Arc::new(BoundImpl { by_lit: vec![Vec::new(); 2 * n], by_col: vec![Vec::new(); n] }));
+        let b = std::sync::Arc::make_mut(arc);
+        for &(j, v, y, upper, val) in list {
+            b.by_lit[2 * j + v].push((y as u32, upper, val));
+            b.by_col[y].push(((2 * j + v) as u32, upper, val));
+            self.bimpl_queue.push(j);
+            self.bimpl_queue.push(y);
+        }
+    }
+
+    /// [`Self::bimpl`] の含意の本数
+    pub fn bound_implication_count(&self) -> usize {
+        self.bimpl.as_ref().map_or(0, |b| b.by_lit.iter().map(|l| l.len()).sum())
+    }
+
     /// 試作 `ENOMOTO_MIP_FIXMORE` (src/mip/fixmore.rs): 今固定されている 0-1 列を含意の伝播の待ち行列に積む ([`Self::add_implications`]
     /// より前に固定されていた列の含意も伝播させる)。
     pub fn queue_fixed_binaries(&mut self, p: &MipProblem) {
@@ -482,7 +589,7 @@ impl Domain {
 
     /// 伝播を待っている行・含意が残っているか (`propagate` が手間の上限で打ち切ったか)。
     pub fn has_pending(&self) -> bool {
-        !self.queue.is_empty() || !self.impl_queue.is_empty()
+        !self.queue.is_empty() || !self.impl_queue.is_empty() || !self.bimpl_queue.is_empty()
     }
 
     /// 記録を `pos` まで巻き戻す (境界と活動量を戻し、矛盾の印を消す)。
@@ -506,17 +613,33 @@ impl Domain {
         }
         self.queue.clear();
         self.impl_queue.clear();
+        self.bimpl_queue.clear();
     }
 
     /// 根まで戻し、保留中の大域的な締め付けを適用する。
     pub fn reset_to_root(&mut self, p: &MipProblem) {
         self.backtrack_to(p, 0);
         let pend = std::mem::take(&mut self.pending_global);
+        let mut applied = 0u64;
         for (j, upper, v) in pend {
             let tighter = if upper { v < self.up[j] } else { v > self.lo[j] };
             if tighter {
                 self.set_bound(p, j, upper, v, false);
+                applied += 1;
             }
+        }
+        // `ENOMOTO_MIP_GLOBALFIX` (2026-11-25 から既定) の `b` (analysis/globalfix_20261124): 置いた締め付けから行 (と含意) を通して締まる境界を、待ち行列を
+        // 捨てずに根で伝播し切り、大域的な境界にする (`commit_root`)。根の定義域 = 大域的な境界 + 大域的に成り立つ推論なので、どのノード・
+        // どのスレッドでも成り立つ。矛盾したら (打ち切り値より良い解がない) 以後の根への戻りで毎回矛盾にする (`root_dead`)
+        if self.root_dead {
+            self.infeasible = true;
+        } else if applied > 0 && globalfix('b') {
+            self.globalfix_propagate(p);
+        }
+        // 診断 `ENOMOTO_MIP_DIAG_GLOBALAUDIT` (analysis/globalaudit_20261124): 下で伝播の待ち行列を捨てるので、置いた締め付けから行を通して
+        // 締まるはずの境界は大域的な境界に入らない。写しで伝播してその量を数える (解き方は変えない)
+        if applied > 0 && globalaudit_on() && !self.infeasible {
+            self.globalaudit_dropped(p, applied);
         }
         self.resets += 1;
         if self.resets % 64 == 0 {
@@ -524,6 +647,79 @@ impl Domain {
         }
         self.queue.iter().for_each(|&i| self.in_queue[i] = false);
         self.queue.clear();
+    }
+
+    /// `ENOMOTO_MIP_GLOBALFIX` (2026-11-25 から既定) の `b`: 根 (記録が空) で待ち行列を伝播し切り (手間の上限で打ち切られたら続けて、最大
+    /// `ENOMOTO_T_MIP_FIXMORE_ROUNDS` (既定 50) 回。FIXMORE の `propagate_all` と同じ)、結果を大域的な境界にする。矛盾なら
+    /// 記録を巻き戻して `root_dead` を立てる。
+    fn globalfix_propagate(&mut self, p: &MipProblem) {
+        use std::sync::atomic::Ordering::Relaxed;
+        debug_assert!(self.stack.is_empty());
+        let rounds = tunable!("ENOMOTO_T_MIP_FIXMORE_ROUNDS", 50usize, usize);
+        let mut ok = true;
+        for _ in 0..rounds {
+            if !self.propagate(p) {
+                ok = false;
+                break;
+            }
+            if !self.has_pending() {
+                break;
+            }
+        }
+        GF_STATS[0].fetch_add(1, Relaxed);
+        if !ok {
+            self.backtrack_to(p, 0);
+            self.root_dead = true;
+            self.infeasible = true;
+            GF_STATS[3].fetch_add(1, Relaxed);
+            return;
+        }
+        let (mut ti, mut fi) = (0u64, 0u64);
+        for c in &self.stack {
+            if p.is_int[c.col] {
+                ti += 1;
+            }
+        }
+        for j in 0..p.n {
+            if p.is_int[j] && self.lo[j] == self.up[j] && self.global_lo[j] < self.global_up[j] {
+                fi += 1;
+            }
+        }
+        GF_STATS[1].fetch_add(ti, Relaxed);
+        GF_STATS[2].fetch_add(fi, Relaxed);
+        if !self.stack.is_empty() {
+            self.commit_root();
+        }
+    }
+
+    /// [`globalaudit_on`] 用: 保留中の大域的な締め付けを置いた直後 (待ち行列を捨てる前) の定義域の写しを伝播し、締まる境界を数える。
+    /// 写しの伝播の手間はこのスレッドの数え (手間の期限・時計) から差し引く (解き方を変えない)
+    fn globalaudit_dropped(&self, p: &MipProblem, applied: u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (t0, a0, c0, d0, w0) = (crate::ticks::raw(), act_work(), chg_count(), DEBUG_WORK.with(|w| w.get()), work_cuts());
+        let mut d = self.clone();
+        let ok = d.propagate(p);
+        let (mut ti, mut fi, mut tc) = (0u64, 0u64, 0u64);
+        if ok {
+            for j in 0..p.n {
+                let t = (d.lo[j] > self.lo[j]) as u64 + (d.up[j] < self.up[j]) as u64;
+                if p.is_int[j] {
+                    ti += t;
+                    fi += (d.lo[j] == d.up[j] && self.lo[j] < self.up[j]) as u64;
+                } else {
+                    tc += t;
+                }
+            }
+        }
+        let t1 = crate::ticks::raw();
+        crate::ticks::add_raw(&std::array::from_fn(|k| t0[k].wrapping_sub(t1[k])));
+        ACT_WORK.with(|w| w.set(a0));
+        CHG_COUNT.with(|w| w.set(c0));
+        DEBUG_WORK.with(|w| w.set(d0));
+        WORK_CUTS.with(|w| w.set(w0));
+        for (k, v) in [1u64, applied, ti, fi, (!ok) as u64, tc].into_iter().enumerate() {
+            GA_RESET[k].fetch_add(v, Relaxed);
+        }
     }
 
     /// 大域的に (すべてのノードで) 有効な締め付け。根にいればすぐ、そうでなければ次に根へ戻ったときに適用する。
@@ -633,7 +829,54 @@ impl Domain {
                     break;
                 }
             }
-            let Some(i) = self.queue.pop() else { break };
+            // 試作 `ENOMOTO_MIP_ROOT_OBJ_PROBE_HULL=2`: 0-1 列の値から列の境界への含意 (理由は含意と同じく記録しない)
+            if let Some(b) = self.bimpl.clone() {
+                while let Some(k) = self.bimpl_queue.pop() {
+                    // 向き: x_k = v に固定されていれば、y の境界を締める
+                    if p.is_int[k] && self.lo[k] == self.up[k] && (self.lo[k] == 0.0 || self.lo[k] == 1.0) {
+                        let lits = &b.by_lit[2 * k + self.lo[k] as usize];
+                        work += lits.len();
+                        for &(y, upper, val) in lits {
+                            let y = y as usize;
+                            let t = if upper { self.tighten_upper(p, y, val) } else { self.tighten_lower(p, y, val) };
+                            self.bimpl_stats[0] += t as u64;
+                            if self.infeasible {
+                                break;
+                            }
+                        }
+                    }
+                    // 対偶: y の範囲が含意の値を外れたら、x_j = 1 - v
+                    if !self.infeasible {
+                        let rel = &b.by_col[k];
+                        work += rel.len();
+                        for &(lit, upper, val) in rel {
+                            let out = if upper { self.lo[k] > val + bound_tol(val) } else { self.up[k] < val - bound_tol(val) };
+                            if !out {
+                                continue;
+                            }
+                            let (j, v) = ((lit / 2) as usize, (lit % 2) as f64);
+                            let t = if v == 1.0 { self.tighten_upper(p, j, 0.0) } else { self.tighten_lower(p, j, 1.0) };
+                            self.bimpl_stats[1] += t as u64;
+                            if self.infeasible {
+                                break;
+                            }
+                        }
+                    }
+                    if self.infeasible {
+                        break;
+                    }
+                }
+                if self.infeasible {
+                    break;
+                }
+            }
+            let Some(i) = self.queue.pop() else {
+                // `ENOMOTO_MIP_ROOT_OBJ_PROBE_HULL=2` の含意が待ち行列に残っていれば続ける (含意だけで動いた列が行を持たないとき)
+                if self.bimpl.is_some() && (!self.bimpl_queue.is_empty() || (self.impl_adj.is_some() && !self.impl_queue.is_empty())) {
+                    continue;
+                }
+                break;
+            };
             self.in_queue[i] = false;
             // 走査を省いた行は数えない
             let (use_up, use_lo) = self.row_sides(p, i);
@@ -829,6 +1072,123 @@ impl Domain {
         self.cur_reason = if on { -2 } else { -1 };
     }
 
+    /// 1 本の行 `sum c_j x_j <= u` の最小活動度で境界を 1 回締める (カットの貯めの伝播 `cutpool_prop_cut` と、目的の行・被約費用の行の
+    /// 伝播 `propagate_le_row_ex` の共通部分)。
+    /// - 最小活動度 (`c > 0` なら下限、`c < 0` なら上限を使う) の無限の項が 2 つ以上なら [`LeRowTighten::Skip`]。
+    ///   無限の項がなく、最小活動度が `u + 1e-6 (1 + |u|)` を越えれば [`LeRowTighten::Infeasible`]。
+    /// - 無限の項が 1 つならその列だけ、なければ幅 (の係数倍) が余り `gap = u - 最小活動度` を越える列を締める。
+    ///   締める量が `1e-6 (1 + min(|境界|, 1e6))` 以下なら締めない。連続列は `cont_frac > 0` なら、さらに幅の `cont_frac` 倍より
+    ///   多く縮むときだけ締める。`int_only` なら整数列だけ締める。
+    /// - `before` は、締め始める前に 1 回だけ呼ぶ (変更の出どころの印を置くなど。`Skip`・`Infeasible` では呼ばない)。
+    /// - 締めた数を [`LeRowTighten::Done`] で返す。締めて空になったら、そこで止まる (`self.infeasible` が立つ)。
+    pub fn tighten_le_row(
+        &mut self,
+        p: &MipProblem,
+        row: impl Iterator<Item = (usize, f64)> + Clone,
+        u: f64,
+        cont_frac: f64,
+        int_only: bool,
+        before: impl FnOnce(&mut Self),
+    ) -> LeRowTighten {
+        let mut minact = 0.0f64;
+        let mut ninf = 0usize;
+        let mut infj = usize::MAX;
+        // `ENOMOTO_MIP_UNIFY_FIX` の `p`: 無限の項を積 `c b` で見る ([`Self::recompute_activities`] と同じ。境界が有限でも積があふれると
+        // 最小活動度が ±∞ になり、矛盾と誤って判定しうる)
+        let prod = super::solver::unify_fix('p');
+        for (j, c) in row.clone() {
+            let b = if c > 0.0 { self.lo[j] } else { self.up[j] };
+            if if prod { (c * b).is_finite() } else { b.is_finite() } {
+                minact += c * b;
+            } else {
+                ninf += 1;
+                infj = j;
+            }
+        }
+        if ninf >= 2 {
+            return LeRowTighten::Skip;
+        }
+        if ninf == 0 && minact > u + 1e-6 * (1.0 + u.abs()) {
+            return LeRowTighten::Infeasible;
+        }
+        before(self);
+        let gap = u - minact;
+        let mut n = 0usize;
+        for (j, c) in row {
+            if (ninf == 1 && j != infj) || (int_only && !p.is_int[j]) {
+                continue;
+            }
+            let (lo, up) = (self.lo[j], self.up[j]);
+            if ninf == 0 && c.abs() * (up - lo) <= gap + 1e-9 * (1.0 + gap.abs()) {
+                continue;
+            }
+            // 締める量の下限: 整数列 (と `cont_frac` が 0 の連続列) は 1e-6 (1 + min(|境界|, 1e6))
+            let need = |b: f64| {
+                let base = 1e-6 * (1.0 + b.abs().min(1e6));
+                if cont_frac > 0.0 && !p.is_int[j] { (cont_frac * (up - lo)).max(base) } else { base }
+            };
+            let tight = if c > 0.0 {
+                let v = if ninf == 0 { lo + gap / c } else { gap / c };
+                v < up - need(up) && self.tighten_upper(p, j, v)
+            } else {
+                let v = if ninf == 0 { up + gap / c } else { gap / c };
+                v > lo + need(lo) && self.tighten_lower(p, j, v)
+            };
+            n += tight as usize;
+            if self.infeasible {
+                break;
+            }
+        }
+        LeRowTighten::Done(n)
+    }
+
+    /// 1 本の行 `sum c_j x_j <= u` (定数項を除いた打ち切り値の目的の行) で、各列を「ほかの列の最小活動量 `rest` から
+    /// `c_j x_j <= u - rest`」で 1 回締める (`Solver::global_obj_prop_ex` と FIXMORE の `obj_row_pass` の共通部分)。
+    /// 最小活動量の無限の項が 2 つ以上なら何もしない (`Some(0)`)。連続列は丸め誤差の分 `1e-9 (1 + |lim|)` だけ緩める。
+    /// `int_slack` なら整数列も同じだけ緩める (整数列は `tighten_*` が許容誤差を足して切り捨てる)。締めた数を返し、矛盾なら None
+    pub fn tighten_le_row_rest(&mut self, p: &MipProblem, row: &[(usize, f64)], u: f64, int_slack: bool) -> Option<usize> {
+        let (mut minact, mut ninf) = (0.0f64, 0usize);
+        // `ENOMOTO_MIP_UNIFY_FIX` の `p`: 無限の項を積 `c b` で見る ([`Self::tighten_le_row`] と同じ)
+        let prod = super::solver::unify_fix('p');
+        let fin = |c: f64, b: f64| if prod { (c * b).is_finite() } else { b.is_finite() };
+        for &(j, c) in row {
+            let b = if c > 0.0 { self.lo[j] } else { self.up[j] };
+            if fin(c, b) {
+                minact += c * b;
+            } else {
+                ninf += 1;
+            }
+        }
+        if ninf > 1 {
+            return Some(0);
+        }
+        let mut n = 0usize;
+        for &(j, c) in row {
+            let b = if c > 0.0 { self.lo[j] } else { self.up[j] };
+            let rest = if fin(c, b) {
+                if ninf > 0 {
+                    continue;
+                }
+                minact - c * b
+            } else {
+                minact
+            };
+            let lim = (u - rest) / c;
+            let slack = if p.is_int[j] && !int_slack { 0.0 } else { 1e-9 * (1.0 + lim.abs()) };
+            if c > 0.0 {
+                if lim + slack < self.up[j] && self.tighten_upper(p, j, lim + slack) {
+                    n += 1;
+                }
+            } else if lim - slack > self.lo[j] && self.tighten_lower(p, j, lim - slack) {
+                n += 1;
+            }
+            if self.infeasible {
+                return None;
+            }
+        }
+        Some(n)
+    }
+
     /// 診断用: 外から来た変更の出どころを理由の値で区別する (`-2 - tag`。衝突解析は `< 0` / `== -1` しか見ないので動作は同じ)。
     /// tag: 1 被約費用による局所的な固定、2 強分枝の子の打ち切りによる固定、3 オービトープの固定、4 双対証明の締め付け、
     /// 5 リテラルの衝突、6 目的関数の伝播。
@@ -836,7 +1196,7 @@ impl Domain {
         self.cur_reason = -2 - tag;
     }
 
-    /// 試作 `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN` (既定では使わない): 以後の変更を「通し番号 `id` の双対証明で締めた」として記録する
+    /// 試作 `ENOMOTO_MIP_CONFLICT_PROOF_EXPLAIN` (既定、`=0` で切る): 以後の変更を「通し番号 `id` の双対証明で締めた」として記録する
     /// (理由 `PROOF_REASON_BASE - id`。番号が大きすぎれば従来の `-6`)。衝突解析で証明の行から説明できるようにする。
     pub fn set_proof_tag(&mut self, id: u64) {
         self.cur_reason = if id < 999_000_000 { PROOF_REASON_BASE - id as i32 } else { -6 };
@@ -913,6 +1273,8 @@ impl Domain {
         if !chosen.iter().all(|&k| holds(k)) {
             return;
         }
+        // 選んだ変更が許容の内側でしか成り立たなければ見かけ (デバッグ解は厳密にはその枝にない)
+        let gap = dbg_lits_gap(x, chosen.iter().map(|&k| (self.stack[k].col, self.stack[k].upper, self.stack[k].new)));
         let act: f64 = terms.iter().filter(|&&(j, _)| j != skip).map(|&(j, a)| a * x[j]).sum();
         if act >= m_req - 1e-6 * (1.0 + m_req.abs()) {
             return;
@@ -929,6 +1291,10 @@ impl Domain {
             }
         }
         let skip_s = if skip == usize::MAX { "start".to_string() } else { format!("for x{skip}") };
+        if gap > 1e-9 {
+            eprintln!("MIP_DBGTOL: conflict explanation ({skip_s}, before {before}) fails at the debug solution only within the tolerance: chosen changes miss it by {gap:.3e}, sum a x = {act:.10e} < required {m_req:.10e}");
+            return;
+        }
         eprintln!(
             "MIP_DEBUG_SOL: conflict explanation ({skip_s}, before {before}) is wrong at the debug solution: sum a x = {act:.10e} < required {m_req:.10e}, chosen {} changes (all hold), len {}; columns outside the bounds used as global: {}",
             chosen.len(),
@@ -1220,6 +1586,14 @@ impl Domain {
         let cap = 4 * max_len + 100;
         let mut set: std::collections::BTreeSet<usize> = init.into_iter().collect();
         let mut out: Vec<Vec<(usize, bool, f64)>> = Vec::new();
+        // 診断 `ENOMOTO_MIP_CONFDEEP_DIAG`: 遡った変更の数 (行, 双対証明, 写しの表) と、返す衝突ごとの形
+        let deep = super::conflict_pool::confdeep_diag();
+        let mut nres = [0u32; 3];
+        let rkind = |k: usize| -> usize {
+            let r = self.stack[k].reason;
+            if r >= 0 { 0 } else if r > CUT_REASON_BASE { 1 } else { 2 }
+        };
+        let mut meta: Vec<super::conflict_pool::DeepMeta> = Vec::new();
         let mut lev = dec.len();
         let mut done = 0usize;
         let ld = conflict_lev_diag();
@@ -1245,6 +1619,9 @@ impl Domain {
                 }
                 set.remove(&k);
                 cnt -= 1;
+                if deep {
+                    nres[rkind(k)] += 1;
+                }
                 for e in ex {
                     let new = set.insert(e);
                     if new {
@@ -1292,6 +1669,9 @@ impl Domain {
                 let lits = to_lits(&set);
                 if !lits.is_empty() && lits.len() <= max_len {
                     out.push(lits);
+                    if deep {
+                        meta.push([done as u32, 0, nres[0], nres[1], nres[2]]);
+                    }
                 }
                 stop_k = 1;
                 break;
@@ -1299,6 +1679,9 @@ impl Domain {
             let lits = to_lits(&set);
             if resolved > 0 && !lits.is_empty() && lits.len() <= max_len {
                 out.push(lits);
+                if deep {
+                    meta.push([done as u32, 1, nres[0], nres[1], nres[2]]);
+                }
             } else if ld && resolved > 0 && lits.len() > max_len {
                 CONFLICT_STOP[7].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
@@ -1319,6 +1702,9 @@ impl Domain {
                     };
                     r.remove(&k);
                     r.extend(ex);
+                    if deep {
+                        nres[rkind(k)] += 1;
+                    }
                 }
                 if ok && !r.contains(&u) && !r.is_empty() {
                     let mut lits = to_lits(&r);
@@ -1337,6 +1723,9 @@ impl Domain {
                     }
                     if lits.len() <= max_len {
                         out.push(lits);
+                        if deep {
+                            meta.push([done as u32, 2, nres[0], nres[1], nres[2]]);
+                        }
                     }
                 }
             }
@@ -1356,9 +1745,17 @@ impl Domain {
             CONFLICT_STOP[8].fetch_add(out.len() as u64, Relaxed);
             CONFLICT_STOP[9].fetch_add(done as u64, Relaxed);
         }
+        if deep {
+            CONF_META.with(|m| *m.borrow_mut() = meta);
+        }
         if let Some(x) = &self.dbg_sol {
             for (n, c) in out.iter().enumerate() {
                 if c.iter().all(|&(j, up, v)| if up { x[j] <= v + 1e-6 } else { x[j] >= v - 1e-6 }) {
+                    let gap = dbg_lits_gap(x, c.iter().copied());
+                    if gap > 1e-9 {
+                        eprintln!("MIP_DBGTOL: analyze_multi conflict {n} of {} misses the debug solution only by {gap:.3e} (within the tolerance): {:?}", out.len(), c);
+                        continue;
+                    }
                     eprintln!("MIP_DEBUG_SOL: analyze_multi conflict {n} of {} cuts off the debug solution: {:?}", out.len(), c);
                     for t in trace.borrow().iter().take(40) {
                         eprintln!("MIP_DEBUG_SOL:   trace {t}");

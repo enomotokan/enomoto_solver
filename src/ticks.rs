@@ -33,24 +33,38 @@ thread_local! {
     static HAS_GATE: Cell<bool> = const { Cell::new(false) };
     /// [`ipm_work`]: 内点法の反復の手間を数えて期限で止めるか
     static IPM_WORK: Cell<bool> = const { Cell::new(false) };
+    /// [`ipm_add`]: 内点法の反復の手間 (重み付き、[`total`] には足さない)
+    static IPM_EXTRA: Cell<f64> = const { Cell::new(0.0) };
 }
 
-/// 試作 `ENOMOTO_MIP_DET1T` の `i`: このスレッドの内点法 (`solve_box_lp`) が、反復ごとに KKT の分解の演算数を手間 ([`HEUR`]) に足し、
-/// 手間の期限 ([`over`]) を過ぎたら止めるか ([`ipm_work_guard`] の間だけ真)
+/// `ENOMOTO_MIP_DET1T` (既定 `onil`) の `i`: 内点法の手間 `n` (重み [`HEUR`]) を数える。スレッドの手間の合計 [`total`] には足さず、
+/// [`ipm_over`] の期限の判定にだけ使う (合計に足すと、後で手間の割合で予算を決めるサブ MIP などの道が既定と変わる。rout の種 2 で 1.4 倍)
+pub fn ipm_add(n: f64) {
+    IPM_EXTRA.with(|e| e.set(e.get() + weights()[HEUR] * n));
+}
+
+/// [`over`] に内点法の手間 ([`ipm_add`]) も足して比べる
+pub fn ipm_over() -> bool {
+    over() || total() + IPM_EXTRA.with(|e| e.get()) >= DEADLINE.with(|d| d.get())
+}
+
+/// `ENOMOTO_MIP_DET1T` (既定 `onil`) の `i`: このスレッドの内点法 (`solve_box_lp`) が、反復ごとに KKT の分解の演算数を数え ([`ipm_add`])、
+/// 手間の期限 ([`ipm_over`]) を過ぎたら止めるか ([`ipm_work_guard`] の間だけ真)
 pub fn ipm_work() -> bool {
     IPM_WORK.with(|v| v.get())
 }
 
 /// [`ipm_work`] を真にし、捨てるときに元に戻す見張り
-pub struct IpmWorkGuard(bool);
+pub struct IpmWorkGuard(bool, f64);
 
 pub fn ipm_work_guard() -> IpmWorkGuard {
-    IpmWorkGuard(IPM_WORK.with(|v| v.replace(true)))
+    IpmWorkGuard(IPM_WORK.with(|v| v.replace(true)), IPM_EXTRA.with(|e| e.get()))
 }
 
 impl Drop for IpmWorkGuard {
     fn drop(&mut self) {
         IPM_WORK.with(|v| v.set(self.0));
+        IPM_EXTRA.with(|e| e.set(self.1));
     }
 }
 
@@ -77,11 +91,30 @@ pub fn add(k: usize, n: u64) {
     RAW.with(|r| r[k].set(r[k].get().wrapping_add(n)));
 }
 
+/// 試作 `ENOMOTO_MIP_SUBMIP_TICKS` の文字 `c` (analysis/workcount_20261125、既定では使わない)。`1` は全部の文字
+pub fn submip_ticks(c: char) -> bool {
+    static V: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    V.get_or_init(|| std::env::var("ENOMOTO_MIP_SUBMIP_TICKS").ok().filter(|v| !v.is_empty() && v != "0")).as_deref().is_some_and(|v| v.contains(c) || v.contains('1'))
+}
+
+/// 試作 `ENOMOTO_MIP_SUBMIP_TICKS` の `d`: 診断用の手間 ([`diag_add`]、zero-half・clique・implied bound の分離器) も合計に入れる重み (入れないなら 0)
+fn diag_weight() -> f64 {
+    static W: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *W.get_or_init(|| if submip_ticks('d') { tunable!("ENOMOTO_T_TICKS_W_DIAG", 2.0, f64) } else { 0.0 })
+}
+
 /// このスレッドの重み付きの手間の合計。
+/// 試作 `ENOMOTO_MIP_SUBMIP_TICKS` の `d` なら、診断用の手間 ([`diag_add`]) も重み `ENOMOTO_T_TICKS_W_DIAG` で足す
 #[inline]
 pub fn total() -> f64 {
     let w = weights();
-    RAW.with(|r| (0..NK).map(|k| w[k] * r[k].get() as f64).sum())
+    let wd = diag_weight();
+    let base: f64 = RAW.with(|r| (0..NK).map(|k| w[k] * r[k].get() as f64).sum());
+    if wd > 0.0 {
+        base + wd * DIAG.with(|c| c.get()) as f64
+    } else {
+        base
+    }
 }
 
 thread_local! {
@@ -99,6 +132,9 @@ pub fn diag_add(n: u64) {
 /// このスレッドの [`total`] + 診断用の手間 ([`diag_add`]) (診断用)。診断用の手間の 1 単位は `ENOMOTO_T_TICKS_W_DIAG` (既定 2、
 /// 単位はビット列の 1 語の xor・隣接の 1 要素ほどの軽い操作で、seymour・nw04 の根で zero-half・implied bound・clique の時間とおよそ合う)
 pub fn total_with_diag() -> f64 {
+    if diag_weight() > 0.0 {
+        return total();
+    }
     total() + tunable!("ENOMOTO_T_TICKS_W_DIAG", 2.0, f64) * DIAG.with(|c| c.get()) as f64
 }
 
@@ -258,6 +294,17 @@ pub fn left() -> f64 {
 pub fn with_budget<R>(budget: f64, f: impl FnOnce() -> R) -> R {
     let prev = DEADLINE.with(|d| d.get());
     DEADLINE.with(|d| d.set(prev.min(total() + budget)));
+    let r = f();
+    DEADLINE.with(|d| d.set(prev));
+    r
+}
+
+/// 手間の期限を外して `f` を実行し、元に戻す (手間は数え続ける)。返す暫定解の研磨 (`crate::mip` の `polish_in_problem_warm`) の LP は、
+/// 呼び出し元 (ヒューリスティクスなど) の手間の期限で数反復で止まると、研磨しないまま見積りで受け取ることになるので、壁時計の期限だけで止める
+/// (analysis/nattai_20261125 の 9 節)
+pub fn without_budget<R>(f: impl FnOnce() -> R) -> R {
+    let prev = DEADLINE.with(|d| d.get());
+    DEADLINE.with(|d| d.set(f64::INFINITY));
     let r = f();
     DEADLINE.with(|d| d.set(prev));
     r

@@ -209,11 +209,14 @@ impl PyModel {
     /// rayon プールで動かす。`"auto"` で 2 以上なら、LP (整数最適化では基底のない緩和問題) を二段解法 (1 スレッド) と
     /// 内点法 + クロスオーバー (残り) で同時に解く。整数最適化では木の探索もこの数のスレッドで分け合う。
     ///
+    /// `seed` (既定 `None`): 整数最適化の乱数の種 (0 以上 2^64 未満。範囲の確かめは Python の `Model.solve` がする)。`None` なら環境変数
+    /// `ENOMOTO_T_MIP_SEED`、なければ 0 (以前と同じ動き)。LP (整数変数のないモデル) では使わない ([`crate::types::MipSettings::seed`])。
+    ///
     /// `log` (既定 `false`): 求解の要点 (前処理の結果、根の LP、探索の経過など) を `sys.stdout` に出す ([`crate::log`])。
     /// Python の `Model.solve` は既定で `true` を渡す (案内とまとめの行は Python 側で出す)。
     ///
     /// 目的関数が未設定なら `ValueError`。
-    #[pyo3(signature = (lp_solver=None, distinguish_infeasible_unbounded=false, time_limit=None, mip_rel_gap=None, node_limit=None, threads=None, log=false))]
+    #[pyo3(signature = (lp_solver=None, distinguish_infeasible_unbounded=false, time_limit=None, mip_rel_gap=None, node_limit=None, threads=None, log=false, seed=None))]
     fn solve<'py>(
         &self,
         py: Python<'py>,
@@ -224,6 +227,7 @@ impl PyModel {
         node_limit: Option<u64>,
         threads: Option<usize>,
         log: bool,
+        seed: Option<u64>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let objective = self.objective.as_ref().ok_or_else(|| {
             PyValueError::new_err("no objective set: call Model.set_objective(...) before solve()")
@@ -234,7 +238,7 @@ impl PyModel {
         };
 
         // 整数最適化の設定には指定のまま渡す (未指定なら環境変数 `ENOMOTO_MIP_TREE_THREADS` が効く)
-        let settings = MipSettings { time_limit, rel_gap: mip_rel_gap, node_limit, threads };
+        let settings = MipSettings { time_limit, rel_gap: mip_rel_gap, node_limit, threads, seed };
         let threads = threads.unwrap_or_else(crate::mip::default_threads).clamp(1, crate::mip::max_threads());
         let opts = LpOptions { distinguish_infeasible_unbounded, threads, ..Default::default() };
         let sink = if log { Some(py.import_bound("sys")?.getattr("stdout")?.unbind()) } else { None };

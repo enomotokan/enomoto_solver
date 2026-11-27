@@ -34,6 +34,12 @@ PyPI からインストールできます(上の「対応環境」なら，ビ�
 pip install enomoto-solver
 ```
 
+PyPI の wheel は，リンク時最適化(LTO)とプロファイルに基づく最適化(PGO)をかけてビルドしています．
+x86-64 の wheel(Linux，Windows，Intel の macOS)には，Rust の本体が 2 つ入っています．どの x86-64 の CPU でも動くものと，x86-64-v3 の CPU(AVX2，FMA，BMI2 などを持つもの．おおむね 2015 年ごろ以降の CPU)向けのものです．
+読み込むときに CPU を調べ，x86-64-v3 に対応していればそちらを使います．
+環境変数 `ENOMOTO_CORE` に `base`(どの x86-64 の CPU でも動くもの)，`v3`，`auto`(既定)を与えると，どちらを使うかを決められます．
+arm64 の wheel(Linux の aarch64，Apple シリコンの macOS)には本体が 1 つだけ入っています．
+
 ### ソースからビルドする場合
 
 開発やベンチマークの実行には，リポジトリを取得してビルドします．次のものが必要です．
@@ -54,17 +60,46 @@ maturin develop --release
 
 必ず `--release` を付けてビルドしてください．デバッグビルドは何倍も遅くなります．
 
+ソースからビルドすると，Rust の本体は 1 つで，LTO・PGO はかかりません．その CPU の種類のどの機種でも動く形になります．
+手元の CPU に合わせてビルドするには，`RUSTFLAGS` を与えます(できたものは，ほかの機械では動かないことがあります)．
+
+```sh
+RUSTFLAGS="-C target-cpu=native" maturin develop --release
+```
+
+PyPI の wheel と同じ形(LTO，PGO，x86-64 では x86-64-v3 向けの本体も)の wheel を手元で作るには，`scripts/build_dist_wheel.sh`(bash．Windows では Git Bash)を使います．
+Rust の `llvm-tools`(`rustup component add llvm-tools`)が必要です．
+この台本は次のことを順に行います．
+
+1. 計測用の wheel をビルドする．
+2. それを一時的な仮想環境に入れ，`scripts/pgo_train.py` が作る問題を解いてプロファイルを取る．
+3. プロファイルを使ってもう一度ビルドする．x86-64 では，1〜3 を x86-64-v3 向けにも行う(プロファイルは同じ命令の版で取ったものでないと合わないため)．
+4. `scripts/make_dual_wheel.py` で 2 つの wheel を 1 つにまとめる．
+
+```sh
+pip install maturin
+rustup component add llvm-tools
+bash scripts/build_dist_wheel.sh      # wheel は dist/ にできる
+pip install dist/enomoto_solver-*.whl
+```
+
+`maturin develop --release` の数倍の時間がかかります(4 コアで約 35 分)．
+`PGO=0` で PGO を，`DUAL=0` で x86-64-v3 向けのビルドを省けます．
+`maturin build` に渡す引数は `MATURIN_ARGS` で足せます(PyPI と同じにするなら `MATURIN_ARGS="--features pyo3/abi3-py39"`)．
+自分でビルドした 2 つの wheel をまとめるには `python scripts/make_dual_wheel.py BASE_WHEEL V3_WHEEL OUT_DIR` を使います．
+2 つの wheel は版とタグが同じで，2 つ目は `-C target-cpu=x86-64-v3` を付けてビルドしたものにします．
+
 ## 使い方
 
 ### 問題の定義と求解
 
 ```python
 import math
-from enomoto_solver import Model, Variable
+from enomoto_solver import Model
 
 M = Model()
-x = Variable(float, 0, 10)          # 連続変数 0 <= x <= 10
-y = Variable(float, 0, math.inf)    # 上下限は無限でもよい
+x = M.add_variable(float, 0, 10)          # 連続変数 0 <= x <= 10
+y = M.add_variable(float, 0, math.inf)    # 上下限は無限でもよい
 M.set_objective(x + 2 * y, sense="maximize")
 M.add_constraint(x + y <= 10)
 M.add_constraint(x - y >= -4)
@@ -74,7 +109,18 @@ print(sol.status, sol.objective)    # optimal 17.0
 print(x.value, y.value)             # 3.0 7.0
 ```
 
-- `Variable(型, 下限, 上限)` は，最後に作った `Model` に変数を作ります(`model=...` で明示することもできます)．型は `float`(連続)か `int`(整数)です．上下限には `±math.inf` を使えます(整数変数でもかまいません)．自由変数は `Variable(float, -math.inf, math.inf)` です．
+- `M.add_variable(型, 下限, 上限, name=None)` で，モデル `M` に変数を作ります．型は `float`(連続)か `int`(整数)です．上下限には `±math.inf` を使えます(整数変数でもかまいません)．自由変数は `M.add_variable(float, -math.inf, math.inf)` です．`Variable(...)` を直接呼ぶことはできません(どのモデルに入るかを明らかにするため)．
+- 変数を `for` で 1 つずつ作っても速さは問題ありません(1 個あたり約 2 マイクロ秒，100 万個で約 2 秒)．
+- 多くの項の和は `quicksum(...)` で作ってください．組み込みの `sum(...)` は途中の和を毎回複製するので，項の数の二乗の手間がかかります(1 万項で約 0.5 秒，10 万項で約 50 秒)．`f += 項` もその場で足し込むので速く書けます．
+
+  ```python
+  from enomoto_solver import quicksum
+  xs = [M.add_variable(int, 0, 1) for _ in range(n)]
+  M.set_objective(quicksum(c[i] * xs[i] for i in range(n)), sense="maximize")
+  M.add_constraint(quicksum(w[i] * xs[i] for i in range(n)) <= cap)
+  ```
+
+  `quicksum` には変数・式・数値を混ぜて渡せます．式が 1 つもなければ数値の和(空なら `0.0`)を返します．
 - 線型式は `+`，`-`，スカラー倍，数値での割り算で，制約は `<=`，`>=`，`==` で書きます．目的関数と制約は線型式に限ります．変数どうしの積(`x * y`)，べき乗(`x ** 2`)，式での割り算(`1 / x`)のように二次以上になる式を作ると，線型でないことを示す `TypeError` になります．
 - `set_objective(f, sense="minimize" | "maximize")` で目的関数を設定します(既定は最小化)．
 - `solve()` の引数(すべて省略可)：
@@ -86,6 +132,7 @@ print(x.value, y.value)             # 3.0 7.0
   | `distinguish_infeasible_unbounded` | 有限な最適値がないとき，実行不可能か非有界かを区別するか(既定 `False`．下の「結果の状態と，実行不可能・非有界な問題」)． |
   | `time_limit`，`mip_rel_gap`，`node_limit` | 整数最適化の打ち切り条件(秒，相対ギャップ(既定 0)，ノード数)． |
   | `log` | ログを出すか(既定 `True`．下の「ログ」)． |
+  | `seed` | 整数最適化の乱数の種(0 以上 2**64 未満の整数．既定 `None`)．下の「乱数の種(`seed`)」． |
 
 - `solve()` は常に `Solution` を返し，実行不可能・非有界・求解失敗でも例外は送出しません．結果は `Solution.status` で判断します．`status` が `"optimal"` のとき(整数最適化で打ち切ったときは，暫定解があれば)だけ `objective` に値が入り，各変数の値を `.value` で読めます．それ以外では `objective` は `None` で，`.value` を読むと `RuntimeError` になります．
 
@@ -108,7 +155,7 @@ print(x.value, y.value)             # 3.0 7.0
 
 ```python
 M = Model()
-z = Variable(float, -math.inf, math.inf)
+z = M.add_variable(float, -math.inf, math.inf)
 M.set_objective(z)                  # z を最小化
 M.add_constraint(z <= 5)
 
@@ -135,9 +182,9 @@ print(sol.status)                   # unbounded
 
 ```python
 M = Model()
-items = [(Variable(int, 0, 1), value, weight) for value, weight in [(60, 10), (100, 20), (120, 30)]]
-M.set_objective(sum(v * value for v, value, _ in items), sense="maximize")
-M.add_constraint(sum(v * weight for v, _, weight in items) <= 50)
+items = [(M.add_variable(int, 0, 1), value, weight) for value, weight in [(60, 10), (100, 20), (120, 30)]]
+M.set_objective(quicksum(v * value for v, value, _ in items), sense="maximize")
+M.add_constraint(quicksum(v * weight for v, _, weight in items) <= 50)
 sol = M.solve(time_limit=60)
 print(sol.objective, [round(v.value) for v, _, _ in items])   # 220.0 [0, 1, 1]
 print(sol.best_bound, sol.mip_gap, sol.nodes)                 # 220.0 0.0 0
@@ -163,17 +210,25 @@ print(sol.best_bound, sol.mip_gap, sol.nodes)                 # 220.0 0.0 0
 
 打ち切り条件は `time_limit`(秒)，`mip_rel_gap`(相対ギャップ，既定 0)，`node_limit`(ノード数)で指定します．上限で止まったときは `status` が `"time_limit"` か `"node_limit"` になり，暫定解があれば `objective` と各変数の `.value` を読めます．`Solution` の `best_bound`(証明済みの限界)，`mip_gap`(相対ギャップ)，`nodes`(処理したノード数)にも結果が入ります．
 
+**乱数の種(`seed`)．** `seed` は整数最適化の探索の乱数(木の中のヒューリスティクス，並列の Feasibility Jump・Local-MIP のスレッドなど)に混ぜます．
+- `None`(既定)なら，環境変数 `ENOMOTO_T_MIP_SEED` があればその値，なければ 0 を使います．0 は `seed` を足す前と同じ動きです．
+- `threads=1` なら，同じ種で同じ結果(ノード数・目的値)になり，再現できます．
+- 2 スレッド以上では，同じ種でもスレッドのタイミングで探索の道筋が揺れることがあります．
+- 種を変えて回すと，問題ごとの求解時間の揺れを確かめられます．
+- 負の値・2**64 以上は `ValueError`，整数でない値(`bool` を含む)は `TypeError` になります．
+- LP(整数変数のないモデル)では使いません．
+
 相対ギャップは，暫定解(探索中に見つかった実行可能解のうち目的値が最も良いもの)の目的値と証明済みの限界の差を
 
   相対ギャップ = |暫定解の目的値 − 証明済みの限界| / max(|暫定解の目的値|, 1)
 
 で測ったものです(分母は，目的値が 0 に近いときに比が極端に大きくならないよう 1 未満なら 1 にします)．最適値は証明済みの限界と暫定解の目的値の間にあります．探索中は，限界が「暫定解の目的値 − max(`mip_rel_gap` × max(|暫定解の目的値|, 1), 10⁻⁹ × max(|暫定解の目的値|, 1))」に届いたノードを枝刈りするので(目的関数の整数変数の係数がすべて共通の刻みの倍数で，目的関数に連続変数がないときは，刻み 1 つ分良くできないノードを枝刈りします)，未処理のノードがなくなったとき，相対ギャップは `mip_rel_gap` 以下(既定の `mip_rel_gap=0` なら 10⁻⁹ 以下)です．このとき `"optimal"` として終わります．したがって既定では，`"optimal"` は LP 緩和の許容誤差の範囲で最適性を証明したという意味です．保証を緩めて早く止めたいときは `mip_rel_gap=1e-4` などを指定してください．
 
-返す解は報告の前に研磨します．整数変数はちょうどの整数に丸め，連続変数があれば，整数変数をその値に固定した元の問題の LP を解き直し，その解が元の解より制約を破らず目的値も悪くならなければそれに取り替えます．`objective` は返す値から誤差補償つきの和で計算し直すので，返す解の目的値と丸め誤差の範囲で一致します(`benchmarks/` の MIPLIB 2017 の問題では，参照の最適値との相対誤差は 10⁻¹⁵ 以下)．
+返す解は報告の前に研磨します．整数変数はちょうどの整数に丸め，連続変数があれば，整数変数をその値に固定した元の問題の LP を解き直し，その解が元の解より制約を破らず目的値も悪くならなければそれに取り替えます．`objective` は返す値から誤差補償つきの和で計算し直すので，返す解の目的値と丸め誤差の範囲で一致します(`benchmarks/` の MIPLIB 2017 の問題では，参照の最適値との相対誤差は 10⁻¹⁵ 以下)．暫定解は探索の途中でも見つけるたびに同じように研磨し，刈り込みにも研磨した目的値を使います．分枝限定法の中の LP は許容誤差の範囲で多くの行を少しずつ破った解を返すことがあり，そのままでは目的値が本当の値より低くなるためです．研磨で違反が減れば，目的値が悪くなってもその解を採ります．時間の上限までに研磨の LP が解けなかった解には，行と境界の違反に双対値を掛けて見積もった分を目的値に足します．
 
 ### MPS ファイルの読み込み(`readModel`)
 
-`Model.readModel(path)` で MPS ファイル(自由形式．末尾が `.gz` なら gzip 圧縮のまま)を空の Model に読み込みます．読み取りは Rust コア(`src/mps.rs`)が行います．変数は列の順に `M.variables` に並び，`M.get_variable(列の名前)` で取り出せます．
+`Model.readModel(path)` で MPS ファイル(末尾が `.gz` なら gzip 圧縮のまま)を空の Model に読み込みます．読み取りは Rust コア(`src/mps.rs`)が行います．変数は列の順に `M.variables` に並び，`M.get_variable(列の名前)` で取り出せます．
 
 ```python
 M = Model()
@@ -182,7 +237,28 @@ sol = M.solve()
 print(sol.objective, M.get_variable("C0001").value)
 ```
 
-約束事は HiGHS にそろえています．最初の `N` 行が目的で，目的の行の右辺 `v` は目的の定数 `-v` です．`MARKER` で囲まれた整数列は，`BOUNDS` に何も書かれなければ `[0, 1]` です．`RANGES` のある行は `<=` と `>=` の 2 本の制約になります．定義されていない行・列への参照は警告を出して飛ばします．HiGHS と違い，係数はファイルどおりに読みます(絶対値 10⁻⁹ 以下の係数も捨てません)．二次の項・半連続変数・SOS は扱えず，`ValueError` になります．
+形式:
+
+- まず自由形式(空白区切り)で読みます．名前に空白を含まない固定欄形式も，そのまま同じに読めます(MIPLIB・Mittelmann の問題はこの形です)．
+- 自由形式で読めないとき(同じ行の名前が 2 回出る，欄の数が合わない，など)だけ，データの行を固定欄の桁(2〜3・5〜12・15〜22・25〜36・40〜47・50 桁以降)で読み直します．このとき名前に空白を含められます(Netlib の `forplan` は `DEDO3 1R` のような行の名前を持ちます)．HiGHS も自由形式で読めなければ固定形式で読み直します．固定欄でも読めなければ，自由形式で読んだときのエラーを返します．
+- 区切り: `NAME`・`OBJSENSE`(`MAX`/`MAXIMIZE`/`MIN`/`MINIMIZE`，同じ行でも次の行でもよく，`OBJSENS` も可)・`ROWS`(`N`/`L`/`G`/`E`)・`COLUMNS`(`'MARKER'` の `'INTORG'` と `'INTEND'` の間が整数列)・`RHS`・`RANGES`・`BOUNDS`(`UP`/`LO`/`FX`/`FR`/`MI`/`PL`/`BV`/`LI`/`UI`)・`ENDATA`．`*` で始まる行は注釈です．
+
+約束事は HiGHS にそろえています:
+
+- 最初の `N` 行が目的で，2 本目以降の `N` 行は捨てます．目的の行の右辺 `v` は目的の定数 `-v` です．
+- `MARKER` で囲まれた整数列は，`BOUNDS` に何も書かれなければ `[0, 1]` です．書かれたら，書かれなかった側は `0`・`+inf` です．
+- `RANGES` は，`E` 行なら値の符号で上下どちらに広げるかを決め，`L`/`G` 行なら絶対値で広げます．範囲のある行は `<=` と `>=` の 2 本の制約になります．
+- `COLUMNS` で同じ列・行が 2 回出たら足し合わせます．同じ行への 2 回目の `RANGES` と，同じ列の同じ側への 2 回目の境界は捨てます．
+- 定義されていない行・列への参照は，警告を出して飛ばします．
+
+HiGHS と違う点:
+
+- 係数はファイルどおりに読みます(絶対値 10⁻⁹ 以下の係数も捨てません)．
+- 下限が書かれていない列に負の `UP` を与えると，下限を `-inf` にします(多くの読み手の約束．HiGHS は下限 0 のまま)．
+
+読めるデータが無いファイル(空・注釈だけ・`NAME` だけ)は `ValueError` になります(変数 0 個の問題としては読みません)．
+
+扱えないもの(`ValueError` になります): 二次の項(`QUADOBJ`・`QSECTION`・`QMATRIX`・`QCMATRIX`)・`SOS`・`INDICATORS`・`GENCONS`・`PWLOBJ`・半連続と半整数の境界(`SC`・`SI`)．
 
 ### スレッド数(`threads`)
 

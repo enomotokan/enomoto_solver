@@ -1363,6 +1363,65 @@ pub(crate) fn dse_init_has(c: char) -> bool {
     V.get_or_init(|| env_def!("ENOMOTO_MIP_DSE_INIT", "umr").filter(|v| *v != "0").map(|v| v.to_string())).as_deref().is_some_and(|v| v.contains(c))
 }
 
+/// 試作 `ENOMOTO_MIP_DSE_COST` (analysis/divedse_20261121/、既定では使わない) が有効か。
+pub(crate) fn dse_cost_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_MIP_DSE_COST").is_some_and(|v| v != "0"))
+}
+
+thread_local! {
+    /// [`dse_cost_skip`] の材料: この求解の見込みの手間 (呼び手が [`set_dse_cost_hint`] で置く。[`crate::ticks`] の単位)
+    static DSE_COST_HINT: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+}
+
+/// [`DSE_COST_STATS`]: [作らなかった回数, 作った回数, 見込みがなく作った回数]
+pub(crate) static DSE_COST_STATS: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+
+/// 試作 `ENOMOTO_MIP_DSE_COST`: 次の求解の見込みの手間 (前の求解の反復の数 × 1 反復の手間) を置く (`None` で消す)
+pub(crate) fn set_dse_cost_hint(v: Option<f64>) {
+    DSE_COST_HINT.with(|c| c.set(v));
+}
+
+/// 試作 `ENOMOTO_MIP_DSE_COST` (analysis/divedse_20261121/): warm start で重みが渡らず、厳密な DSE 重みを作り直す枝
+/// (`ENOMOTO_MIP_DSE_INIT` の `u`) で、作り直しの手間 (直近に測った 1 行あたりの手間 × 行の数 `m`) が、この求解の見込みの手間
+/// (呼び手の [`set_dse_cost_hint`]) を超えるなら作り直さない (真を返す)。作り直しで減らせる反復の手間は、求解の手間全体を超えない
+/// ので、それより高い作り直しは見合わない。見込みか 1 行の手間がまだないときは作り直す (今までどおり、測る)。閾値は置かない
+pub(crate) fn dse_cost_skip(m: usize) -> bool {
+    if !dse_cost_on() {
+        return false;
+    }
+    use std::sync::atomic::Ordering::Relaxed;
+    let (Some(budget), Some(per_row)) = (DSE_COST_HINT.with(|c| c.get()), super::DSE_INIT_TICKS_PER_ROW.with(|c| c.get())) else {
+        DSE_COST_STATS[2].fetch_add(1, Relaxed);
+        return false;
+    };
+    let skip = per_row * m as f64 > budget;
+    DSE_COST_LAST.with(|c| c.set((if skip { 1 } else { 2 }, per_row * m as f64, budget)));
+    if skip {
+        DSE_COST_STATS[0].fetch_add(1, Relaxed);
+        true
+    } else {
+        DSE_COST_STATS[1].fetch_add(1, Relaxed);
+        false
+    }
+}
+
+thread_local! {
+    /// 診断 `ENOMOTO_MIP_DSE_COST_LOG`: 直前の [`dse_cost_skip`] の判断 (1 省いた・2 作った、0 は判断なし)・作り直しの見積り・見込みの手間
+    static DSE_COST_LAST: std::cell::Cell<(u8, f64, f64)> = const { std::cell::Cell::new((0, 0.0, 0.0)) };
+}
+
+/// 診断 `ENOMOTO_MIP_DSE_COST_LOG=1` (解き方は変えない): 求解ごとに判断と反復の数を出すか。
+pub(crate) fn dse_cost_log_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_MIP_DSE_COST_LOG").is_some_and(|v| v != "0"))
+}
+
+/// 直前の [`dse_cost_skip`] の判断を取り出して消す。
+pub(crate) fn take_dse_cost_last() -> (u8, f64, f64) {
+    DSE_COST_LAST.with(|c| c.replace((0, 0.0, 0.0)))
+}
+
 /// 診断 `ENOMOTO_MIP_NODELP_DIAG` (analysis/node_lp_20261106.md、解き方は変えない) が有効か。
 /// 診断 `ENOMOTO_DEBUG_EXT_ITERLOG` (analysis/lpwarm_20261118、解き方は変えない) が有効か。
 fn iterlog_on() -> bool {
@@ -1440,7 +1499,85 @@ pub(crate) fn xprof_enable(on: bool) {
     if on {
         XPROF_ANY.store(true, std::sync::atomic::Ordering::Relaxed);
     }
-    XPROF.with(|x| *x.borrow_mut() = if on { Some((std::time::Instant::now(), Vec::new())) } else { None });
+    // 有効にするとき、すでに有効なら貯めた値を残す (このスレッドで新しい LP を作るたび (サブ MIP・再スタート) に 0 に戻していた。
+    // analysis/proofprop_20261123)
+    XPROF.with(|x| {
+        let mut x = x.borrow_mut();
+        if !on {
+            *x = None;
+        } else if x.is_none() {
+            *x = Some((std::time::Instant::now(), Vec::new()));
+        }
+    });
+}
+
+thread_local! {
+    /// 試作 `ENOMOTO_MIP_LPPROBE_FIX` の `d` (analysis/lpprobe_20261126): 前処理の LP プロービングの子の LP の間 (このスレッドで
+    /// [`lpprobe_dse_scope`] で立てた間) だけ、厳密な DSE 重みを (行列の場所, 行の数, 基底) ごとに覚えて使い回す
+    static LPP_DSE_ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static LPP_DSE: std::cell::RefCell<Option<(usize, usize, Vec<usize>, Vec<f64>, bool, [u64; crate::ticks::NK])>> = const { std::cell::RefCell::new(None) };
+    /// 診断: [使い回した回数, 作った回数, 検査で値が違った回数]
+    static LPP_DSE_STATS: std::cell::Cell<[u64; 3]> = const { std::cell::Cell::new([0; 3]) };
+}
+
+/// 試作 `ENOMOTO_MIP_LPPROBE_FIX` の `d`: このスレッドで厳密な DSE 重みの使い回しを始める (`true`)・やめる (`false`)。どちらでも覚えた重みは消す
+pub(crate) fn lpprobe_dse_scope(on: bool) {
+    LPP_DSE_ON.with(|c| c.set(on));
+    LPP_DSE.with(|c| *c.borrow_mut() = None);
+}
+
+/// 試作 `ENOMOTO_MIP_LPPROBE_FIX` の `d` の診断: このスレッドの [使い回した回数, 作った回数, 検査で値が違った回数] を取り出して 0 に戻す
+pub(crate) fn lpprobe_dse_stats_take() -> [u64; 3] {
+    LPP_DSE_STATS.with(|c| c.replace([0; 3]))
+}
+
+/// 厳密な DSE 重み ([`super::DseState::from_basis`]) を作る。`ENOMOTO_MIP_LPPROBE_FIX` の `d` の間 ([`lpprobe_dse_scope`]) は、
+/// 同じ行列 (`std` の場所・行の数) の同じ基底を一から分解した直後 (`lu_fresh`、前の分解を使わない [`refactorize`]) なら、前に作った重みを
+/// そのまま返す。一から分解した LU は基底だけで決まるので、重みは作り直した値とビット単位で同じ (前処理の LP プロービングの子の LP は
+/// どれも同じ基底から始まり、LU の更新が 64 回を超えているので毎回一から分解し、m 回の BTRAN で重みを作り直していた。
+/// cvs16r128-89 では子の LP 1 本に約 0.12 秒)。期限で途中まで作った重み (残りは単位重み) は覚えない。
+/// 検査 `ENOMOTO_MIP_LPPROBE_DIAG=dsecheck`: 使い回すときも作り直して値を比べ、違えば数える (返すのは作り直した値)
+fn lpp_dse_exact(std: &StdForm, basis: &[usize], m: usize, lu: &sparse_lu::FtLu, lu_fresh: bool) -> super::DseState {
+    let _ = lu_fresh;
+    if !LPP_DSE_ON.with(|c| c.get()) || lu.update_count() != 0 {
+        return super::DseState::from_basis(m, lu);
+    }
+    let key = (std as *const StdForm as usize, m);
+    let hit = LPP_DSE.with(|c| c.borrow().as_ref().filter(|e| e.0 == key.0 && e.1 == key.1 && e.2 == basis).map(|e| (e.3.clone(), e.4, e.5)));
+    let check = env_str!("ENOMOTO_MIP_LPPROBE_DIAG") == Some("dsecheck");
+    let bump = |k: usize| {
+        LPP_DSE_STATS.with(|c| {
+            let mut v = c.get();
+            v[k] += 1;
+            c.set(v);
+        })
+    };
+    if let Some((w, par, tk)) = hit {
+        bump(0);
+        // 決定的な手間の時計 ([`crate::ticks`]) は作り直したときと同じだけ進める (4 スレッドでは手間の時計で道筋が決まる所がある。
+        // 足さないと noswot の 4 スレッドで道筋が変わった)
+        if !check {
+            crate::ticks::add_raw(&tk);
+        }
+        if check {
+            let fresh = super::DseState::from_basis(m, lu);
+            if fresh.w.iter().zip(&w).any(|(a, b)| a.to_bits() != b.to_bits()) {
+                bump(2);
+            }
+            return fresh;
+        }
+        return super::DseState { w, use_parallel: par };
+    }
+    let past = super::dse_past_deadline_fn();
+    let tk0 = crate::ticks::raw();
+    let r = super::DseState::from_basis(m, lu);
+    let tk1 = crate::ticks::raw();
+    let tk: [u64; crate::ticks::NK] = std::array::from_fn(|k| tk1[k].wrapping_sub(tk0[k]));
+    bump(1);
+    if !past() {
+        LPP_DSE.with(|c| *c.borrow_mut() = Some((key.0, key.1, basis.to_vec(), r.w.clone(), r.use_parallel, tk)));
+    }
+    r
 }
 
 /// 診断用: 前回の印からここまでの時間を区間 `label` に足す。
@@ -1477,6 +1614,30 @@ pub(crate) fn xcount(label: &'static str) {
 }
 
 /// 診断用: 累計を取り出す。
+/// 診断用 (analysis/proofprop_20261123): 木を分け合う従のスレッドの区間計時を終わりに足し合わせる置き場
+static XPROF_WORKERS: std::sync::Mutex<Vec<(&'static str, u128)>> = std::sync::Mutex::new(Vec::new());
+
+/// 診断用: このスレッドの区間計時を従のスレッドの置き場に足す (従のスレッドの終わりに呼ぶ)
+pub(crate) fn xprof_flush_workers() {
+    if !XPROF_ANY.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let mine = xprof_take();
+    if let Ok(mut g) = XPROF_WORKERS.lock() {
+        for (l, ns) in mine {
+            match g.iter_mut().find(|(k, _)| *k == l) {
+                Some(e) => e.1 += ns,
+                None => g.push((l, ns)),
+            }
+        }
+    }
+}
+
+/// 診断用: 従のスレッドの置き場を取り出して空にする
+pub(crate) fn xprof_workers_take() -> Vec<(&'static str, u128)> {
+    XPROF_WORKERS.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default()
+}
+
 pub(crate) fn xprof_take() -> Vec<(&'static str, u128)> {
     XPROF.with(|x| x.borrow().as_ref().map(|(_, a)| a.clone()).unwrap_or_default())
 }
@@ -4054,8 +4215,27 @@ impl PartialOrd for Cand {
 }
 impl Ord for Cand {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.ratio.total_cmp(&other.ratio).then_with(|| self.j.cmp(&other.j))
+        self.ratio.total_cmp(&other.ratio).then_with(|| stable_tie_key(self.j).cmp(&stable_tie_key(other.j)))
     }
+}
+
+/// 比の同点を決める列の鍵。既定は列の番号。試作 `ENOMOTO_SIMPLEX_STABLE_TIE=h` では列の番号を混ぜた値 (splitmix64、分解の並びに依らず、
+/// 番号の大小にも偏らない): 同点をいつも小さい番号で決めると (Bland の規則に近い)、退化した LP で同じ列の組を回り続ける
+/// (neos-827175 の根のカットの LP が 238 → 12018 反復)
+#[inline(always)]
+fn stable_tie_key(j: usize) -> u64 {
+    if !stable_tie_hash() {
+        return j as u64;
+    }
+    let mut z = (j as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+fn stable_tie_hash() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_SIMPLEX_STABLE_TIE").is_some_and(|v| v.contains('h')))
 }
 
 /// 離基行候補 `row` についての試行 BTRAN + PRICE +(BFRT なしの)比率テスト。基底や非基底状態は
@@ -4244,10 +4424,10 @@ fn solve_slope_intercept_dual_retrying(std: &StdForm, opts: &crate::types::LpOpt
     if res.is_some() || !(singular || uncertified) {
         return res;
     }
-    // `ENOMOTO_MIP_OVERRUN3` の `l` (試作、analysis/mittelmann_ready_20261103/overrun.md): 1 回目の後で期限 (`ExtControl` の時刻の上限、
+    // `ENOMOTO_MIP_OVERRUN3` の `l` (既定、2026-11-22 から。analysis/mittelmann_ready_20261103/overrun.md・analysis/shelved_20261122): 1 回目の後で期限 (`ExtControl` の時刻の上限、
     // スレッドの期限) を過ぎているか止めの合図が立っていれば解き直さない (結論なしで返す。呼び出し側は期限で止まったのと同じに扱う)。
     // sorrell3 の根の LP は期限の後にこの解き直しを始め、最初の LU 分解 (`warm_start_basis`) に数秒かかっていた
-    if env_str!("ENOMOTO_MIP_OVERRUN3").is_some_and(|v| v.contains('l')) {
+    if env_def!("ENOMOTO_MIP_OVERRUN3", "ild").is_some_and(|v| v.contains('l')) {
         let past = EXT_CTRL.with(|x| x.get()).and_then(|c| c.deadline).is_some_and(|d| std::time::Instant::now() >= d)
             || crate::cancel::deadline_passed()
             || crate::cancel::halted();
@@ -4633,9 +4813,14 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     // 現基底の LU 分解(Forrest-Tomlin 更新付き)。
     xprof("setup1");
     let lu_checked = WARM_LU_CHECKED.with(|c| c.replace(false)) && env_str!("ENOMOTO_SIMPLEX_WARM_LU_RECHECK").is_none_or(|v| v == "0");
+    // `lu_fresh`: この求解の始めに基底を一から分解した (前の分解を使わない) か ([`lpp_dse_exact`] の使い回しの条件)
+    let mut lu_fresh = false;
     let mut lu = match WARM_LU.with(|w| w.borrow_mut().take()) {
         Some(l) if warm_started && (lu_checked || warm_lu_matches(std, &basis, &l)) => *l,
-        _ => refactorize(std, &basis_pos, None)?,
+        _ => {
+            lu_fresh = true;
+            refactorize(std, &basis_pos, None)?
+        }
     };
     xprof("setup_lu");
 
@@ -5053,14 +5238,15 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 eprintln!("DEBUG_EXT: DSE weights: exact for the whole basis");
             }
             dse_kind = 2;
-            super::DseState::from_basis(m, &lu)
+            lpp_dse_exact(std, &basis, m, &lu, lu_fresh)
         }
         // 試作 `ENOMOTO_MIP_DSE_INIT` の `u` ([`dse_init_has`]、既定では使わない): warm start で重みが渡らなかったときも、基底に構造列が
         // あれば厳密な重みから始める (HiGHS の `HEkkDual::solve`: 全スラックでない基底では `computeDualSteepestEdgeWeights`)。
         // 重みの計算は超疎の単位 BTRAN ([`super::DseState::from_basis`]、`ENOMOTO_DSE_EXACT_SPARSE`)
-        _ if warm_started && dse_init_has('u') && basis.iter().any(|&j| j < n_orig) => {
+        // 試作 `ENOMOTO_MIP_DSE_COST` ([`dse_cost_skip`]): 作り直しの手間がこの求解の見込みの手間を超えるなら作らない (単位重み)
+        _ if warm_started && dse_init_has('u') && basis.iter().any(|&j| j < n_orig) && !dse_cost_skip(m) => {
             dse_kind = 2;
-            super::DseState::from_basis(m, &lu)
+            lpp_dse_exact(std, &basis, m, &lu, lu_fresh)
         }
         w => {
             if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
@@ -5217,7 +5403,10 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     let mut harris2_skip: Vec<usize> = Vec::new();
     // 試作 `ENOMOTO_SIMPLEX_BFRT_GROUP` (既定では使わない、analysis/lpwarm_20261118): BFRT を Harris の組ごとに進める (主ループの比のテスト)
     let bfrt_group_on = bfrt_group_mode('g');
-    let zero_pick_alpha = bfrt_group_mode('z');
+    // `ENOMOTO_SIMPLEX_RETRY_ZMAX` (2026-11-27 から既定、`=0`・`off` で使わない。analysis/lpgap_20261126/README.md 8 節): 破綻の後の解き直し (`safe_pivot`) では、
+    // `Zero` 列も |alpha| 最大で選ぶ (`z` と同じ)。解き直しは極小の軸を避けるための回なのに、`Zero` 列だけは最小添字で |alpha| = 1e-9 の列を
+    // 入れ続け、特異な基底の巻き戻しを繰り返して「50 回続けて捨てた」で終わり、LP 全体が `NotSolved` になっていた (supportcase42 の LP 緩和)
+    let zero_pick_alpha = bfrt_group_mode('z') || (safe_pivot && env_def!("ENOMOTO_SIMPLEX_RETRY_ZMAX", "1").is_some_and(|v| v != "0" && v != "off"));
     let bg_td = tunable!("ENOMOTO_T_SIMPLEX_BG_TD", 1e-9, f64);
     let mut group_buf: Vec<Cand> = Vec::new();
     let mut group_rest: Vec<Cand> = Vec::new();
@@ -6944,6 +7133,10 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
         // 比が平坦な窓の中で |ピボット| 最大の候補を探してそれでピボットする。それより前の
         // 候補はフリップする(パス 1 が `k_star` までのフリップで `w_r` を超えないことを
         // 示しているので、より短い接頭辞も超えない)。`best_idx`: 実際にピボットする候補の位置。
+        if env_str!("ENOMOTO_DEBUG_TIE_CANDS").is_some() && iterlog_on() {
+            let v: Vec<String> = sorted.iter().take(k_star + 3).map(|c| format!("{}:{:.17e}:{:.17e}", c.j, c.ratio, c.hat_alpha)).collect();
+            eprintln!("TIECANDS it={iter_idx} k_star={k_star} n={n_candidates} w_r={:.17e} {}", w_r.base, v.join(" "));
+        }
         let mut best_idx = k_star;
         timed!(profile_phases, prof_phases::BFRT, {
             let min_ratio = sorted[k_star].ratio - tunable!("ENOMOTO_T_HARRIS_RATIO_TOL", HARRIS_RATIO_TOL, f64);
@@ -6952,12 +7145,27 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
                 window_start -= 1;
             }
             let mut best_abs = sorted[k_star].hat_alpha.abs();
+            if stable_tie_on() {
+                // 試作 `ENOMOTO_SIMPLEX_STABLE_TIE`: |alpha| も相対 [`LEX_REL_TOL`] で比べ、同点 (丸めだけの違い) は窓の中の並び
+                // (`(ratio, j)` の昇順) の先頭を選ぶ (既定は窓の最後 `k_star` から始めて真に大きいものだけ選ぶので、
+                // 1 と 1 + 2e-15 のような丸めの差で入る列が変わる)
+                best_idx = window_start;
+                best_abs = sorted[window_start].hat_alpha.abs();
+                for (idx, cand) in sorted.iter().enumerate().take(k_star + 1).skip(window_start + 1) {
+                    let abs_a = cand.hat_alpha.abs();
+                    if abs_a > best_abs * (1.0 + LEX_REL_TOL) {
+                        best_abs = abs_a;
+                        best_idx = idx;
+                    }
+                }
+            } else {
             for (idx, cand) in sorted.iter().enumerate().take(k_star + 1).skip(window_start) {
                 let abs_a = cand.hat_alpha.abs();
                 if abs_a > best_abs {
                     best_abs = abs_a;
                     best_idx = idx;
                 }
+            }
             }
             // 試作 `ENOMOTO_SIMPLEX_HARRIS_WIDE=1` (既定では使わない。analysis/rootlp_simplex_fail_20261105.md): 窓の中の最大の
             // |alpha| が `ENOMOTO_T_SIMPLEX_HW_SMALL` (既定 1e-6) 未満なら、比が `ENOMOTO_T_SIMPLEX_HW_TOL` (既定 1e-5) 以内の
@@ -8521,6 +8729,8 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
     // 可能になるようにする (cont1 分析の策5 前半)。`ENOMOTO_POLISH_PERTURB_SLACK=1` で旧動作
     // (`super::perturb_costs` をそのまま使い、スラック列も摂動する。A/B 用)。
     let active_cost = if tunable!("ENOMOTO_POLISH_PERTURB_SLACK", 0u8, u8) != 0 { super::perturb_costs(std) } else { dual_active_costs(std) };
+    // 区間計時 (`ENOMOTO_MIP_XPROF`、analysis/lpiter_20261123): 仕上げの段の費用の用意
+    xprof("pol_cost");
 
     let mut lu = lu;
     // 入る列の FTRAN・ピボット行の BTRAN・FT 更新・再分解トリガ (主単体法と共有する部品)。
@@ -8552,6 +8762,8 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
             d[j] = dj;
         }
     }
+    // 区間計時: 作業領域の確保と被約費用 `d` の計算し直し
+    xprof("pol_d");
     if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
         // 開始時の (この段の費用での) 双対実行不能列数。固定列は除く。
         let n_bad = (0..n_total)
@@ -8607,6 +8819,8 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
     // 主実行不能な基底行の集合(超疎 chuzr 用)。
     let mut infeasible_rows = InfeasibleRows::new(m);
     infeasible_rows.rebuild(m, |i| row_infeasible_plain(std, basis, &x_b, &noise_feasible, i, tol_floor));
+    // 区間計時: 作業領域の確保と `x_B` の解き直し・主実行不能な行の集合 (この後のループと終わりは `polish` に入る)
+    xprof("pol_xb");
     if env_str!("ENOMOTO_DEBUG_EXT_ITERS").is_some() {
         // 診断: 仕上げの始めの主実行不能 (真の境界、許容 `tol_floor`) の行の数・最大・和
         let (mut mx, mut sum) = (0.0f64, 0.0f64);
@@ -9072,7 +9286,7 @@ pub(super) fn polish_with_true_bounds(std: &StdForm, basis: &mut [usize], basis_
                 continue;
             }
             let hat_c = (sigma * d[j]).max(0.0);
-            candidates.push(Cand { j, hat_alpha, ratio: hat_c / hat_alpha.abs() });
+            candidates.push(Cand { j, hat_alpha, ratio: stable_tie_snap(hat_c / hat_alpha.abs()) });
         }
         if let Some(zc) = zero_pick {
             candidates.clear();
@@ -9374,7 +9588,36 @@ fn chuzc1_filter_one(j: usize, alpha_j: f64, status: Option<NbStatus>, d_j: f64,
     let hat_alpha = sigma * alpha_j;
     let hat_c = (sigma * d_j).max(0.0) * c_mask;
     let keep = is_nb & !(alpha_j.abs() <= TOL) & !(d_dir_f * hat_alpha >= 0.0);
-    (Cand { j, hat_alpha, ratio: hat_c / hat_alpha.abs() }, keep)
+    (Cand { j, hat_alpha, ratio: stable_tie_snap(hat_c / hat_alpha.abs()) }, keep)
+}
+
+/// 試作 `ENOMOTO_SIMPLEX_STABLE_TIE` (既定では使わない、analysis/luxroot_20261124): 比率テストの同点の決め方を分解の違いに依らなくする。
+/// 比を相対 [`LEX_REL_TOL`] の格子に丸めて (仮数の上位 `ceil(-log2 LEX_REL_TOL)` ビットを残す最近接の丸め)、[`HARRIS_RATIO_TOL`] 未満の
+/// 比は 0 にそろえて、丸めの誤差だけ違う比を同じ値にし、同点は `(ratio, j)` の順の `j` (列の番号) で決める。延ばした分解と一からの分解では FTRAN・BTRAN の丸めが違い、
+/// 数学的に同じ比 (退化した集合分割で多い) の大小が入れ替わって入る列が変わる (nw04 の根のカットの最初の LP の 1 反復目)
+pub(crate) fn stable_tie_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_SIMPLEX_STABLE_TIE").is_some_and(|v| v != "0"))
+}
+
+/// [`stable_tie_on`] のときだけ `v` を相対 [`LEX_REL_TOL`] の格子に丸める (それ以外は `v` のまま)。
+#[inline(always)]
+fn stable_tie_snap(v: f64) -> f64 {
+    if !stable_tie_on() || !v.is_finite() || v == 0.0 {
+        return v;
+    }
+    // 退化した候補の比 (被約費用が丸めの雑音、nw04 で 1e-12〜1e-11) は分解ごとに違う雑音なので、Harris のパス 2 の窓
+    // ([`HARRIS_RATIO_TOL`]、比をこの幅で同じとみなす) より小さい比は 0 にそろえ、同点を列の番号で決める
+    if v.abs() < HARRIS_RATIO_TOL {
+        return 0.0;
+    }
+    static DROP: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    let drop = *DROP.get_or_init(|| 52 - ((-LEX_REL_TOL.log2()).ceil() as u32).min(52));
+    if drop == 0 {
+        return v;
+    }
+    let b = v.to_bits();
+    f64::from_bits((b + (1u64 << (drop - 1))) & !((1u64 << drop) - 1))
 }
 
 /// 列数の多い問題用 (`prefetch_on`): `dist` 列先の `a_p`・`d`・`nb_status` を先読みしながら行う

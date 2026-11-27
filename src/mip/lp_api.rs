@@ -52,6 +52,16 @@ pub trait MipLp: Clone + Send {
     fn solve_rescue(&mut self, _lim: &SolveLimits) -> LpStatus {
         LpStatus::Error
     }
+    /// 試作 `ENOMOTO_MIP_ROOTLP_PRESOLVE`: 元の空間の点 `xo` (LP の経路で解いた最適解) から基底を作って解き直す
+    /// ([`TwoStageLp::solve_from_point`])。対応しない実装は `None`。
+    fn solve_from_point(&mut self, _xo: &[f64], _lim: &SolveLimits) -> Option<LpStatus> {
+        None
+    }
+    /// 試作 `ENOMOTO_MIP_ROOTLP_PRESOLVE=d`: 元の空間の最適解と元の行の双対からクロスオーバーで最適基底を作って採る
+    /// ([`TwoStageLp::solve_from_primal_dual`])。対応しない実装は `None`。
+    fn solve_from_primal_dual(&mut self, _xo: &[f64], _pi: &[f64], _lim: &SolveLimits) -> Option<LpStatus> {
+        None
+    }
     /// 根の LP の安全網: 尺度を調整した写しを基底なしで解いて元の LP を解き直す ([`TwoStageLp::solve_scaled_rescue`])。
     /// 試さない (係数の幅が狭い・対応しない実装) なら `None`。
     fn solve_scaled_rescue(&mut self, _lim: &SolveLimits) -> Option<LpStatus> {
@@ -163,6 +173,8 @@ pub trait MipLp: Clone + Send {
     fn adopt_lu_snapshot(&mut self, _s: &LuSnapshot) -> bool {
         false
     }
+    /// 試作 `ENOMOTO_MIP_LU_EXTEND`: 木の探索に入ったことを知らせる ([`TwoStageLp::set_lu_extend_tree`])。対応しない実装は何もしない。
+    fn set_lu_extend_tree(&mut self, _on: bool) {}
 }
 
 macro_rules! forward_impl {
@@ -233,6 +245,12 @@ forward_impl!(
     fn solve_scaled_rescue(&mut self, lim: &SolveLimits) -> Option<LpStatus> {
         TwoStageLp::solve_scaled_rescue(self, lim)
     },
+    fn solve_from_point(&mut self, xo: &[f64], lim: &SolveLimits) -> Option<LpStatus> {
+        TwoStageLp::solve_from_point(self, xo, lim)
+    },
+    fn solve_from_primal_dual(&mut self, xo: &[f64], pi: &[f64], lim: &SolveLimits) -> Option<LpStatus> {
+        TwoStageLp::solve_from_primal_dual(self, xo, pi, lim)
+    },
     fn request_scale_once(&mut self) {
         TwoStageLp::request_scale_once(self)
     },
@@ -302,6 +320,9 @@ forward_impl!(
     },
     fn adopt_lu_snapshot(&mut self, s: &LuSnapshot) -> bool {
         TwoStageLp::adopt_lu_snapshot(self, s)
+    },
+    fn set_lu_extend_tree(&mut self, on: bool) {
+        TwoStageLp::set_lu_extend_tree(self, on)
     },
     fn delete_and_add_rows(&mut self, remove: &[bool], rows: &[(Vec<(usize, f64)>, f64, f64)]) {
         TwoStageLp::delete_and_add_rows(self, remove, rows)

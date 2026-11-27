@@ -1029,11 +1029,11 @@ fn solve_box_lp_scaled(a: &FaerCsr, b: &[f64], c: &[f64], l: &[f64], u: &[f64], 
         let t_f = std::time::Instant::now();
         let fac_ok = kkt.factor(&top, delta, &mut mid);
         let last_tf = t_f.elapsed().as_secs_f64();
-        // 試作 `ENOMOTO_MIP_DET1T` の `i` ([`crate::ticks::ipm_work`]): 分解の演算数 (と行列の非零の数) を手間に数え、手間の期限で止める
+        // `ENOMOTO_MIP_DET1T` (既定 `onil`) の `i` ([`crate::ticks::ipm_work`]): 分解の演算数 (と行列の非零の数) を手間に数え、手間の期限で止める
         if crate::ticks::ipm_work() {
             let w = tunable!("ENOMOTO_T_IPM_TICKS_PER_FLOP", 0.03, f64);
-            crate::ticks::add(crate::ticks::HEUR, (w * kkt.factor_flops() + 4.0 * a.compute_nnz() as f64) as u64);
-            if crate::ticks::over() {
+            crate::ticks::ipm_add(w * kkt.factor_flops() + 4.0 * a.compute_nnz() as f64);
+            if crate::ticks::ipm_over() {
                 break;
             }
         }
