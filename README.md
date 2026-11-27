@@ -95,7 +95,7 @@ The two wheels must have the same version and tag; the second is built with `-C 
 
 ```python
 import math
-from enomoto_solver import Model, quicksum
+from enomoto_solver import Model
 
 M = Model()
 x = M.add_variable(float, 0, 10)          # continuous variable 0 <= x <= 10
@@ -112,6 +112,15 @@ print(x.value, y.value)             # 3.0 7.0
 - `M.add_variable(type, lower bound, upper bound, name=None)` creates a variable in the model `M`. The type is `float` (continuous) or `int` (integer). Bounds may be `±math.inf` (integer variables included). A free variable is `M.add_variable(float, -math.inf, math.inf)`. `Variable(...)` cannot be called directly (so that the model a variable belongs to is always explicit).
 - Creating variables one by one in a `for` loop is fast enough (about 2 microseconds per variable, about 2 s for a million).
 - Build sums of many terms with `quicksum(...)`. The built-in `sum(...)` copies the partial sum at every step, so its cost grows with the square of the number of terms (about 0.5 s for 10,000 terms, about 50 s for 100,000). `f += term` also adds in place and is fast.
+
+  ```python
+  from enomoto_solver import quicksum
+  xs = [M.add_variable(int, 0, 1) for _ in range(n)]
+  M.set_objective(quicksum(c[i] * xs[i] for i in range(n)), sense="maximize")
+  M.add_constraint(quicksum(w[i] * xs[i] for i in range(n)) <= cap)
+  ```
+
+  `quicksum` accepts any mix of variables, expressions and numbers. If it contains no expression, it returns the sum of the numbers (`0.0` if empty).
 - Linear expressions are written with `+`, `-`, scalar multiplication and division by numbers, and constraints with `<=`, `>=` and `==`. The objective and constraints are limited to linear expressions. Building an expression of degree two or higher, such as a product of variables (`x * y`), a power (`x ** 2`) or division by an expression (`1 / x`), raises a `TypeError` stating that it is not linear.
 - `set_objective(f, sense="minimize" | "maximize")` sets the objective function (the default is minimization).
 - Arguments of `solve()` (all optional):
