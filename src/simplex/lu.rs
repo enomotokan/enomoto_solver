@@ -3974,6 +3974,18 @@ fn reta_tick() -> bool {
     *V.get_or_init(|| env_str!("ENOMOTO_LU_RETA_TICK").is_some_and(|v| v != "0"))
 }
 
+/// `U` 段で値 `v` を起点にせず 0 にするか ([`tiny_in`] の `tin` が正で `|v| <= tin` なら 0 にして真)。
+/// `ENOMOTO_LU_TINY_HS` の `i` を、超疎の `U` 段だけでなく全走査・融合・部分の `U` 段にも同じく当て、経路によって値・tick が変わらないようにする
+#[inline(always)]
+fn u_drop(v: &mut f64, tin: f64) -> bool {
+    if tin > 0.0 && v.abs() <= tin {
+        *v = 0.0;
+        true
+    } else {
+        false
+    }
+}
+
 /// 書き出す点で使う切り捨ての閾値 ([`tiny_drop`] と [`tiny_hs`] の大きいほう)。
 #[inline]
 fn tiny_out() -> f64 {
@@ -5330,6 +5342,7 @@ impl FtLu {
     ///
     /// 超疎版は [`Self::u_solve_hyper`] (任意機能)。
     fn u_solve_into(&self, x: &mut [f64]) {
+        let tin = tiny_in();
         // CLOCK トリガ用: 全 eta の除算分として一律 `m`、非対角更新分は
         // `xp` がスキップされなかった eta についてだけ加える。
         self.add_tick_m(self.base.m as u64);
@@ -5358,6 +5371,9 @@ impl FtLu {
             if x[p] == 0.0 {
                 continue;
             }
+            if u_drop(&mut x[p], tin) {
+                continue;
+            }
             x[p] /= self.u_seq.pivot[eta.k];
             let xp = x[p];
             self.add_tick(self.u_seq.nnz(eta.k) as u64);
@@ -5379,6 +5395,7 @@ impl FtLu {
     /// 到達数が [`U_HYPER_ABORT_FRACTION`] `* m` を超えた場合、または `U` に密 eta が
     /// ある場合は `x` に触れずに `false` を返す (呼び出し側が全走査する)。
     fn u_solve_hyper(&self, x: &mut [f64], gp: &mut GpScratch) -> bool {
+        let tin = tiny_in();
         let m = self.base.m;
         if !self.u_seq.dense.is_empty() {
             return false;
@@ -5423,6 +5440,9 @@ impl FtLu {
         for &k in gp.u_pos.iter().rev() {
             let p = self.u_seq.key[k] as usize;
             if x[p] == 0.0 {
+                continue;
+            }
+            if u_drop(&mut x[p], tin) {
                 continue;
             }
             x[p] /= self.u_seq.pivot[k];
@@ -5507,6 +5527,9 @@ impl FtLu {
                     if x[p] == 0.0 {
                         continue;
                     }
+                    if u_drop(&mut x[p], tin) {
+                        continue;
+                    }
                     x[p] /= self.u_seq.pivot[kk];
                     let xp = x[p];
                     self.add_tick(self.u_seq.nnz(kk) as u64);
@@ -5569,6 +5592,9 @@ impl FtLu {
                     if x[p] == 0.0 {
                         continue;
                     }
+                    if u_drop(&mut x[p], tin) {
+                        continue;
+                    }
                     x[p] /= self.u_seq.pivot[kk];
                     let xp = x[p];
                     self.add_tick(self.u_seq.nnz(kk) as u64);
@@ -5591,6 +5617,7 @@ impl FtLu {
     /// 閉包の辺数が [`U_HYPER_ABORT_FRACTION`] `* m` を超える、または `U` に密 eta がある場合は
     /// `x` に触れずに `false` を返す。CLOCK tick は集めた寄与の数だけ加える (全体の `U` 段とは違う)。
     fn u_solve_partial(&self, x: &mut [f64], alpha_x: &[f64], a_list: &[usize], gp: &mut GpScratch, tmp: &mut Vec<(usize, usize, f64)>, work_out: &mut u64) -> bool {
+        let tin = tiny_in();
         let m = self.base.m;
         *work_out = 0;
         if !self.u_seq.dense.is_empty() {
@@ -5653,7 +5680,7 @@ impl FtLu {
                 let q = self.u_seq.key[k] as usize;
                 u_list.push(q);
                 let mut xq = x[q];
-                if xq == 0.0 {
+                if xq == 0.0 || u_drop(&mut x[q], tin) {
                     continue;
                 }
                 xq /= self.u_seq.pivot[k];
@@ -5690,7 +5717,7 @@ impl FtLu {
                     continue;
                 }
                 let mut xq = x[q];
-                if xq == 0.0 {
+                if xq == 0.0 || u_drop(&mut x[q], tin) {
                     continue;
                 }
                 xq /= self.u_seq.pivot[k];
@@ -5727,7 +5754,7 @@ impl FtLu {
                 }
             }
             let k = slot_pos[p];
-            if k != usize::MAX && xp != 0.0 {
+            if k != usize::MAX && xp != 0.0 && !u_drop(&mut xp, tin) {
                 xp /= self.u_seq.pivot[k];
             }
             x[p] = xp;
@@ -6035,6 +6062,7 @@ impl FtLu {
         hyper_a: Option<&mut GpScratch>,
         hyper_b: Option<&mut GpScratch>,
     ) -> (usize, usize, usize) {
+        let tin = tiny_in();
         let m = self.base.m as u64;
         self.reta_tick_ftran(3);
         for reta in self.r_etas.iter() {
@@ -6076,19 +6104,19 @@ impl FtLu {
         let b_in_scan = b_list.is_none();
         for eta in self.u_seq.iter().rev() {
             let p = eta.slot;
-            if a_in_scan && scratch_a[p] != 0.0 {
+            if a_in_scan && scratch_a[p] != 0.0 && !u_drop(&mut scratch_a[p], tin) {
                 scratch_a[p] /= self.u_seq.pivot[eta.k];
                 let xp = scratch_a[p];
                 self.add_tick(self.u_seq.nnz(eta.k) as u64);
                 self.u_seq.axpy(eta.k, -xp, scratch_a);
             }
-            if b_in_scan && scratch_b[p] != 0.0 {
+            if b_in_scan && scratch_b[p] != 0.0 && !u_drop(&mut scratch_b[p], tin) {
                 scratch_b[p] /= self.u_seq.pivot[eta.k];
                 let xp = scratch_b[p];
                 self.add_tick(self.u_seq.nnz(eta.k) as u64);
                 self.u_seq.axpy(eta.k, -xp, scratch_b);
             }
-            if scratch_c[p] != 0.0 {
+            if scratch_c[p] != 0.0 && !u_drop(&mut scratch_c[p], tin) {
                 scratch_c[p] /= self.u_seq.pivot[eta.k];
                 let xp = scratch_c[p];
                 self.add_tick(self.u_seq.nnz(eta.k) as u64);
@@ -6121,6 +6149,7 @@ impl FtLu {
         hyper_a: Option<&mut GpScratch>,
         hyper_b: Option<&mut GpScratch>,
     ) -> (usize, usize) {
+        let tin = tiny_in();
         let m = self.base.m as u64;
         self.reta_tick_ftran(2);
         for reta in self.r_etas.iter() {
@@ -6158,13 +6187,13 @@ impl FtLu {
         let b_in_scan = b_list.is_none();
         for eta in self.u_seq.iter().rev() {
             let p = eta.slot;
-            if a_in_scan && scratch_a[p] != 0.0 {
+            if a_in_scan && scratch_a[p] != 0.0 && !u_drop(&mut scratch_a[p], tin) {
                 scratch_a[p] /= self.u_seq.pivot[eta.k];
                 let xp = scratch_a[p];
                 self.add_tick(self.u_seq.nnz(eta.k) as u64);
                 self.u_seq.axpy(eta.k, -xp, scratch_a);
             }
-            if b_in_scan && scratch_b[p] != 0.0 {
+            if b_in_scan && scratch_b[p] != 0.0 && !u_drop(&mut scratch_b[p], tin) {
                 scratch_b[p] /= self.u_seq.pivot[eta.k];
                 let xp = scratch_b[p];
                 self.add_tick(self.u_seq.nnz(eta.k) as u64);
@@ -6605,6 +6634,7 @@ impl FtLu {
         mut gp_b: Option<&mut GpScratch>,
         mut track: Option<&mut FtranTrack>,
     ) -> (usize, usize, usize, bool) {
+        let tin = tiny_in();
         let m = self.base.m as u64;
         clear_r_seeds(&mut gp_a, &mut gp_b);
         self.reta_tick_ftran(3);
@@ -6629,19 +6659,19 @@ impl FtLu {
         let (a_scan, b_scan) = (a_u == UHyper::NotTried, b_u == UHyper::NotTried);
         for eta in self.u_seq.iter().rev() {
             let p = eta.slot;
-            if a_scan && scratch_a[p] != 0.0 {
+            if a_scan && scratch_a[p] != 0.0 && !u_drop(&mut scratch_a[p], tin) {
                 scratch_a[p] /= self.u_seq.pivot[eta.k];
                 let xp = scratch_a[p];
                 self.add_tick(self.u_seq.nnz(eta.k) as u64);
                 self.u_seq.axpy(eta.k, -xp, scratch_a);
             }
-            if b_scan && scratch_b[p] != 0.0 {
+            if b_scan && scratch_b[p] != 0.0 && !u_drop(&mut scratch_b[p], tin) {
                 scratch_b[p] /= self.u_seq.pivot[eta.k];
                 let xp = scratch_b[p];
                 self.add_tick(self.u_seq.nnz(eta.k) as u64);
                 self.u_seq.axpy(eta.k, -xp, scratch_b);
             }
-            if scratch_c[p] != 0.0 {
+            if scratch_c[p] != 0.0 && !u_drop(&mut scratch_c[p], tin) {
                 scratch_c[p] /= self.u_seq.pivot[eta.k];
                 let xp = scratch_c[p];
                 self.add_tick(self.u_seq.nnz(eta.k) as u64);
@@ -6679,6 +6709,7 @@ impl FtLu {
         mut gp_b: Option<&mut GpScratch>,
         mut track: Option<&mut FtranTrack>,
     ) -> (usize, usize, bool) {
+        let tin = tiny_in();
         let m = self.base.m as u64;
         if let (true, Some(ga), Some(gb)) = (self.r_sparse_ready(), gp_a.as_deref_mut(), gp_b.as_deref_mut()) {
             // 両ベクトルとも `L` 段が Gilbert-Peierls (非ゼロ位置が分かっている): 追加策 R の疎な `R` 段。
@@ -6730,13 +6761,13 @@ impl FtLu {
         if a_scan || b_scan {
             for eta in self.u_seq.iter().rev() {
                 let p = eta.slot;
-                if a_scan && scratch_a[p] != 0.0 {
+                if a_scan && scratch_a[p] != 0.0 && !u_drop(&mut scratch_a[p], tin) {
                     scratch_a[p] /= self.u_seq.pivot[eta.k];
                     let xp = scratch_a[p];
                     self.add_tick(self.u_seq.nnz(eta.k) as u64);
                     self.u_seq.axpy(eta.k, -xp, scratch_a);
                 }
-                if b_scan && scratch_b[p] != 0.0 {
+                if b_scan && scratch_b[p] != 0.0 && !u_drop(&mut scratch_b[p], tin) {
                     scratch_b[p] /= self.u_seq.pivot[eta.k];
                     let xp = scratch_b[p];
                     let nz = self.u_seq.nnz(eta.k);
