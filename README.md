@@ -131,7 +131,8 @@ print(x.value, y.value)             # 3.0 7.0
   | `threads` | Number of threads to use (default: half of the available CPUs rounded up, as in HiGHS; see `enomoto_solver.default_threads()`). With 2 or more, an LP is solved at the same time by the two-phase method and the interior-point method + crossover, and for integer programs the tree search is also shared. For details, see "Number of threads (`threads`)" below. |
   | `lp_solver` | The LP method (default `"auto"`; see "Choosing the LP method" below). The former name `root_solver` is still accepted but deprecated (`DeprecationWarning`). |
   | `distinguish_infeasible_unbounded` | Whether to distinguish infeasible from unbounded when there is no finite optimal value (default `False`; see "Result status, and infeasible or unbounded problems" below). |
-  | `time_limit`, `mip_rel_gap`, `node_limit` | Termination criteria for integer programs (seconds, relative gap (default 0), number of nodes). |
+  | `time_limit` | Time limit in seconds. The default `None` means no limit: the solver runs until it finishes. It applies to both LP and integer programs; when the limit is hit the status is `"time_limit"` (for integer programs, values can be read if there is an incumbent). |
+  | `mip_rel_gap`, `node_limit` | Stopping criteria for integer programs (relative gap, default 0; number of nodes, default unlimited). |
   | `log` | Whether to output the log (default `True`; see "Log" below). |
   | `seed` | Random seed for integer programs (an integer in [0, 2**64); default `None`). See "Random seed (`seed`)" below. |
 

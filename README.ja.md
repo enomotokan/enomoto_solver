@@ -131,7 +131,8 @@ print(x.value, y.value)             # 3.0 7.0
   | `threads` | 使うスレッドの数(既定は，使える CPU の数 + 1 の半分．HiGHS と同じ．`enomoto_solver.default_threads()`)．2 以上なら LP を二段解法と内点法 + クロスオーバーで同時に解き，整数最適化では木の探索も分け合います．詳しくはすぐ下の「スレッド数(`threads`)」． |
   | `lp_solver` | LP の解法(既定 `"auto"`．下の「LP の解法の選択」)．以前の名前 `root_solver` も受け付けますが，非推奨です(`DeprecationWarning` を出します)． |
   | `distinguish_infeasible_unbounded` | 有限な最適値がないとき，実行不可能か非有界かを区別するか(既定 `False`．下の「結果の状態と，実行不可能・非有界な問題」)． |
-  | `time_limit`，`mip_rel_gap`，`node_limit` | 整数最適化の打ち切り条件(秒，相対ギャップ(既定 0)，ノード数)． |
+  | `time_limit` | 制限時間(秒)．既定の `None` は無制限で，解き終わるまで止まりません．LP にも整数最適化にも効き，期限で止まると status は `"time_limit"` です(整数最適化では暫定解があれば値を読めます)． |
+  | `mip_rel_gap`，`node_limit` | 整数最適化の打ち切り条件(相対ギャップ(既定 0)，ノード数(既定 無制限))． |
   | `log` | ログを出すか(既定 `True`．下の「ログ」)． |
   | `seed` | 整数最適化の乱数の種(0 以上 2**64 未満の整数．既定 `None`)．下の「乱数の種(`seed`)」． |
 
