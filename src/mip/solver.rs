@@ -16670,8 +16670,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             eprintln!("MIP:   no-incumbent heuristic arm {arm}: close {close:.3} found {found} ({secs:.2}s, node {}, frac {time_frac:.2}, stall {})", self.nodes, self.noinc_stall);
                         }
                     }
-                    // 試作 `ENOMOTO_MIP_T1PRIMAL` ([`super::t1primal`]): 貯えがたまっていれば FJ + Local-MIP の補助のスレッドを回す
-                    if self.t1p.is_some() && heur_ok && node.depth > 0 && plunge_depth == 0 {
+                    // 試作 `ENOMOTO_MIP_T1PRIMAL` ([`super::t1primal`]): 貯えがたまっていれば FJ + Local-MIP の補助のスレッドを回す。
+                    // 貯えを見るだけなら安いので、潜りの途中のノードでも見る (潜りの頭だけだと、長く潜る 30n20b8 では 40 秒以上
+                    // 呼ばれない。analysis/t1primal_20261126 8 節)
+                    if self.t1p.is_some() && heur_ok && node.depth > 0 {
                         self.t1primal_tick(false);
                     }
                     xp("m_heur");
