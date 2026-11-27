@@ -146,3 +146,67 @@ uccase12 の `rti` の内訳は合計 69.0 µs/反復 で HiGHS の 1.16 倍 (FT
   根の LP (3 節) の −20〜45% は、根までの時間 (最初の解 13.6 → 12.5 秒 (`t1i`・`rti`)) に少し出るだけ。
 - 結論: 試作は大きな LP の根 (uccase12 型、更新が数千回続く) でだけ効き、P の LP や 4 問のノードの LP では 1 反復を変えない。
   P は 1 節のとおり LP が小さく、`rt` で再分解の回数が変わる場面がほぼないので、P の 1T・4T の計測は行わなかった (行うなら `tinyp.py` の形で 58 問 × 2)。
+
+## 5. 誤答の確かめ (`ENOMOTO_LU_RETA_TICK=1` + `ENOMOTO_LU_TINY_HS=1i`、`FUZZ_VENV=/usr bash analysis/comboharm_20261124/fuzz.sh rti ...`)
+
+- MIP の fuzz 7 本 (fuzz_tiny 400×2・fuzz_highs 300・fuzz_objint 1000×2・fuzz_slack 1000×2) はすべて不一致 0。
+- cargo test は 425 成功・1 失敗 (`simplex::lu::tests::tracked_iteration_matches_untracked_reference`、
+  `solve_sparse_into` と `solve_sparse_into_hyper` の tick が一致しない)。切り分けると `RETA_TICK=1` 単独では成功し、
+  **`LU_TINY_HS=1i` 単独で同じく失敗する** (3bde280e0 で足した `i` が超疎 `U` 段の起点を 1e-14 で切り、通常の経路と tick の数え方が
+  ずれる)。値の誤りではなく tick の一致を確かめるテストで、`RETA_TICK` の試作とは関係しない。`1i` を既定にするなら直す必要がある。
+
+## 6. LU_TINY_HS=1i の tick のずれの直し (親の依頼 3、744c97454)
+
+- 原因: `i` (`U` 段の起点を 1e-14 以下なら 0 にする) は超疎の `U` 段 (`u_solve_hyper_heap`・`_queue`) にだけ入っていて、全走査
+  (`u_solve_into`)・DFS の超疎 (`u_solve_hyper`)・ヒープ版の仕上げの全走査・融合 (`pair_/triple_r_u_permute`、`_tracked`)・部分 `U` 段
+  (`u_solve_partial`) では切らなかった。同じ FTRAN を経路ごとに解くと値と tick がずれ、`tracked_iteration_matches_untracked_reference` が落ちた。
+- 直し: `u_drop(v, tin)` (src/simplex/lu.rs) を、それらの `U` 段の起点の 0 判定すべてに足す。既定 (`i` なし、`tin = 0`) の動きは変わらない。
+- cargo test: 既定・`1i`・`1i` + `RETA_TICK` で 426 成功。`1ri` (相対の切り捨て) では同じテストが別の箇所 (非零の数) で落ちる (`r` は候補でないので直していない)。
+
+## 7. BTRAN の差 (親の依頼 1)
+
+### 7.1 読み比べ (HiGHS `HFactor::btranU`・`btranFT`・`btranL`・`solveHyper` 対 当方 `FtLu::solve_transpose_unit_work_sparse`)
+
+- 段の並び (`U^T` → FT/`R` eta → `L^T`)・`U` と `L` を行形式で散布する点は同じ。FT eta も両方とも全本を回し、値が 0 なら飛ばす。
+- 違い 1 (**微小値**): HiGHS は `U^T`・`L^T` (全走査・超疎とも) で起点が `|v| <= 1e-14` (`kHighsTiny`) なら 0 にして飛ばし、FT 段の結果も
+  1e-14 未満を `kHighsZero` にする。当方は切らない (`LU_TINY_HS` は出力でしか切らない)。
+- 違い 2 (超疎の判定): HiGHS は `U^T` が予測密度 0.15 以下、`L^T` が 0.10 以下 (かつ入力の密度 0.05 以下) と段ごと。当方は両段まとめて
+  予測密度 < 0.05 (`BTRAN_HYPER_FRACTION` × 0.5) で、途中の打ち切りもある。
+- 違い 3: 全走査の経路で O(m) の走査が HiGHS より 2〜3 回多い (`e_tilde` の写し、出力の置換と 0 戻し、呼び出し側の `compact_rows`)。
+
+経路の診断 (`ENOMOTO_PROF_PHASES_EXT` に `btran_path` の行を足した。`PROF_BTRAN_PATH`):
+
+| 根の LP | 超疎で出力 / 呼び出し | 予測密度の平均 | `BTRAN_TINY` で |
+|---|---|---|---|
+| uccase12 | 32492 / 32492 | 0.00129 | 0.00039 |
+| rocI-4-11 | 987 / 1311 | 0.0236 | 0.0097 |
+| bnatt400 | 554 / 1308 | 0.0524 | 0.0360 |
+
+uccase12 はもともと全部が超疎の経路で、判定の違いは効かない。結果の非零が HiGHS より多い (2 節の ρ 34 対 4) のは違い 1 の雑音。
+
+### 7.2 試作 `ENOMOTO_LU_BTRAN_TINY` (既定オフ、src/simplex/lu.rs `btran_tin`・`bt_drop`)
+
+BTRAN の `U^T` (`u_transpose_sweep*`・`u_transpose_sweep_heap`)・`R` eta (3 か所)・`L^T` (散布 `l_transpose_scatter_rows`・`_core`・超疎
+`l_transpose_hyper_out`、ギャザーは列 `s` を引き終えた後) の起点で `|v| <= 1e-14` を 0 にして飛ばし、出力 (`permute_btran_out*`・超疎の出力)
+でも 0 にする。HiGHS の `fabs(pivot_multiplier) > kHighsTiny` と同じで、新しい閾値はない。cargo test は既定・`BTRAN_TINY`・3 つ全部で 426 成功。
+
+根の LP (冷えた始動、3 回、`logs/ours_root_<問題>_{def2,bt,rti2,rtib}.out`。`rtib` = `RETA_TICK` + `LU_TINY_HS=1i` + `BTRAN_TINY`):
+
+| 根の LP | 既定 反復・秒 | `bt` | `rti` | `rtib` | HiGHS |
+|---|---|---|---|---|---|
+| uccase12 | 32493・4.6〜5.4 | 32494・4.8〜5.2 | 32493・3.1〜3.2 | 32493・**2.7〜2.75** | 32311・1.90〜1.95 |
+| rocI-4-11 | 1312・0.058〜0.062 | 1284・0.045〜0.062 | 1266・0.050〜0.055 | 1284・0.046〜0.050 | 1058・0.027 |
+| bnatt400 | 1309・0.17〜0.23 | 1334・0.18〜0.25 | 1310・0.16〜0.18 | 1329・0.15〜0.17 | 1040・0.097 |
+
+1 反復の内訳 (`phtab.py`、µs/反復、BTRAN と計時した段階の合計):
+
+| 根の LP | BTRAN 既定 → `rti` → `rtib` (HiGHS) | 合計 既定 → `rti` → `rtib` (HiGHS) |
+|---|---|---|
+| uccase12 | 18.0 → 11.5 → **7.3** (3.4) | 143.3 → 88.2 → **73.7** (59.3、1.24 倍) |
+| rocI-4-11 | 5.6 → 5.2 → **3.8** (1.4) | 42.7 → 37.4 → **33.9** (24.3、1.40 倍) |
+| bnatt400 | 19.7 → 16.7 → **15.1** (7.6) | 146.3 → 122.2 → **115.8** (94.9、1.22 倍) |
+
+- uccase12 は道筋が同じ (32493 反復) まま、BTRAN が 11.5 → 7.3 µs、全体が −15%。予測密度 (結果の非零率) は 1/3 になる。
+- 超疎の判定を HiGHS の `U` 段並みに緩める A/B (`ENOMOTO_T_BTRAN_HYPER_FRACTION=0.3`、診断) は、bnatt400 で BTRAN が 15.5 → 21.5 µs と
+  遅くなった (当方の超疎の経路はヒープ・整列の分の定数が大きい)。判定を合わせる案 (違い 2) は、超疎の経路の定数を減らしてから。
+- 残る BTRAN の差は 2〜2.8 倍。次の候補は違い 3 (全走査の経路の O(m) の走査を減らす。bnatt400 は呼び出しの 4 割が全走査)。
