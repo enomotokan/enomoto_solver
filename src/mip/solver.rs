@@ -16593,9 +16593,6 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             if objdive_on() {
                                 kinds_v.push(K::ObjPscost);
                             }
-                            if lsdive_on() && self.ls_root_x.as_ref().is_some_and(|r| r.len() == self.p.n) {
-                                kinds_v.push(K::LineSearch);
-                            }
                             let kinds = &kinds_v[..];
                             let frac_q = tunable!("ENOMOTO_T_MIP_DIVEQUOTA_FRAC", 0.05, f64);
                             let ni = self.node_iters as f64;
@@ -16642,6 +16639,31 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             e.1 += ok as u64;
                             e.2 += used;
                             }
+                        }
+                    }
+                    // 試作 `ENOMOTO_MIP_LSDIVE` ([`lsdive_on`]): 線探索ダイビング (SCIP の linesearchdiving) を、巡回の種類とは別に
+                    // SCIP と同じ時期 (深さを 10 で割った余りが 6) と、この種類だけの LP 反復の上限 (SCIP の `getDivesetIterLimit`:
+                    // 0.05 × (解を見つけた回数 + 1) / (呼んだ回数 + 1) × ノードの LP 反復 + 1000 − 使った反復) で呼ぶ。巡回に入れると
+                    // 全種類で共有の上限の残りしか回らず、30n20b8 では 1 回 12 反復・深さ 1 で尽きていた (README 3 節)
+                    if heur_ok && !noinc && node.depth % 10 == 6 && lsdive_on() && env_str!("ENOMOTO_MIP_NO_NODE_DIVE").is_none() && self.ls_root_x.as_ref().is_some_and(|r| r.len() == self.p.n) {
+                        use super::heuristics::DiveKind as K;
+                        let st = self.dive_k[K::LineSearch.idx()];
+                        let lim = (0.05 * (st.1 + 1) as f64 / (st.0 + 1) as f64 * self.node_iters as f64) as u64 + 1000;
+                        if st.2 < lim {
+                            let lb = self.queue.best_lower_bound().min(node_obj);
+                            let cutoff = self.prune_limit();
+                            let quot = if self.has_cutoff_value() { 0.8 } else { 0.1 };
+                            let bound = if cutoff.is_finite() { lb + quot * (cutoff - lb) } else { f64::INFINITY };
+                            let it0 = self.lp.total_iterations();
+                            self.heur_label = "tree line search diving";
+                            let ok = self.dive(K::LineSearch, lim - st.2, bound);
+                            self.heur_label = "";
+                            let used = self.lp.total_iterations() - it0;
+                            self.heur_iters += used;
+                            let e = &mut self.dive_k[K::LineSearch.idx()];
+                            e.0 += 1;
+                            e.1 += ok as u64;
+                            e.2 += used;
                         }
                     }
                     if node_obj >= self.prune_limit() {
