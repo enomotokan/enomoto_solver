@@ -1111,6 +1111,9 @@ pub(super) fn polish_in_problem_warm_ext(p: &MipProblem, x: &mut Vec<f64>, z: f6
     let mut info = (0usize, 0usize, 0usize);
     // 診断 `ENOMOTO_MIP_POLISH_STATS` の `c`: 基底を写さずに解く (温める効き目の比べ)
     let basis = basis.filter(|_| !cold && !env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('c')));
+    // 診断 `ENOMOTO_MIP_POLISH_STATS` の `e` (analysis/overrun240_20261127): 基底を捨てて基底のない求解の入口 (`solve_cold_entry`) で解く
+    let cold = cold || env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('e'));
+    let basis = basis.filter(|_| !cold);
     if let Some(b) = basis {
         let mut b = b.clone();
         for j in 0..p.n.min(b.col.len()) {
@@ -1135,7 +1138,56 @@ pub(super) fn polish_in_problem_warm_ext(p: &MipProblem, x: &mut Vec<f64>, z: f6
         let nnz: usize = p.rows.iter().map(|r| r.len()).sum();
         let nint = p.is_int.iter().filter(|&&b| b).count();
         let ncont_free = (0..p.n).filter(|&j| !p.is_int[j] && p.col_lo[j] < p.col_up[j]).count();
-        eprintln!("MIP: POLISH_STATS s: rows {} cols {} nonzeros {} integer (fixed) {} continuous not fixed {}", p.m, p.n, nnz, nint, ncont_free);
+        // 整数を固定した後の行ごとの自由な連続列の数 (0 = 定数の行、1 = 列の境界になる行。前処理で消せる行の目安)
+        let mut k0 = 0usize;
+        let mut k1 = 0usize;
+        for r in &p.rows {
+            let c = r.iter().filter(|&&(j, _)| !p.is_int[j] && p.col_lo[j] < p.col_up[j]).count();
+            if c == 0 {
+                k0 += 1;
+            } else if c == 1 {
+                k1 += 1;
+            }
+        }
+        // 前処理の見積り: 整数を固定し、自由な連続列が 1 本の行を列の境界にして外し、境界が閉じた列を固定することを繰り返して残る行の数
+        let mut fixed: Vec<bool> = (0..p.n).map(|j| p.is_int[j] || p.col_lo[j] >= p.col_up[j]).collect();
+        let (mut clo, mut cup) = (p.col_lo.clone(), p.col_up.clone());
+        let mut alive = vec![true; p.m];
+        let mut passes = 0;
+        loop {
+            passes += 1;
+            let mut changed = false;
+            for (i, r) in p.rows.iter().enumerate() {
+                if !alive[i] {
+                    continue;
+                }
+                let free: Vec<&(usize, f64)> = r.iter().filter(|&&(j, _)| !fixed[j]).collect();
+                if free.len() > 1 {
+                    continue;
+                }
+                alive[i] = false;
+                changed = true;
+                if let [&(j, a)] = free[..] {
+                    let rest: f64 = r.iter().filter(|&&(k, _)| k != j).map(|&(k, b)| b * if p.is_int[k] { x[k].round() } else { clo[k] }).sum();
+                    let (l, u) = ((p.row_lo[i] - rest) / a, (p.row_up[i] - rest) / a);
+                    let (l, u) = if a > 0.0 { (l, u) } else { (u, l) };
+                    clo[j] = clo[j].max(l);
+                    cup[j] = cup[j].min(u);
+                    if clo[j] >= cup[j] - 1e-12 {
+                        fixed[j] = true;
+                    }
+                }
+            }
+            if !changed || passes >= 20 {
+                break;
+            }
+        }
+        let left = alive.iter().filter(|&&a| a).count();
+        let cols_left = (0..p.n).filter(|&j| !fixed[j]).count();
+        eprintln!(
+            "MIP: POLISH_STATS s: rows {} cols {} nonzeros {} integer (fixed) {} continuous not fixed {}; rows with 0 free continuous columns {} with 1 {}; after singleton-row reductions ({passes} passes) rows left {left} free columns left {cols_left}",
+            p.m, p.n, nnz, nint, ncont_free, k0, k1
+        );
     }
     // 呼び出し元の手間の期限 ([`crate::ticks::push_budget`]) は外し、求解の期限 (壁時計) だけで止める。ヒューリスティクスの中で受け取った
     // 解の研磨が手間の期限で 3 反復で止まり、研磨しないまま見積り (その解を出した LP の双対値がなく、今の LP の双対値から取った小さな値) で
