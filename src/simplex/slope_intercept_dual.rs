@@ -5403,10 +5403,10 @@ fn solve_slope_intercept_dual_impl<const BIG: bool>(std: &StdForm, opts: &crate:
     let mut harris2_skip: Vec<usize> = Vec::new();
     // 試作 `ENOMOTO_SIMPLEX_BFRT_GROUP` (既定では使わない、analysis/lpwarm_20261118): BFRT を Harris の組ごとに進める (主ループの比のテスト)
     let bfrt_group_on = bfrt_group_mode('g');
-    // 試作 `ENOMOTO_SIMPLEX_RETRY_ZMAX=1` (既定では使わない。analysis/lpgap_20261126/README.md 8 節): 破綻の後の解き直し (`safe_pivot`) では、
+    // `ENOMOTO_SIMPLEX_RETRY_ZMAX` (2026-11-27 から既定、`=0`・`off` で使わない。analysis/lpgap_20261126/README.md 8 節): 破綻の後の解き直し (`safe_pivot`) では、
     // `Zero` 列も |alpha| 最大で選ぶ (`z` と同じ)。解き直しは極小の軸を避けるための回なのに、`Zero` 列だけは最小添字で |alpha| = 1e-9 の列を
     // 入れ続け、特異な基底の巻き戻しを繰り返して「50 回続けて捨てた」で終わり、LP 全体が `NotSolved` になっていた (supportcase42 の LP 緩和)
-    let zero_pick_alpha = bfrt_group_mode('z') || (safe_pivot && env_str!("ENOMOTO_SIMPLEX_RETRY_ZMAX").is_some_and(|v| v != "0"));
+    let zero_pick_alpha = bfrt_group_mode('z') || (safe_pivot && env_def!("ENOMOTO_SIMPLEX_RETRY_ZMAX", "1").is_some_and(|v| v != "0" && v != "off"));
     let bg_td = tunable!("ENOMOTO_T_SIMPLEX_BG_TD", 1e-9, f64);
     let mut group_buf: Vec<Cand> = Vec::new();
     let mut group_rest: Vec<Cand> = Vec::new();

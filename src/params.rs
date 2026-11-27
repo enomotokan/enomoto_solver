@@ -797,6 +797,14 @@ pub(crate) mod lu {
     /// `FtLu::build_tick` の消去積和回数項の係数 (S16、`0` = 項なし)。
     pub(crate) const TICK_BUILD_FLOP_COEF: u64 = 0;
 
+    /// 試作 `ENOMOTO_LU_REFAC_BAL=k` の分解の手間 (ticks の求解と同じ単位、1 手間 ≒ 2.11 ns): `m`・`nnz(L+U)`・消去の積和の係数。
+    /// 新しい閾値ではなく、分解ごとの実際の秒を `ENOMOTO_DEBUG_LU_CAL` で測り、相対誤差の最小二乗で当てはめた値
+    /// (uccase12・dano3_3・physiciansched6-2・neos-960392 の LP、cod105 の根、計 424 回の分解。analysis/lpgap_20261126/README.md 9.6 節、`lucal.py`)。
+    /// 当てはめた秒の合計は問題ごとに実測の 0.59〜1.10 倍 (既定の見積り 80 m + 60 nnz は cod105 で 1/24、dano3_3 で 1/3.6)。
+    pub(crate) const CAL_BUILD_M_COEF: u64 = 34;
+    pub(crate) const CAL_BUILD_LU_COEF: u64 = 100;
+    pub(crate) const CAL_BUILD_FLOP_COEF: u64 = 3;
+
     /// 求解段の tick 増分 (触れた非ゼロ数) に掛ける係数 (`1` = 素の非ゼロ数)。
     pub(crate) const TICK_SOLVE_NNZ_COEF: u64 = 1;
 }
