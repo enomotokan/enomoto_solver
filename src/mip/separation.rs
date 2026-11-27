@@ -2216,12 +2216,30 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 根のヒューリスティクスを飛ばし早めの再スタートへ進む (HiGHS は根の分離のラウンドごとに被約費用で固定し、再スタートを判定する)。
         // 値の文字: `h` = 根のヒューリスティクスは飛ばさない、`w` = 抜けた後に裏のカットを待たない
         let l63_cut = !self.params.submip && job.is_none() && self.snap.is_none() && env_str!("ENOMOTO_MIP_LOSE6_3_CUTRESTART").is_some() && super::early_restart_on();
+        // 試作 `ENOMOTO_MIP_ROOTRESTART2` の `m` ([`Solver::rr2_cut_restart_due`]): ラウンドの頭ごとに、残りのラウンドの縮む分と再スタートの手間を比べる
+        let rr2_m = !self.params.submip && job.is_none() && self.snap.is_none() && super::solver::rootrestart2('m') && super::early_restart_on();
+        let t_rr2 = std::time::Instant::now();
         let l63_min = tunable!("ENOMOTO_T_MIP_LOSE6_3_CUTRESTART_MIN", 3usize, usize);
         loop {
             self.poll_fj_thread();
             if self.root_gap_closed() {
                 cutstop = "gap_closed";
                 break;
+            }
+            if rr2_m && round_ctr >= 1 && !self.early_restart {
+                // 残りのラウンドの見込み: ここまでの 1 ラウンドの平均の秒 × 残りのラウンドの数
+                let per = t_rr2.elapsed().as_secs_f64() / round_ctr as f64;
+                let w = per * max_rounds.saturating_sub(round_ctr) as f64;
+                if let Some(nw) = self.rr2_cut_restart_due(w) {
+                    self.early_restart = true;
+                    self.er_at.get_or_insert_with(std::time::Instant::now);
+                    self.l63_cut_left = true;
+                    if self.params.verbose {
+                        eprintln!("MIP: early restart: {nw} integer columns fixable by reduced costs at cut round {round_ctr} (newly fixed {}), leaving the cut loop (ENOMOTO_MIP_ROOTRESTART2 m, {:.2}s)", self.newly_fixed_ints(), self.start.elapsed().as_secs_f64());
+                    }
+                    cutstop = "early_restart";
+                    break;
+                }
             }
             if l63_cut && round_ctr >= l63_min && !self.early_restart {
                 if let Some(w) = self.lose6_3_cut_restart_due() {
@@ -8810,10 +8828,12 @@ fn pathh_bound_dist(vars: &CutVars, j: usize) -> f64 {
 /// [`Solver::path_aggregation_highs`] の行の型 (0 使わない, 1 `<=`, -1 `>=`, 2 等式。代入用の等式は 0)、連続変数か
 /// (境界から離れているもの)、連続変数ごとの行、代入用の等式 (連続変数ごとの (行, 係数))。型が 0 でない行が経路の始点になる
 #[allow(clippy::type_complexity)]
-/// 試作 `ENOMOTO_MIP_PATHH_SLACK` (既定では使わない、analysis/rootbound_20261126): 経路集約 (path_highs) で、LP ですき間のある行も
-/// 出発・相手の行に使う。istanbul-no-cutoff では SCIP の集約 cMIR (すき間のある行も使う) が根を 96 → 132 にする
+/// `ENOMOTO_MIP_PATHH_SLACK` (analysis/rootbound_20261126。**2026-11-27 に既定にした: 値 `1`。`0`・`off` で前の形 (すき間のある行を使わない)**):
+/// 経路集約 (path_highs) で、LP ですき間のある行も出発・相手の行に使う (SCIP の集約 cMIR と同じく、すき間は cMIR の中で連続変数として扱う)。
+/// 根拠: istanbul-no-cutoff の根 71.0 → 91.9、net12 79.5 → 85.0 (1 スレッド・種 1)。P 58 問 × 種 1〜3 × 60 秒: 1 スレッド 1.003 [0.981, 1.025]・
+/// 解けた 120 → 120、4 スレッド 0.997 [0.980, 1.014]・137 → 138、食い違い 0
 fn pathh_slack() -> bool {
-    env_str!("ENOMOTO_MIP_PATHH_SLACK").is_some_and(|v| v != "0")
+    env_def!("ENOMOTO_MIP_PATHH_SLACK", "1").is_some()
 }
 
 fn pathh_row_types(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usize) -> (Vec<i8>, Vec<bool>, Vec<Vec<(usize, f64)>>, Vec<Option<(usize, f64)>>) {
@@ -8831,8 +8851,8 @@ fn pathh_row_types(vars: &CutVars, lp_rows: &[Vec<(usize, f64)>], n: usize) -> (
         let r = vars.x[n + i];
         let ls = if l.is_finite() { r - l } else { f64::INFINITY };
         let us = if u.is_finite() { u - r } else { f64::INFINITY };
-        // 試作 `ENOMOTO_MIP_PATHH_SLACK` ([`pathh_slack`]): すき間のある行も、近い側の不等式として経路に使う (SCIP の sepa_aggregation と同じく、
-        // すき間は cMIR の中で連続変数として扱う)。既定では使わない (型 0)
+        // `ENOMOTO_MIP_PATHH_SLACK` ([`pathh_slack`]、2026-11-27 から既定): すき間のある行も、近い側の不等式として経路に使う (SCIP の sepa_aggregation と同じく、
+        // すき間は cMIR の中で連続変数として扱う)。`=0` では使わない (型 0)
         rtype[i] = if ls > feastol && us > feastol && !(pathh_slack() && (ls.is_finite() || us.is_finite())) {
             0
         } else if ls < us {
