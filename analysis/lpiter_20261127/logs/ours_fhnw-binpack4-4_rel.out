@@ -1,0 +1,25 @@
+PROF_PHASES_EXT wall=3.635ms iters=485 (7.5us/iter) accounted=84.2% of wall refactor_count=1 (verify=0 try_update=0 bump=0 drift=0 d_drift=0 illcond=0 max_updates=0 infeas_check=0 clock=1) max_update_streak=253
+  dse_ftran(unfused)=0.0us/iter chuzc1_heap=0.1us/iter
+  avg_bfrt_flips/iter=0.544 avg_infeasible_pool/iter=232.6
+  pivot_order_reuse: attempts=1 accepted=1 (100.0%) attempt_time=0.078ms row_repicks=26 fail(singular=0 fill=0) backoff_skips=0 nnz_reuse_avg=1098 nnz_full_avg=0
+  lu_dense_switch: count=0 rows=0
+  density_gate_ftrans=0 final_expected_density col_aq=0.020 bfrt=0.042
+  btran_l scatter=484 gather=2
+  pivot_search steps=0 search_limit_hits=0 (0.0%) candidates=0 (avg 0.00/step) scan=0.000ms
+  col_max_abs rescan_entries=0 pivot_threshold=0.25 (escalations=0)
+  m_exit(q_was_m)=0 harris_window_m_miss=0 m_enter_via_flip=0
+  degenerate_pivots=0 (0.0% of iters) avg_harris_window_size=1.082
+  pool_grew=108 (22.3%) pool_shrank=358 (73.8%) pool_same=18 (3.7%)
+  dse_rel_err: checked=0 <1%=0.0% <10%=0.0% <100%=0.0% >=100%=0.0%
+  btran(rho_p)            0.219ms    6.0% of wall  0.451us/iter
+  price                   0.032ms    0.9% of wall  0.067us/iter
+  chuzr                   0.586ms   16.1% of wall  1.209us/iter
+  chuzc1                  0.067ms    1.9% of wall  0.139us/iter
+  bfrt                    0.702ms   19.3% of wall  1.448us/iter
+  ftran                   0.832ms   22.9% of wall  1.715us/iter
+  xb_update               0.237ms    6.5% of wall  0.488us/iter
+  dse_update              0.053ms    1.5% of wall  0.109us/iter
+  dual_update             0.018ms    0.5% of wall  0.036us/iter
+  ft_update               0.151ms    4.1% of wall  0.310us/iter
+  refactor                0.165ms    4.5% of wall  0.340us/iter
+{"who": "ours", "lp": "fhnw-binpack4-4_rel", "status": "optimal", "obj": 0.0, "time": 0.00618582700008119}

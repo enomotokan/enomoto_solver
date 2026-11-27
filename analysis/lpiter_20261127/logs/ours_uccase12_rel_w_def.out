@@ -1,0 +1,27 @@
+PROF_PHASES_EXT wall=155481.370ms iters=71615 (2171.1us/iter) accounted=84.8% of wall refactor_count=129 (verify=0 try_update=0 bump=0 drift=12 d_drift=0 illcond=0 max_updates=0 infeas_check=0 clock=117) max_update_streak=2516
+  dse_ftran(unfused)=0.0us/iter chuzc1_heap=0.5us/iter
+  work/iter (m=92336): rho_nnz=385.4 price_entries=2683.4 (nonbasic 1364.1) touched=812.8 touched_nonbasic=812.8 cands=5.1 alpha_nnz=8204.1 tau_nnz=18873.9
+  avg_bfrt_flips/iter=0.697 avg_infeasible_pool/iter=20004.2
+  pivot_order_reuse: attempts=113 accepted=105 (92.9%) attempt_time=3371.088ms row_repicks=99949 fail(singular=0 fill=8) backoff_skips=16 nnz_reuse_avg=369258 nnz_full_avg=274502
+  lu_dense_switch: count=0 rows=0
+  density_gate_ftrans=0 final_expected_density col_aq=0.089 bfrt=0.027
+  btran_l scatter=71628 gather=124
+  pivot_search steps=2216064 search_limit_hits=106645 (4.8%) candidates=10904305 (avg 4.92/step) scan=206.162ms
+  col_max_abs rescan_entries=471222 pivot_threshold=0.25 (escalations=0)
+  m_exit(q_was_m)=0 harris_window_m_miss=0 m_enter_via_flip=0
+  degenerate_pivots=84 (0.1% of iters) avg_harris_window_size=1.019
+  pool_grew=24495 (34.2%) pool_shrank=40661 (56.8%) pool_same=6458 (9.0%)
+  dse_rel_err: checked=71614 <1%=97.6% <10%=1.0% <100%=1.1% >=100%=0.3%
+  btran(rho_p)         14527.065ms    9.3% of wall  202.849us/iter
+  price                2539.699ms    1.6% of wall  35.463us/iter
+  chuzr                14893.694ms    9.6% of wall  207.969us/iter
+  chuzc1                746.212ms    0.5% of wall  10.420us/iter
+  bfrt                 6572.602ms    4.2% of wall  91.777us/iter
+  ftran                68880.480ms   44.3% of wall  961.816us/iter
+  xb_update            10665.978ms    6.9% of wall  148.935us/iter
+  dse_update           3514.768ms    2.3% of wall  49.079us/iter
+  dual_update           414.707ms    0.3% of wall  5.791us/iter
+  ft_update            1370.583ms    0.9% of wall  19.138us/iter
+  refactor             7654.158ms    4.9% of wall  106.879us/iter
+PROF_HANDOFF run_phase=128.587ms ok=true
+{"who": "ours", "lp": "uccase12_rel", "status": "optimal", "obj": 11507.285323905297, "time": 156.08812264699918}

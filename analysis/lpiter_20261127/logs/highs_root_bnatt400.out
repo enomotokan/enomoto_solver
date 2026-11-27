@@ -1,0 +1,121 @@
+LP root_bnatt400 has 3974 rows; 3600 cols; 16756 nonzeros
+Coefficient ranges:
+  Matrix  [1e-01, 1e+00]
+  Cost    [1e+00, 1e+00]
+  Bound   [1e+00, 1e+00]
+  RHS     [3e-01, 2e+00]
+Solving LP without presolve or useful basis
+Using dual simplex solver
+  Iteration        Objective     Infeasibilities num(sum)
+          0    -1.6308441637e-13 Pr: 208(104) 0.0s
+       1040     0.0000000000e+00 Pr: 0(0) 0.1s
+
+Analysis of 1040 iterations (1 to 1040)
+DSE for         1040 (100%) iterations
+
+BTRAN Full performed 13 times
+           0 hyper-sparse operations (  0%)
+           0 hyper-sparse results    (  0%)
+     0.98163 density of result (3900 / 3974 nonzeros)
+
+PRICE Full performed 13 times
+          13 hyper-sparse operations (100%)
+           0 hyper-sparse results    (  0%)
+    0.549248 density of result (1977 / 3600 nonzeros)
+
+BTRAN BcFsCg performed 0 times
+
+PRICE BcFsCg performed 0 times
+
+BTRAN e_p  performed 1040 times
+        1040 hyper-sparse operations (100%)
+        1040 hyper-sparse results    (100%)
+  0.00863717 density of result (34 / 3974 nonzeros)
+
+PRICE a_p  performed 1040 times
+        1040 hyper-sparse operations (100%)
+         610 hyper-sparse results    ( 58%)
+   0.0196433 density of result (70 / 3600 nonzeros)
+
+FTRAN      performed 1040 times
+         365 hyper-sparse operations ( 35%)
+         424 hyper-sparse results    ( 40%)
+    0.130211 density of result (517 / 3974 nonzeros)
+
+FTRAN BFRT performed 43 times
+          43 hyper-sparse operations (100%)
+          26 hyper-sparse results    ( 60%)
+   0.0895978 density of result (356 / 3974 nonzeros)
+
+FTRAN DSE  performed 1040 times
+         323 hyper-sparse operations ( 31%)
+         308 hyper-sparse results    ( 29%)
+    0.138012 density of result (548 / 3974 nonzeros)
+
+BTRAN PSE  performed 0 times
+
+Invert    performed 12 times: average frequency = 86
+          10 ( 83%) Invert operations due to pseudo-clock
+           2 ( 16%) Invert operations due to possibly optimal
+
+        1040 Price operations:
+           0 Col Price      (  0%)
+           0 Row Price      (  0%)
+        1040 Row PriceWSw   (100%)
+
+           0 (  0%) costly DSE        iterations
+
+Quad/heap CHUZC summary
+        1040 quad CHUZC: average / max = 27 / 187
+
+grepQuadHeapChuzc,root_bnatt400,Solving LP without presolve or useful basis, 1040, ,27,187, 0, ,0,0
+
+Dual_CHUZC: Number of improve CHUZC row calls =  0
+Dual_CHUZC: Number of pivots removed from pack = 0
+
+Flip/shift summary
+         372   single        cost shifts (sum / max = 1.96461e-05 / 9.99373e-08)
+
+grepFlipShift,root_bnatt400,Solving LP without presolve or useful basis,0,0,inf,0,0,0,372,1.96461e-05,9.99373e-08
+
+SimplexInner-time  Operation                       :    Time     ( Total;  Ideal;  Local):    Calls  Time/Call
+SimplexInner-time  COMPUTE_DUAL                    :  1.9622e-03 (  1.9%;   1.9%;   2.0%):       16  1.2264e-04
+SimplexInner-time  CORRECT_DUAL                    :  2.5439e-04 (  0.2%;   0.2%;   0.3%):       12  2.1199e-05
+SimplexInner-time  COMPUTE_PRIMAL                  :  9.1624e-04 (  0.9%;   0.9%;   0.9%):       13  7.0480e-05
+SimplexInner-time  COLLECT_PR_IFS                  :  2.7275e-04 (  0.3%;   0.3%;   0.3%):       12  2.2729e-05
+SimplexInner-time  COMPUTE_PR_IFS                  :  3.3474e-04 (  0.3%;   0.3%;   0.3%):       14  2.3910e-05
+SimplexInner-time  COMPUTE_DU_IFS                  :  3.1900e-04 (  0.3%;   0.3%;   0.3%):       15  2.1267e-05
+SimplexInner-time  COMPUTE_DU_OBJ                  :  1.7834e-04 (  0.2%;   0.2%;   0.2%):       14  1.2738e-05
+SimplexInner-time  COMPUTE_PR_OBJ                  :  1.9789e-05 (  0.0%;   0.0%;   0.0%):        2  9.8944e-06
+SimplexInner-time  INVERT                          :  3.8052e-03 (  3.7%;   3.7%;   3.9%):       11  3.4592e-04
+SimplexInner-time  REPORT_REBUILD                  :  5.2214e-05 (  0.1%;   0.1%;   0.1%):       13  4.0164e-06
+SimplexInner-time  PERM_WT                         :  6.8188e-05 (  0.1%;   0.1%;   0.1%):       21  3.2470e-06
+SimplexInner-time  CHUZC0                          :  5.4598e-05 (  0.1%;   0.1%;   0.1%):     1040  5.2498e-08
+SimplexInner-time  CHUZC1                          :  1.5044e-03 (  1.4%;   1.5%;   1.5%):     1040  1.4466e-06
+SimplexInner-time  CHUZC2                          :  2.5010e-03 (  2.4%;   2.4%;   2.5%):     1040  2.4048e-06
+SimplexInner-time  CHUZC3                          :  7.1526e-04 (  0.7%;   0.7%;   0.7%):     1040  6.8775e-07
+SimplexInner-time  CHUZC4                          :  6.9928e-04 (  0.7%;   0.7%;   0.7%):     1040  6.7239e-07
+SimplexInner-time  CHUZC5                          :  4.4107e-05 (  0.0%;   0.0%;   0.0%):     1040  4.2411e-08
+SimplexInner-time  FTRAN                           :  2.0634e-02 ( 19.8%;  20.0%;  20.9%):     1040  1.9840e-05
+SimplexInner-time  CHUZR_DUAL                      :  6.8266e-03 (  6.6%;   6.6%;   6.9%):     1041  6.5578e-06
+SimplexInner-time  BTRAN                           :  7.9305e-03 (  7.6%;   7.7%;   8.0%):     1040  7.6255e-06
+SimplexInner-time  PRICE                           :  4.6346e-03 (  4.4%;   4.5%;   4.7%):     1040  4.4564e-06
+SimplexInner-time  FTRAN_BFRT                      :  9.4128e-04 (  0.9%;   0.9%;   1.0%):       43  2.1890e-05
+SimplexInner-time  FTRAN_DSE                       :  2.3407e-02 ( 22.5%;  22.7%;  23.7%):     1040  2.2506e-05
+SimplexInner-time  BTRAN_FULL                      :  7.1311e-04 (  0.7%;   0.7%;   0.7%):       13  5.4855e-05
+SimplexInner-time  PRICE_FULL                      :  4.8828e-04 (  0.5%;   0.5%;   0.5%):       13  3.7560e-05
+SimplexInner-time  UPDATE_DSE_WEIGHT               :  4.9891e-03 (  4.8%;   4.8%;   5.1%):     1040  4.7973e-06
+SimplexInner-time  UPDATE_PRIMAL                   :  1.2378e-02 ( 11.9%;  12.0%;  12.5%):     3604  3.4345e-06
+SimplexInner-time  UPDATE_DUAL                     :  3.7313e-04 (  0.4%;   0.4%;   0.4%):      666  5.6025e-07
+SimplexInner-time  UPDATE_PIVOTS                   :  3.1185e-04 (  0.3%;   0.3%;   0.3%):     1040  2.9986e-07
+SimplexInner-time  UPDATE_FACTOR                   :  1.0729e-03 (  1.0%;   1.0%;   1.1%):     1040  1.0316e-06
+SimplexInner-time  UPDATE_MATRIX                   :  2.8372e-04 (  0.3%;   0.3%;   0.3%):     1040  2.7281e-07
+SimplexInner-time  SUM                             :  9.8685e-02 ( 94.7%;  95.7%; 100.0%)
+SimplexInner-time  TOTAL                           :  1.0417e-01
+
+Model name          : root_bnatt400
+Model status        : Optimal
+Simplex   iterations: 1040
+Objective value     :  0.0000000000e+00
+P-D objective error :  0.0000000000e+00
+HiGHS run time      :          0.10
