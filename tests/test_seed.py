@@ -3,13 +3,13 @@ import random
 
 import pytest
 
-from enomoto_solver import Model, Variable
+from enomoto_solver import Model
 
 
 def _multi_knapsack(rng, n=40, m=5):
     """0-1 の多次元ナップサック (乱数 rng で作る)。乱数 1 の問題は、1 スレッドで種によってノード数が変わる (種 0 で 29 ノード)。"""
     M = Model()
-    xs = [Variable(int, 0, 1) for _ in range(n)]
+    xs = [M.add_variable(int, 0, 1) for _ in range(n)]
     val = [rng.randint(10, 100) for _ in range(n)]
     M.set_objective(sum(v * x for v, x in zip(val, xs)), sense="maximize")
     for _ in range(m):
@@ -61,7 +61,7 @@ def test_seed_of_wrong_type_raises_type_error(seed):
 def test_seed_on_lp_is_accepted_and_ignored():
     def build():
         M = Model()
-        x, y = Variable(float, 0, 10), Variable(float, 0, 10)
+        x, y = M.add_variable(float, 0, 10), M.add_variable(float, 0, 10)
         M.set_objective(3 * x + 2 * y, sense="maximize")
         M.add_constraint(x + y <= 4)
         M.add_constraint(x + 3 * y <= 6)

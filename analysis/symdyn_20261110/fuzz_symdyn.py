@@ -4,7 +4,7 @@ python fuzz_symdyn.py 問題数 [開始seed] [大きさの倍率]
 連続列の負荷つき)、同じ品の一般整数のナップサック (置換、一般整数)、重み付き max-cut・グラフの二等分・max-k-cut の 2 値版
 (反転: x → 1 − x)、一般整数の反転 (x ∈ [0, U]、|x_i − x_j| を補助列で表す)、反転と置換の組み合わせ (巡回グラフ上の max-cut)。"""
 import random, sys, time, highspy
-from enomoto_solver import Model, Variable
+from enomoto_solver import Model
 
 inf = float('inf')
 SCALE = int(sys.argv[3]) if len(sys.argv) > 3 else 1
@@ -168,7 +168,7 @@ def highs(p):
 
 
 def ours(p):
-    M = Model(); xs = [Variable(int if p.it[j] else float, p.lo[j], p.up[j]) for j in range(len(p.lo))]
+    M = Model(); xs = [M.add_variable(int if p.it[j] else float, p.lo[j], p.up[j]) for j in range(len(p.lo))]
     M.set_objective(sum(cc * x for cc, x in zip(p.c, xs)))
     for r, l, u in zip(p.rows, p.rlo, p.rup):
         e = sum(v * xs[j] for j, v in r)
