@@ -95,11 +95,11 @@ The two wheels must have the same version and tag; the second is built with `-C 
 
 ```python
 import math
-from enomoto_solver import Model, Variable
+from enomoto_solver import Model, quicksum
 
 M = Model()
-x = Variable(float, 0, 10)          # continuous variable 0 <= x <= 10
-y = Variable(float, 0, math.inf)    # bounds may be infinite
+x = M.add_variable(float, 0, 10)          # continuous variable 0 <= x <= 10
+y = M.add_variable(float, 0, math.inf)    # bounds may be infinite
 M.set_objective(x + 2 * y, sense="maximize")
 M.add_constraint(x + y <= 10)
 M.add_constraint(x - y >= -4)
@@ -109,7 +109,9 @@ print(sol.status, sol.objective)    # optimal 17.0
 print(x.value, y.value)             # 3.0 7.0
 ```
 
-- `Variable(type, lower bound, upper bound)` creates a variable in the most recently created `Model` (it can also be given explicitly with `model=...`). The type is `float` (continuous) or `int` (integer). Bounds may be `±math.inf` (integer variables included). A free variable is `Variable(float, -math.inf, math.inf)`.
+- `M.add_variable(type, lower bound, upper bound, name=None)` creates a variable in the model `M`. The type is `float` (continuous) or `int` (integer). Bounds may be `±math.inf` (integer variables included). A free variable is `M.add_variable(float, -math.inf, math.inf)`. `Variable(...)` cannot be called directly (so that the model a variable belongs to is always explicit).
+- Creating variables one by one in a `for` loop is fast enough (about 2 microseconds per variable, about 2 s for a million).
+- Build sums of many terms with `quicksum(...)`. The built-in `sum(...)` copies the partial sum at every step, so its cost grows with the square of the number of terms (about 0.5 s for 10,000 terms, about 50 s for 100,000). `f += term` also adds in place and is fast.
 - Linear expressions are written with `+`, `-`, scalar multiplication and division by numbers, and constraints with `<=`, `>=` and `==`. The objective and constraints are limited to linear expressions. Building an expression of degree two or higher, such as a product of variables (`x * y`), a power (`x ** 2`) or division by an expression (`1 / x`), raises a `TypeError` stating that it is not linear.
 - `set_objective(f, sense="minimize" | "maximize")` sets the objective function (the default is minimization).
 - Arguments of `solve()` (all optional):
@@ -144,7 +146,7 @@ By default, the solver stops when it finds that there is no finite optimal value
 
 ```python
 M = Model()
-z = Variable(float, -math.inf, math.inf)
+z = M.add_variable(float, -math.inf, math.inf)
 M.set_objective(z)                  # minimize z
 M.add_constraint(z <= 5)
 
@@ -171,9 +173,9 @@ Whatever the method, infeasibility and unboundedness are decided by the two-phas
 
 ```python
 M = Model()
-items = [(Variable(int, 0, 1), value, weight) for value, weight in [(60, 10), (100, 20), (120, 30)]]
-M.set_objective(sum(v * value for v, value, _ in items), sense="maximize")
-M.add_constraint(sum(v * weight for v, _, weight in items) <= 50)
+items = [(M.add_variable(int, 0, 1), value, weight) for value, weight in [(60, 10), (100, 20), (120, 30)]]
+M.set_objective(quicksum(v * value for v, value, _ in items), sense="maximize")
+M.add_constraint(quicksum(v * weight for v, _, weight in items) <= 50)
 sol = M.solve(time_limit=60)
 print(sol.objective, [round(v.value) for v, _, _ in items])   # 220.0 [0, 1, 1]
 print(sol.best_bound, sol.mip_gap, sol.nodes)                 # 220.0 0.0 0

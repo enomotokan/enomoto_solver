@@ -5,7 +5,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../
 if "--env" not in sys.argv: os.environ.pop("ENOMOTO_AGG_DUALFREE_INEQ", None)
 import highspy
 from gen import gen
-from enomoto_solver import Model, Variable
+from enomoto_solver import Model
 inf = float('inf')
 
 def viol(lp, x):
@@ -36,7 +36,7 @@ def highs(lp, fix=None):
 
 def ours(lp):
     lo, up, c, it, rows, rlo, rup = lp
-    M = Model(); xs = [Variable(int if it[j] else float, lo[j], up[j]) for j in range(len(lo))]
+    M = Model(); xs = [M.add_variable(int if it[j] else float, lo[j], up[j]) for j in range(len(lo))]
     M.set_objective(sum(cc * x for cc, x in zip(c, xs)))
     for r, l, u in zip(rows, rlo, rup):
         e = sum(v * xs[j] for j, v in r)

@@ -4,7 +4,7 @@ y_k = b_k ± Σ a x (x は 0-1 か小さな整数、a は小さな整数)、y_k 
 import random, sys, time
 from pathlib import Path
 import highspy
-from enomoto_solver import Model, Variable
+from enomoto_solver import Model
 # 以下の highs・ours は scripts/mip_fuzz_vs_highs.py と同じ
 def highs(lp):
     lo,up,c,it,rows,rlo,rup=lp
@@ -17,7 +17,7 @@ def highs(lp):
     h.run(); return h.modelStatusToString(h.getModelStatus()), h.getInfo().objective_function_value
 def ours(lp):
     lo,up,c,it,rows,rlo,rup=lp
-    M=Model(); xs=[Variable(int if it[j] else float,lo[j],up[j]) for j in range(len(lo))]
+    M=Model(); xs=[M.add_variable(int if it[j] else float,lo[j],up[j]) for j in range(len(lo))]
     M.set_objective(sum(cc*x for cc,x in zip(c,xs)))
     for r,l,u in zip(rows,rlo,rup):
         e=sum(v*xs[j] for j,v in r)

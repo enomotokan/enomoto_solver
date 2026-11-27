@@ -11511,3 +11511,21 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
   - 返した解を SCIP の checkSol で確かめた (10 問 × 1・4 スレッド): 誤りなし。
 - 1 スレッドの道筋が変わった (check_default: mik-250-20-75-4 3703 → 3657、markshare_4_0 272319 → 248404。目的値は同じ、2 回解いて同じ)。基準を書き直した。
 - 確かめ: fuzz 7 本 (既定・4 スレッド) は誤答 0。cargo test 425 通過。
+
+## 2026-11-27: 変数は M.add_variable で作る (Variable(...) と暗黙の現在のモデルを廃止、利用者の判断)
+
+- 変更: 変数の作り方を `x = Variable(float, 0, 10)` から `x = M.add_variable(float, 0, 10, name=None)` に改めた。
+  - `Variable(...)` を直接呼ぶと TypeError (案内つき)。`Variable` は型として残す (isinstance 用)。
+  - `Model._stack` (最後に作った Model を「現在の Model」にするクラス変数のスタック) と `with M:` を廃止した。
+- 理由:
+  - どのモデルに入るかがコードの上で明らかになる。モデルを 2 つ作ると、後のモデルに黙って入っていた。
+  - スタックが Model を持ち続けるので、使い終わった Model (Rust 側の行列も) が解放されなかった。
+  - スタックはプロセス全体で共有なので、スレッドごとに別のモデルを組むと混ざりえた。
+  - `add_constraint`・`set_objective` と同じく、モデルのメソッドにそろう (gurobipy の addVar、highspy の addVariable と同じ形)。
+- 速さ (この機械で測った値):
+  - 変数を for で 1 つずつ作るのは、1 個あたり約 1.4〜2.3 マイクロ秒 (10 万個で 0.14 秒、100 万個で 2.3 秒)。まとめて作る口は足していない。
+  - 遅いのは式の組み立てで、組み込みの `sum` は途中の和を毎回複製するので項の数の二乗の手間 (2000 項 0.016 秒、4000 項 0.065 秒、8000 項 0.27 秒)。
+  - `quicksum(...)` を足した (1 つの Function に足し込む。10 万項で約 0.1 秒)。`Function.__iadd__`・`__isub__` もその場で書き換える形にした (変数そのものは書き換えず、新しい式を返す)。
+- 書き換え: tests・examples・scripts・benchmarks・analysis の台本 (計 38 本) の `Variable(...)` を `M.add_variable(...)` にした。README・DESIGN も直した。
+- 確かめ: Python のテスト 69 件通過 (新しいテスト 5 件を含む)、examples/smoke_test.py、fuzz_slack 50 本 (食い違い 0)。
+- 注意: 書き換えた台本は新しい Python 側 (この版以降) でしか動かない。古いビルドを入れたままの環境では、merge の後に `pip install -e .` が要る。
