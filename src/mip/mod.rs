@@ -6331,6 +6331,16 @@ fn represolve_after_probe(prob: MipProblem, mut postsolve: Vec<crate::presolve::
     // では 13 周で境界の変更 14294 本・係数の締め 47989)。回数の上限・行の減り方の判定は使わず、SCIP の前処理の打ち切り (`presolving/abortfac` 0.0008:
     // 1 周の変更が列の数のその割合より少なければやめる) と同じ形で、その周のプロービングの固定と締め付けが列の数の 0.0008 倍に届かなければやめる
     let mut tight = (env_str!("ENOMOTO_MIP_PRR_TIGHT").is_some() || enum_adapt_on()) && !submip && !PRESOLVE_IN_SUBMIP.with(|f| f.get());
+    // `ENOMOTO_MIP_PRR_TIGHT=o` (analysis/rootbound_20261126 の 6 節): 締め付けだけで固定の無い周にだけ PRR_TIGHT の規則 (回数の上限・行の減り方の
+    // 判定を使わない) を使い、固定のある周は既定の規則 (`PRR_MIN_FIXED`・`PRR_MIN_ROW_FRAC`・`PROBE_REPRESOLVE_MAX`) のままにする。
+    // `=1` は固定のある周でも行の減り方の判定を外すので、misc07・dcmulti・nw04 (締め付け 0 本) の道筋まで変わっていた
+    if tight && !enum_adapt_on() && env_str!("ENOMOTO_MIP_PRR_TIGHT").is_some_and(|v| v == "o") && !submip {
+        let (gf, gt, _) = PROBE_GAIN.with(|f| f.get());
+        let fixed = PROBE_FIXED.with(|f| f.get());
+        if gt == 0 || gf > 0 || fixed >= tunable!("ENOMOTO_T_MIP_PRR_MIN_FIXED", 1usize, usize) {
+            tight = false;
+        }
+    }
     // `ENOMOTO_MIP_ENUM_ADAPT` ([`enum_adapt_on`]): 締め付けでのかけ直し (と 0.0008 の打ち切り) を使うかを、直前の列挙の繰り返し全体の得と時間から
     // シグモイドで決める ([`enum_adapt_continue`])。使わないときは既定のかけ直しの規則 (固定の本数・行の減り方) に戻す
     if tight && enum_adapt_on() && prr_active(submip) {
