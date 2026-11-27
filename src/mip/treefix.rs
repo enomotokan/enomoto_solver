@@ -119,7 +119,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 st.seen = Some(best);
                 false
             }
-            Some(s) if best < s - 1e-9 * s.abs().max(1.0) => {
+            Some(s) if crate::mip::solver::better_obj(best, s, s) => {
                 let el = pool.t0.elapsed().as_secs_f64();
                 if st.secs > tunable!("ENOMOTO_T_MIP_TREEFIX_FRAC", 0.2, f64) * el {
                     if st.skipped_at != Some(best) {

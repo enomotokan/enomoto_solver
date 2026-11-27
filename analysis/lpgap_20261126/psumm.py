@@ -1,0 +1,33 @@
+"""P の比べの集計: python psumm.py [結果.jsonl] [試作の設定名] [基準の設定名] > psumm.txt (既定は res_p_s0.jsonl・ths_t1・def_t1)
+(問題, 種) の組ごとに def_t1 と ths_t1 の時間 (解けなければ 60 秒) の比を取り、ずらし幾何平均 (ずらし 1 秒) と、問題ごとのブートストラップの 95% 区間を出す。"""
+import json, math, random, collections, sys
+from pathlib import Path
+D = Path(__file__).resolve().parent
+ALT = sys.argv[2] if len(sys.argv) > 2 else "ths_t1"
+BASE = sys.argv[3] if len(sys.argv) > 3 else "def_t1"
+R = collections.defaultdict(dict)
+for l in open(D / (sys.argv[1] if len(sys.argv) > 1 else "res_p_s0.jsonl")):
+    r = json.loads(l); x = r["result"]
+    t = x.get("time", 60.0) if x.get("status") == "optimal" else 60.0
+    R[(r["problem"], r["seed"])][r["cfg"]] = (x.get("status"), min(t, 60.0), x.get("nodes"), x.get("objective"))
+pairs = {k: v for k, v in R.items() if BASE in v and ALT in v}
+lr = {k: math.log((v[ALT][1] + 1) / (v[BASE][1] + 1)) for k, v in pairs.items()}
+print(f"組 {len(pairs)} (問題 {len({k[0] for k in pairs})})")
+for c in (BASE, ALT):
+    print(c, "最適", sum(v[c][0] == "optimal" for v in pairs.values()), "ずらし幾何平均", round(math.exp(sum(math.log(v[c][1] + 1) for v in pairs.values()) / len(pairs)) - 1, 2))
+g = math.exp(sum(lr.values()) / len(lr)); probs = sorted({k[0] for k in pairs})
+bp = collections.defaultdict(list)
+for k, v in lr.items(): bp[k[0]].append(v)
+random.seed(1); bs = []
+for _ in range(2000):
+    s = [random.choice(probs) for _ in probs]; xs = [x for p in s for x in bp[p]]; bs.append(math.exp(sum(xs) / len(xs)))
+bs.sort(); print(f"alt/def の比 {g:.3f} [{bs[50]:.3f}, {bs[1949]:.3f}]")
+print("比が 1.2 倍を超えて動いた組 (問題 種 def 秒 → ths 秒、ノード):")
+for k in sorted(pairs, key=lambda k: lr[k]):
+    if abs(lr[k]) > math.log(1.2):
+        d, t = pairs[k][BASE], pairs[k][ALT]
+        print(f"  {k[0]} {k[1]} {d[1]:.1f} → {t[1]:.1f} ({d[2]} → {t[2]})")
+for k, v in pairs.items():
+    a, b = v[BASE], v[ALT]
+    if a[0] == b[0] == "optimal" and a[3] is not None and b[3] is not None and abs(a[3] - b[3]) > 1e-6 * max(1, abs(a[3])):
+        print("目的値の食い違い", k, a[3], b[3])

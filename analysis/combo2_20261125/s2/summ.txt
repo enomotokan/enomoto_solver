@@ -1,0 +1,104 @@
+行 960、設定ごと {'def_t1': 240, 'c2c_t1': 240, 'c2c_t4': 240, 'def_t4': 240}、コミット {'7d89b8276': 339, '19e2057e5': 11, 'd2773e304': 12, '36f104b02': 11, 'cca494c73': 13, '424ca978a': 28, '8ed14232e': 11, '1be49ad34': 12, '3c73c8f29': 12, '2dfe751bd': 11, '7f6c5ed03': 25, 'd1feec997': 2, '1f7ad1e58': 12, 'c178102b3': 12, '4425706bc': 13, '3986a7796': 13, 'a5c082a48': 27, '65c8b92cc': 13, '621b5ecce': 12, 'ecabe3552': 11, 'd97300fb1': 15, 'e5c1bd65c': 22, '19cc1fdcc': 11, '98b0185b2': 12, '3b3ceac9a': 12, '2de661475': 11, '5849ac946': 29, '22a0c3aea': 12, 'e1525f2da': 13, 'cd178cae0': 14, 'c2e3c72aa': 35, 'c6e894aa5': 26, '981db4cf2': 12, '36c7b6e93': 14, '9046a712f': 15, 'c32cb8b7d': 32, '87487ec6d': 11, '252f41d64': 11, 'bed7f9e43': 11, 'f9548fcb7': 11, 'f7046c030': 3, '93b6cc4ee': 28}
+crash・killed・取得失敗 5: [('rail02', 'c2c_t4', 1, 'crash'), ('rail02', 'def_t4', 1, 'crash'), ('neos-3402454-bohle', 'def_t1', 1, 'killed'), ('neos-3402454-bohle', 'c2c_t4', 1, 'crash'), ('neos-3402454-bohle', 'def_t4', 1, 'crash')]
+
+== 食い違い 1 件
+   neos-5188808-nattai def_t4: 解 0.1101964700774344 が既知の値 0.110283622999984 より良い (MIPLIB は最小化)
+
+== 1 スレッド (c2c_t1 / def_t1、1 より小さければ c2c が速い)
+
+| 集合 | 組 | 比 | 95% 区間 | 解けた数 既定 → c2c | 既定だけ | c2c だけ | 1.25 倍超の遅れ (うち仕組み・未分類) | 0.8 倍未満 | 目安 |
+|---|---:|---:|---|---|---:|---:|---:|---:|---|
+| M 186 問 | 186 | 0.987 | [0.953, 1.021] | 78 → 86 | 1 | 9 | 13 (9) | 17 | 外れ (遅れ・食い違い) |
+| 240 問全部 | 240 | 0.981 | [0.952, 1.011] | 84 → 93 | 2 | 11 | 13 (9) | 21 | 外れ (遅れ・食い違い) |
+| 残りの 54 問 | 54 | 0.960 | [0.902, 1.021] | 6 → 7 | 1 | 2 | 0 (0) | 4 | 外れ (食い違い) |
+
+既定だけ解けた 2: rail507 (M) 1.19: c2c time_limit 600.0s / 既定 optimal 502.9s [原因: 未切り分け (既定も上限の近く、直し k・s でも時間切れ。comboharm 9 節)]; roi2alpha3n4 (残り) 1.07: c2c time_limit 600.0s / 既定 optimal 558.5s
+c2c だけ解けた 11: 30n20b8 (M) 0.82: c2c optimal 488.7s / 既定 time_limit 600.0s; bnatt400 (M) 0.99: c2c optimal 596.6s / 既定 time_limit 600.0s; ex9 (残り) 0.21: c2c optimal 115.7s / 既定 time_limit 600.0s; fiball (M) 0.61: c2c optimal 359.1s / 既定 time_limit 600.0s; istanbul-no-cutoff (M) 0.88: c2c optimal 527.9s / 既定 time_limit 600.0s; neos-1171737 (M) 0.90: c2c optimal 539.0s / 既定 time_limit 600.0s; neos-1354092 (M) 0.96: c2c optimal 573.6s / 既定 time_limit 600.0s; neos-4738912-atrato (M) 0.62: c2c optimal 367.2s / 既定 time_limit 600.0s; netdiversion (残り) 0.60: c2c optimal 354.5s / 既定 time_limit 600.0s; rocI-4-11 (M) 0.38: c2c optimal 222.2s / 既定 time_limit 600.0s; supportcase33 (M) 0.75: c2c optimal 446.1s / 既定 time_limit 600.0s
+
+1.25 倍超の遅れ 13 問 (240 問全部、比の大きい順):
+   neos-3627168-kasai (M) 3.10: c2c optimal 370.2s / 既定 optimal 112.5s
+   neos-1171448 (M) 2.53: c2c optimal 153.4s / 既定 optimal 54.5s
+   mushroom-best (M) 1.89: c2c optimal 541.7s / 既定 optimal 281.9s [道筋] [原因: sbpb (強分枝の子の伝播・両方の子の境界で木が 2.1 倍。直しなし。comboharm 3 節)]
+   app1-1 (M) 1.67: c2c optimal 23.4s / 既定 optimal 9.9s [仕組み] [原因: heur+tie の組み合わせ (tie で根の道筋が変わり、heur の RENS の robust FJ の Local-MIP が手間を 1/14 に数えて 36 秒回る。直し案 LMIP_SCORE_TICKS=1 で 69 → 37.5 秒。comboharm app1-1.md。数え違いは combo・HEUR_ADAPT の下でサブ MIP の robust FJ が回るときだけ当たり、既定の道にはほぼ当たらない: 既定 + LMIP_SCORE_TICKS は 15 問で変化なし、P 58 問 × 種 3 で 1.000 [0.997, 1.002]・解けた数 119 → 120・遅れ 0。analysis/lmipticks_20261125)]
+   neos-933966 (M) 1.66: c2c optimal 292.9s / 既定 optimal 172.0s [道筋] [原因: 組み合わせ / 道筋 (部品の足し引きで単調でない。comboharm 9 節)]
+   unitcal_7 (M) 1.57: c2c optimal 575.4s / 既定 optimal 364.0s
+   neos859080 (M) 1.51: c2c infeasible 10.3s / 既定 infeasible 3.4s
+   chromaticindex512-7 (M) 1.45: c2c optimal 356.2s / 既定 optimal 242.6s [道筋] [原因: 再現しない (別の機械では combo が速い、経過時間に依る判定の揺れ。comboharm 4・7 節)]
+   mas74 (M) 1.45: c2c optimal 446.1s / 既定 optimal 305.4s
+   timtab1 (M) 1.39: c2c optimal 87.0s / 既定 optimal 59.6s
+   beasleyC3 (M) 1.37: c2c optimal 69.2s / 既定 optimal 47.7s [仕組み] [原因: nra (種 1〜4 で同じ向き。葉が下界で閉じて f ≈ 0、プールを選び直すラウンドが約 270 回回り、戻した行で 1 ノード 15 → 25 ms。直し案 w・e は効かない。comboharm beasleyC3.md。直し案 NODEROWS_ADAPT=r0k23 (選び直しのラウンドを止め、判定と持ち越しを直す、既定オフ) で 1 スレッドの 6 問 (mc11・neos-631710・fhnw・mik-250・roll3000・beasleyC3) はすべて既定より速い (comboharm README 10.6〜10.9・11 節))]
+   piperout-27 (M) 1.32: c2c optimal 30.0s / 既定 optimal 20.4s
+   h80x6320d (M) 1.30: c2c optimal 66.2s / 既定 optimal 48.4s [道筋] [原因: enum (種 1 だけ、道筋の運。再スタート後の列挙で根の道筋が変わる。種 1〜3 の幾何で 1.03。直しなし、k・s も効かない。comboharm h80x6320d.md)]
+
+効いた (0.8 倍未満) 21 問 (240 問全部、比の小さい順):
+   ex9 (残り) 0.21: c2c optimal 115.7s / 既定 time_limit 600.0s
+   n2seq36q (M) 0.25: c2c optimal 112.5s / 既定 optimal 485.9s
+   fhnw-binpack4-4 (M) 0.37: c2c infeasible 24.5s / 既定 infeasible 82.2s
+   rocI-4-11 (M) 0.38: c2c optimal 222.2s / 既定 time_limit 600.0s
+   ns1830653 (M) 0.59: c2c optimal 284.9s / 既定 optimal 487.0s
+   netdiversion (残り) 0.60: c2c optimal 354.5s / 既定 time_limit 600.0s
+   fiball (M) 0.61: c2c optimal 359.1s / 既定 time_limit 600.0s
+   neos-4738912-atrato (M) 0.62: c2c optimal 367.2s / 既定 time_limit 600.0s
+   fast0507 (M) 0.62: c2c optimal 298.5s / 既定 optimal 487.2s
+   neos-1456979 (M) 0.65: c2c optimal 369.4s / 既定 optimal 573.3s [原因: はっきりしない (別の機械では既定も時間切れ。heur の見込み。comboharm 5 節)]
+   fastxgemm-n2r6s0t2 (M) 0.66: c2c optimal 230.4s / 既定 optimal 356.3s
+   ns1208400 (M) 0.66: c2c optimal 56.7s / 既定 optimal 90.6s [道筋] [原因: 組み合わせ (nra とほか、直し k でも消えない。comboharm 9 節)]
+   swath3 (M) 0.67: c2c optimal 99.4s / 既定 optimal 154.0s [仕組み] [原因: heur (HEUR_ADAPT の FP の第 3 段がサブ MIP の中で満額の孫 MIP を出し、根の道筋が変わる。直し案 HEUR_ADAPT=1m で種 1・3 は既定並み、種 2 は f_t の道筋で残る。4 スレッドは未測。comboharm swath3.md)]
+   mzzv11 (M) 0.69: c2c optimal 372.9s / 既定 optimal 541.0s
+   neos5 (M) 0.70: c2c optimal 119.9s / 既定 optimal 174.9s
+   rococoC10-001000 (M) 0.70: c2c optimal 352.0s / 既定 optimal 504.1s [仕組み] [原因: nra・sbpb・bfrt の重なり (nra の害は r0・r0k23 で消える: +nra は既定 519 に対し r0 394・r0k23 423 秒。combo は r0 で 1040、r0k23 で 1229 秒と、なお既定の約 2 倍で、残りは sbpb・bfrt の分 (木の中の再スタートが遅れ持ち越すカットが増える)。ラウンドを止めた 506 秒の回は道筋の運。揺れではない。comboharm rococoC10-001000.md 6 節)]
+   eil33-2 (M) 0.73: c2c optimal 34.9s / 既定 optimal 51.2s
+   supportcase33 (M) 0.75: c2c optimal 446.1s / 既定 time_limit 600.0s
+   neos-631710 (残り) 0.79: c2c optimal 107.6s / 既定 optimal 139.6s [仕組み] [原因: nra (NODEROWS_ADAPT=t、木の中の再スタートの判定。直し k で解ける。comboharm 1 節、1 スレッドで確かめ)]
+   supportcase6 (残り) 0.79: c2c optimal 254.6s / 既定 optimal 326.1s
+   swath1 (M) 0.79: c2c optimal 39.4s / 既定 optimal 52.4s
+
+== 4 スレッド (c2c_t4 / def_t4、1 より小さければ c2c が速い)
+
+| 集合 | 組 | 比 | 95% 区間 | 解けた数 既定 → c2c | 既定だけ | c2c だけ | 1.25 倍超の遅れ (うち仕組み・未分類) | 0.8 倍未満 | 目安 |
+|---|---:|---:|---|---|---:|---:|---:|---:|---|
+| M 186 問 | 186 | 1.024 | [0.987, 1.064] | 98 → 97 | 4 | 3 | 17 (13) | 10 | 外れ (区間上端・解けた数・遅れ・食い違い) |
+| 240 問全部 | 240 | 1.012 | [0.979, 1.047] | 106 → 107 | 4 | 5 | 19 (15) | 12 | 外れ (遅れ・食い違い) |
+| 残りの 54 問 | 54 | 0.971 | [0.904, 1.043] | 8 → 10 | 0 | 2 | 2 (2) | 2 | 外れ (遅れ・食い違い) |
+| 240 問全部、両方無効の組を除く | 238 | 1.012 | [0.979, 1.047] | 106 → 107 | 4 | 5 | 19 (15) | 12 | 外れ (遅れ・食い違い) |
+| M 186 問、両方無効の組を除く | 186 | 1.024 | [0.987, 1.064] | 98 → 97 | 4 | 3 | 17 (13) | 10 | 外れ (区間上端・解けた数・遅れ・食い違い) |
+
+両方とも記録が無効な組 2: neos-3402454-bohle (c2c crash / 既定 crash); rail02 (c2c crash / 既定 crash)
+
+既定だけ解けた 4: gmu-35-40 (M) 2.15: c2c time_limit 600.0s / 既定 optimal 273.8s [原因: はっきりしない (1 スレッドでは両方時間切れ。comboharm 5 節)]; neos-662469 (M) 1.28: c2c time_limit 600.0s / 既定 optimal 467.2s; neos-933966 (M) 5.49: c2c time_limit 600.0s / 既定 optimal 101.1s; ran14x18-disj-8 (M) 1.50: c2c time_limit 600.0s / 既定 optimal 396.5s
+c2c だけ解けた 5: chromaticindex1024-7 (M) 0.96: c2c optimal 578.2s / 既定 time_limit 600.0s [仕組み] [原因: enum (ENUM_ADAPT の 1 周目が 449 秒列挙。直し s で根を抜ける。comboharm 2 節)]; comp07-2idx (M) 0.26: c2c optimal 145.9s / 既定 time_limit 600.0s; ex9 (残り) 0.17: c2c optimal 95.4s / 既定 time_limit 600.0s; netdiversion (残り) 0.92: c2c optimal 548.6s / 既定 time_limit 600.0s; supportcase40 (M) 0.86: c2c optimal 513.5s / 既定 time_limit 600.0s
+
+1.25 倍超の遅れ 19 問 (240 問全部、比の大きい順):
+   neos-933966 (M) 5.49: c2c time_limit 600.0s / 既定 optimal 101.1s
+   tbfp-network (M) 2.69: c2c optimal 577.1s / 既定 optimal 208.1s [原因: 未切り分け (1 スレッドでは差なし。comboharm 9 節)]
+   gmu-35-40 (M) 2.15: c2c time_limit 600.0s / 既定 optimal 273.8s [原因: はっきりしない (1 スレッドでは両方時間切れ。comboharm 5 節)]
+   fastxgemm-n2r6s0t2 (M) 2.07: c2c optimal 94.7s / 既定 optimal 40.5s [揺れ] [原因: 再現しない (揺れ。1・4 スレッドとも combo が速い。comboharm fastxgemm-n2r6s0t2.md)]
+   mushroom-best (M) 2.04: c2c optimal 327.0s / 既定 optimal 155.5s [道筋]
+   neos-631710 (残り) 1.78: c2c optimal 63.0s / 既定 optimal 31.1s [仕組み] [原因: nra (NODEROWS_ADAPT=t、木の中の再スタートの判定。直し k で解ける。comboharm 1 節、1 スレッドで確かめ)]
+   neos-3627168-kasai (M) 1.73: c2c optimal 105.4s / 既定 optimal 56.9s
+   30n20b8 (M) 1.67: c2c optimal 200.9s / 既定 optimal 116.1s [道筋] [原因: sbpb (4 スレッド − sbpb は既定並み、+ sbpb 349・431 秒。ppi は無関係。対策案: sbpb を SB_ADAPT=1 に置き換え (127・175 秒)。comboharm 30n20b8.md)]
+   neos-911970 (M) 1.66: c2c optimal 31.7s / 既定 optimal 15.1s [仕組み] [原因: nra r0k23 の外す側 (combo の計測では得 0.74。r0k23 では φ が木の進みで上がり外す側に切り替わって 1.3〜1.7 倍の害。comboharm README 10.10 節)]
+   pg5_34 (M) 1.61: c2c optimal 210.7s / 既定 optimal 126.8s
+   CMS750_4 (M) 1.57: c2c optimal 131.3s / 既定 optimal 80.0s
+   ran14x18-disj-8 (M) 1.50: c2c time_limit 600.0s / 既定 optimal 396.5s
+   supportcase33 (M) 1.42: c2c optimal 112.0s / 既定 optimal 76.0s [道筋] [原因: sbpb (種 1・2 とも、抜くと既定並み・足すと 2 倍。直し k・s は効かない、直しなし。comboharm supportcase33.md)]
+   mcsched (M) 1.41: c2c optimal 219.7s / 既定 optimal 153.3s
+   neos-950242 (M) 1.38: c2c optimal 11.8s / 既定 optimal 5.8s [仕組み] [原因: enum (列挙の前の行の並べ替え・重なり外しが 2 乗の手間。直し s の手直し後 (時計を始めから数える) で 1 スレッド 5.0 秒・既定並み。comboharm README 10 節 (追加の問題))]
+   rococoC10-001000 (M) 1.32: c2c optimal 188.9s / 既定 optimal 140.2s
+   neos-662469 (M) 1.28: c2c time_limit 600.0s / 既定 optimal 467.2s
+   piperout-27 (M) 1.27: c2c optimal 19.1s / 既定 optimal 13.0s [仕組み] [原因: enum と heur の重なり (根の手間。直し s で 32 → 24 秒、heur の分は 1m・LMIP_SCORE_TICKS でも消えない。comboharm piperout-27.md)]
+   roi2alpha3n4 (残り) 1.25: c2c optimal 328.3s / 既定 optimal 259.6s [原因: 未切り分け (1 スレッドでは差が小さい。comboharm 9 節)]
+
+効いた (0.8 倍未満) 12 問 (240 問全部、比の小さい順):
+   ex9 (残り) 0.17: c2c optimal 95.4s / 既定 time_limit 600.0s
+   comp07-2idx (M) 0.26: c2c optimal 145.9s / 既定 time_limit 600.0s
+   rocI-4-11 (M) 0.33: c2c optimal 67.1s / 既定 optimal 221.4s
+   traininstance6 (M) 0.38: c2c optimal 124.3s / 既定 optimal 347.7s
+   neos-3402294-bobin (残り) 0.56: c2c optimal 183.7s / 既定 optimal 337.7s
+   wachplan (M) 0.56: c2c optimal 262.2s / 既定 optimal 473.8s
+   neos-1582420 (M) 0.66: c2c optimal 28.3s / 既定 optimal 48.0s [仕組み] [原因: heur (FP の第 3 段を暫定解なしのサブ MIP でも回し、根の再スタートを逃す。直し案 HEUR_ADAPT=1m で 46 秒・既定並み。comboharm neos-1582420.md)]
+   gen-ip054 (M) 0.68: c2c optimal 193.3s / 既定 optimal 288.2s [原因: 未切り分け (1 スレッドでは差が小さい。comboharm 9 節)]
+   mas74 (M) 0.71: c2c optimal 68.1s / 既定 optimal 100.6s
+   bnatt400 (M) 0.77: c2c optimal 152.0s / 既定 optimal 200.1s
+   beasleyC3 (M) 0.78: c2c optimal 14.2s / 既定 optimal 21.1s
+   graphdraw-domain (M) 0.79: c2c optimal 314.0s / 既定 optimal 398.7s [原因: はっきりしない (4 スレッドの道筋の揺れが大きい。cutu・enum・sbpb は抜くと既定並み、heur・nra は抜くと時間切れ。種 1〜3 とも combo が遅い向き。comboharm graphdraw-domain.md)]

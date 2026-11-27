@@ -194,7 +194,19 @@ fn cut_lp_debug() {
         }
         let deadline = time.map(|t| std::time::Instant::now() + std::time::Duration::from_secs_f64(t));
         let t0 = std::time::Instant::now();
+        // `CUTLP_XPROF=1`: 求解のあいだ区間計時 ([`crate::simplex::slope_intercept_dual::xprof`]) を有効にして、終わりに区間ごとに出す
+        let xprof_on = std::env::var("CUTLP_XPROF").is_ok();
+        if xprof_on {
+            crate::simplex::slope_intercept_dual::xprof_enable(true);
+        }
         let st = lp.solve(&SolveLimits { iteration_limit: iters, cutoff: f64::INFINITY, deadline });
+        if xprof_on {
+            crate::simplex::slope_intercept_dual::xprof("tail");
+            for (l, ns) in crate::simplex::slope_intercept_dual::xprof_take() {
+                eprintln!("CUTLP_XPROF {l:12} {:10.3} ms", ns as f64 / 1e6);
+            }
+            crate::simplex::slope_intercept_dual::xprof_enable(false);
+        }
         let secs = t0.elapsed().as_secs_f64();
         let it = lp.total_iterations();
         eprintln!("CUTLP: rep={rep} status={st:?} iters={it} time={secs:.3}s ({:.1} us/iter) obj={:.10e}", 1e6 * secs / it.max(1) as f64, lp.objective());

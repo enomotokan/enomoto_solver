@@ -103,7 +103,7 @@ pub(crate) struct Shared {
 
 /// 目的値 `z` が `b` より良いか (`b` が無限大なら真。`b - 1e-9 |b|` は無限大で NaN になるので分ける)
 fn better(z: f64, b: f64) -> bool {
-    !b.is_finite() || z < b - 1e-9 * b.abs().max(1.0)
+    !b.is_finite() || super::solver::better_obj(z, b, b)
 }
 
 /// 前処理の途中の解 `x` を根の問題 `q` に写す: `q` で固定された列は `q` の値にそろえ、整数列は丸める。`q` で実行可能でなければ `None`
@@ -450,16 +450,16 @@ impl Chain {
 }
 
 thread_local! {
-    /// 最初の求解の前処理の始めに置く: (スレッドの数, 求解の時間の上限 (秒), 前処理の始めの時刻, ログ)
-    static PENDING: std::cell::Cell<Option<(usize, f64, Instant, bool)>> = const { std::cell::Cell::new(None) };
+    /// 最初の求解の前処理の始めに置く: (スレッドの数, 求解の時間の上限 (秒), 前処理の始めの時刻, ログ, 乱数の種 (`MipParams::seed`))
+    static PENDING: std::cell::Cell<Option<(usize, f64, Instant, bool, u64)>> = const { std::cell::Cell::new(None) };
     /// 走っている連鎖 (前処理で立て、根で受け取る)
     static CUR: std::cell::RefCell<Option<Chain>> = const { std::cell::RefCell::new(None) };
 }
 
 /// 最初の求解の始めに呼ぶ ([`super::solve_problem_inner`])
-pub(crate) fn arm(threads: usize, time_limit: f64, verbose: bool) {
+pub(crate) fn arm(threads: usize, time_limit: f64, verbose: bool, seed: u64) {
     if on() && threads >= 2 {
-        PENDING.with(|p| p.set(Some((threads, time_limit, Instant::now(), verbose))));
+        PENDING.with(|p| p.set(Some((threads, time_limit, Instant::now(), verbose, seed))));
     }
 }
 
@@ -477,8 +477,9 @@ pub(crate) fn prepar_share(threads: usize) -> Option<usize> {
 }
 
 /// `k` 本のスレッドを問題 `q` で立てる。`root` なら `q` を根の問題 (版 0) とする (`R` の再スタートの後の立て直し)。
-/// `salt` は種に混ぜる (再スタートの回数)
-fn spawn(q: Arc<MipProblem>, k: usize, deadline: (Instant, Instant), t0: Instant, verbose: bool, salt: u64, root: bool) -> (Arc<Shared>, Vec<std::thread::JoinHandle<()>>) {
+/// `salt` は種に混ぜる (再スタートの回数)。`seed` は求解の乱数の種 (`MipParams::seed`)
+#[allow(clippy::too_many_arguments)]
+fn spawn(q: Arc<MipProblem>, k: usize, deadline: (Instant, Instant), t0: Instant, verbose: bool, salt: u64, root: bool, seed: u64) -> (Arc<Shared>, Vec<std::thread::JoinHandle<()>>) {
     let sh = Arc::new(Shared {
         stop: Arc::new(AtomicBool::new(false)),
         active: AtomicUsize::new(k),
@@ -508,7 +509,7 @@ fn spawn(q: Arc<MipProblem>, k: usize, deadline: (Instant, Instant), t0: Instant
         n_seed: AtomicU64::new(0),
         verbose,
     });
-    let base = tunable!("ENOMOTO_T_MIP_SEED", 0u64, u64).wrapping_mul(0xD1B5_4A32_D192_ED03) ^ 0x5851_F42D_4C95_7F2D ^ salt.wrapping_mul(0xA076_1D64_78BD_642F);
+    let base = seed.wrapping_mul(0xD1B5_4A32_D192_ED03) ^ 0x5851_F42D_4C95_7F2D ^ salt.wrapping_mul(0xA076_1D64_78BD_642F);
     let handles = (0..k)
         .map(|id| {
             let sh = sh.clone();
@@ -521,14 +522,14 @@ fn spawn(q: Arc<MipProblem>, k: usize, deadline: (Instant, Instant), t0: Instant
 
 /// 前処理の途中 (軽い縮約の後、重い前処理の前) で呼ぶ: 立っていれば FJ・Local-MIP のスレッドを立てる。戻り値はプロービングに回すスレッドの数
 pub(crate) fn start(prob: &MipProblem) -> Option<usize> {
-    let (threads, tl, t0, verbose) = PENDING.with(|p| p.take())?;
+    let (threads, tl, t0, verbose, seed) = PENDING.with(|p| p.take())?;
     if super::heuristics::fj_feas_extend(prob) || prob.n == 0 {
         return None;
     }
     let par = prepar_share(threads);
     let k = threads.saturating_sub(par.unwrap_or(1)).max(1);
     let far = if tl.is_finite() { t0 + Duration::from_secs_f64(tl.max(0.0)) } else { t0 + Duration::from_secs(1 << 30) };
-    let (sh, handles) = spawn(Arc::new(prob.clone()), k, (far, far), t0, verbose, 0, false);
+    let (sh, handles) = spawn(Arc::new(prob.clone()), k, (far, far), t0, verbose, 0, false, seed);
     if verbose {
         eprintln!("MIP: PRECHAIN: started {k} FJ/Local-MIP threads on the problem in the presolve ({} rows, {} free columns, {:.2}s)", prob.m, (0..prob.n).filter(|&j| prob.col_lo[j] < prob.col_up[j]).count(), t0.elapsed().as_secs_f64());
     }
@@ -561,7 +562,7 @@ pub(crate) fn refresh(prob: &MipProblem) {
 /// 立てる)。連鎖そのものは主のスレッドに置いたまま ([`stop_current`] か [`disarm`] で止める)。`t_end` と `t_ext` は今の FJ のスレッドと
 /// 同じ打ち切り (解があるとき / 主が FJ のスレッド以外の暫定解を持たないとき)。`r` なら再スタートの後の根でも呼び、再スタートの
 /// 前処理で縮んだ問題に乗り換えさせる
-pub(crate) fn attach(q: Arc<MipProblem>, t_end: Instant, t_ext: Instant, restarts: u32, verbose: bool) -> Option<Arc<Shared>> {
+pub(crate) fn attach(q: Arc<MipProblem>, t_end: Instant, t_ext: Instant, restarts: u32, verbose: bool, seed: u64) -> Option<Arc<Shared>> {
     let cur = CUR.with(|c| c.borrow().as_ref().map(|c| c.sh.clone()));
     let alive = cur.as_ref().is_some_and(|sh| sh.epoch().1.n == q.n && !sh.stop.load(Ordering::Relaxed) && sh.running.load(Ordering::Acquire) > 0);
     if !alive {
@@ -571,7 +572,7 @@ pub(crate) fn attach(q: Arc<MipProblem>, t_end: Instant, t_ext: Instant, restart
             return None;
         }
         let k = tunable!("ENOMOTO_T_MIP_PRECHAIN_ROOT_KEEP", 1usize, usize).max(1);
-        let (sh, handles) = spawn(q.clone(), k, (t_end, t_ext.max(t_end)), Instant::now(), verbose, restarts as u64, true);
+        let (sh, handles) = spawn(q.clone(), k, (t_end, t_ext.max(t_end)), Instant::now(), verbose, restarts as u64, true, seed);
         if verbose {
             eprintln!("MIP: PRECHAIN R: restarted {k} FJ/Local-MIP threads on the problem after restart {restarts} ({} rows, {} free columns)", q.m, (0..q.n).filter(|&j| q.col_lo[j] < q.col_up[j]).count());
         }

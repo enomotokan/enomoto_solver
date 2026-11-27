@@ -9,8 +9,8 @@ def close(a, b, tol=1e-6):
 
 # 1) Simple LP (maximize)
 M = Model()
-x = Variable(float, 0, 10)
-y = Variable(float, 0, 10)
+x = M.add_variable(float, 0, 10)
+y = M.add_variable(float, 0, 10)
 f = x + 2 * y
 assert isinstance(f, Function)
 M.set_objective(f, sense="maximize")
@@ -29,8 +29,8 @@ close(x.value, 0.0)
 
 # 2) Minimize with >= and == constraints
 M2 = Model()
-a = Variable(float, 0, 1000)
-b = Variable(float, 0, 1000)
+a = M2.add_variable(float, 0, 1000)
+b = M2.add_variable(float, 0, 1000)
 M2.set_objective(a + b)  # default sense=minimize
 M2.add_constraint(a + 2 * b >= 6)
 M2.add_constraint(a - b == 0)
@@ -42,7 +42,7 @@ close(b.value, 2.0)
 
 # 3) Wide (but finite) bounds + negative bound handling
 M3 = Model()
-z = Variable(float, -1_000_000, 1_000_000)
+z = M3.add_variable(float, -1_000_000, 1_000_000)
 M3.set_objective(z)
 M3.add_constraint(z >= -5)
 M3.add_constraint(z <= 100)
@@ -52,7 +52,7 @@ print("LP3 (wide bounds):", sol3, "z=", z.value)
 
 # 4) Small MIP (knapsack-ish, binary variables)
 M4 = Model()
-items = [(Variable(int, 0, 1), value, weight) for value, weight in [(60, 10), (100, 20), (120, 30)]]
+items = [(M4.add_variable(int, 0, 1), value, weight) for value, weight in [(60, 10), (100, 20), (120, 30)]]
 obj = sum(v * val for v, val, _ in items)
 M4.set_objective(obj, sense="maximize")
 M4.add_constraint(sum(v * w for v, _, w in items) <= 50)
@@ -62,8 +62,8 @@ close(sol4.objective, 220.0)
 
 # 5) Integer variables
 M5 = Model()
-p = Variable(int, 0, 10)
-q = Variable(int, 0, 10)
+p = M5.add_variable(int, 0, 10)
+q = M5.add_variable(int, 0, 10)
 M5.set_objective(3 * p + 5 * q, sense="maximize")
 M5.add_constraint(p + q <= 7)
 M5.add_constraint(2 * p + q <= 10)
@@ -72,7 +72,7 @@ print("MIP2:", sol5, "p=", p.value, "q=", q.value)
 
 # 6) Infeasible model
 M6 = Model()
-w = Variable(float, 0, 5)
+w = M6.add_variable(float, 0, 5)
 M6.set_objective(w)
 M6.add_constraint(w >= 10)
 sol6 = M6.solve()
@@ -82,7 +82,7 @@ print("Infeasible correctly detected")
 # 7) Infinite bounds are accepted (model.rs::add_variable's own docs: no
 # longer rejected at the PyO3 boundary — only NaN and lb > ub are).
 M7 = Model()
-v7 = Variable(float, 0, math.inf, model=M7)
+v7 = M7.add_variable(float, 0, math.inf)
 assert v7.lb == 0 and v7.ub == math.inf
 print("Infinite upper bound correctly accepted")
 

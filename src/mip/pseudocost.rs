@@ -44,6 +44,8 @@ pub struct Pseudocost {
     pub cw_dyn: f64,
     /// 試作 `ENOMOTO_MIP_CWM`: 今のノードの衝突の重みの倍率 (`cw_dyn` に掛ける。既定 1)
     pub cw_mult: f64,
+    /// 試作 `ENOMOTO_MIP_SB_ADAPT` (analysis/sbadapt_20261124): 衝突の重みの床 (0.01 × f。[`super::solver`] が設定する、既定 0)
+    pub cw_floor: f64,
     /// 試作 `ENOMOTO_MIP_CWM=ab` (p2inf_20261119 7 節): 今のノードで上書きする分枝のスコアの係数 (番号は [`super::cwm::AB_COEFS`], 値)
     pub ab: Option<(usize, f64)>,
     /// 実行不能で終わった葉と、目的値で打ち切った葉の数 (スコアの動的な重み)。
@@ -82,6 +84,7 @@ impl Pseudocost {
             inf_total_n: 0,
             n_pos_gain: 0,
             cw_dyn: 0.0,
+            cw_floor: 0.0,
             cw_mult: 1.0,
             ab: None,
             infeasible_leaves: 0,
@@ -418,7 +421,7 @@ impl Pseudocost {
         // 試作 `ENOMOTO_T_MIP_CONFLICT_WEIGHT_FLAT` = w (p2inf_20261119、既定 0 で使わない): 擬似費用の平均が上下とも 0 (目的の利得の手がかりが
         // ない: bnatt400 は LP の値が最後まで 0) のときだけ衝突の重みを w にする。一律の 0.1 は bnatt400 を解くが、擬似費用に意味のある
         // mas76・pk1 を 1.3〜1.6 倍遅くした (衝突の項が擬似費用の選び方を乱す)
-        wc = wc.max(self.cw_dyn * self.cw_mult);
+        wc = wc.max(self.cw_dyn * self.cw_mult).max(self.cw_floor);
         let wflat = tunable!("ENOMOTO_T_MIP_CONFLICT_WEIGHT_FLAT", 0.0, f64);
         // 判定: 観測のうち目的の利得が正だったものが `ENOMOTO_T_MIP_CONFLICT_WEIGHT_FLAT_FRAC` (既定 5%) 以下 (観測がなければ手がかりなしとみなす)。
         // 平均が厳密に 0 という判定では、目的の列の分枝などで少し利得が出るとすぐ外れ、bnatt400 の 4 スレッドが 900 秒で解けなかった

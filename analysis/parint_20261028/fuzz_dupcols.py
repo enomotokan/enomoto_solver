@@ -1,7 +1,7 @@
 """同じ整数列 (列ベクトル・費用・境界が一致) を含む乱数の MIP で HiGHS と最適値を突き合わせる
 (ENOMOTO_PRESOLVE_PARALLEL_INT の確かめ用)。python fuzz_dupcols.py 問題数 [開始seed]"""
 import random, sys, highspy
-from enomoto_solver import Model, Variable
+from enomoto_solver import Model
 inf = float('inf')
 
 def gen(seed):
@@ -40,7 +40,7 @@ def highs(cols, rows):
     return st, h.getInfo().objective_function_value
 
 def ours(cols, rows):
-    M = Model(); xs = [Variable(int if it else float, lo, up) for it, lo, up, _, _ in cols]
+    M = Model(); xs = [M.add_variable(int if it else float, lo, up) for it, lo, up, _, _ in cols]
     M.set_objective(sum(c[3] * x for c, x in zip(cols, xs)))
     for r, l, u in rows:
         if not r: continue

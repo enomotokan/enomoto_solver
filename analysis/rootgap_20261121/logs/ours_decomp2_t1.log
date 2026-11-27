@@ -1,0 +1,29 @@
+[   0.000] @@SOLVE_START
+[   0.004] MIP: VUBAGG 0 columns x = y from variable upper bound rows (0.00s)
+[   0.042] MIP_FOLD: integer groups: 1075 accepted, 1 rejected (V_R rows 0; rejected for V_R 0, non-±1 0, TU 1; net true accepted by net 1 work 400 over 0, panics 0, cert fails 0)
+[   0.064] MIP_FOLD: n 14387 -> 7650, m 10765 -> 8721 (ints 14387 -> 7650, int groups 1090 with 7827 cols, bip cols 0, bip rows 0, neg cols 0, absorbed 8722) in 0.060s
+[   0.064] MIP: presolve: TREE2_FORCEQ added 0 doubleton equalities from forcing rows (0.00s)
+[   0.078] MIP: presolve: merged 220 parallel rows (0 new equations)
+[   0.078] MIP: presolve: rows 8721 -> 6481, free columns 7649 -> 6749, nonzeros 43910 -> 32445, postsolve steps 896 (parallel columns merged: 0 integer, 0 continuous)
+[   0.080] MIP: early probing: 64 probed, 0 of 6749 free columns fixed (0.00s), not used
+[   0.086] MIP:   VB01 (loose, best): 1980 fixings, 0 backtracks, fixing rate 0.60 (all columns 0.65)
+[   0.087] MIP:   VB01 (loose, worst): 366 fixings, 0 backtracks, fixing rate 0.99 (all columns 0.99)
+[   0.094] CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 0
+[   0.096] MIP:   VB01 (loose, worst): sub-MIP solution 4.0000000000e0
+[   0.097] MIP:   VB01 (tight): 2468 fixings, 0 backtracks, fixing rate 0.97 (all columns 0.97)
+[   0.103] CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 0
+[   0.104] MIP:   VB01 (tight): sub-MIP solution -1.6000000000e2
+[   0.105] MIP:   VB01 (tight, best): 2507 fixings, 0 backtracks, fixing rate 0.97 (all columns 0.97)
+[   0.114] CUTMIX clique edges total 0 rows 0 implonly 0 implpairs 0 bin 0
+[   0.116] MIP:   VB01 (tight, worst): 132 fixings, 0 backtracks, fixing rate 0.60 (all columns 0.65)
+[   0.116] MIP: VB01 on the presolved problem: -1.6000000000e2 (0.04s)
+[   0.122] MIP: VBCLQ e: the VB01 solution -1.6000000000e2 reaches the pseudo-objective bound (slack 0.000e0); optimal (0.04s)
+[   0.123] HNFPRE: round 0 eq 244 int_eq 244 rat_skip 0 comps 244 done 244 gave_up 0 cols 3904 rank 244 fixes 0 congs 0 (gen 0, tighten 0, max_mod 0) infeasible false (0.001s) gave_up_why 0/0/0
+[   0.123] HNFPRE: round 0 tightened 0 columns
+[   0.123] MIP: the early FJ solution is optimal (objective -1.6e2, feasibility problem); no tree search (0.06s)
+[   0.123] MIP: SUBFIX summary: dives 0 sub-MIPs 0 accepted 0 root-infeasible retries 0 below 0.1 0; success 0 (mean rate NaN), infeasible 0 (mean rate NaN)
+[   0.141] MIP_FOLD: lifted solution objective -160 (folded -160), status Optimal
+[   0.142] MIP: solve returned Optimal after 0.14s (time limit 600.00s)
+[   0.142] MIP: polished the solution (0.14s)
+[   0.144] @@SOLVE_END
+@@RESULT {"status": "optimal", "objective": -160.0, "bound": -160.0, "nodes": 0, "time": 0.14378752499999337}

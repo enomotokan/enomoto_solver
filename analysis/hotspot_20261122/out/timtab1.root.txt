@@ -1,0 +1,32 @@
+== timtab1: {"status": "node_limit", "objective": 983510.9999997803, "bound": 607839.392075503, "nodes": 1, "time": 3.46913623599994
+根のラウンド数 (CUTTK の行): 85、止まり方: "reason":"round_limit" 
+サンプル 3971、うち根のカットのループ 1837 (46.3%)
+   37.8%  分離: その他 (cuts::)
+   34.1%  分離: 経路の集約 (cmir)
+   10.5%  LP の解き直し
+    7.1%  分離: カットの仕上げ
+    5.9%  分離: hnf・mixing など
+    3.0%  その他 (ループの関数そのもの・ほか)
+    0.8%  カットの選び (平行度・点数)
+    0.5%  プールの管理
+    0.3%  伝播・固定
+    0.1%  分離: クリーク・含意
+サンプル 3971、根のカットのループ 1837 (46.3%)
+   36.1%  separate > _core::cuts::generate_cuts
+   35.1%  separate > Solver::path_aggregation::separate
+    7.9%  separate > Solver::separate
+    4.8%  (separate の外) mip_lp::TwoStageLp::solve
+    3.9%  separate > separate そのもの
+    2.8%  separate > mip_lp::TwoStageLp::basis_inverse_row
+    2.0%  (separate の外) ループの関数そのもの
+    1.1%  separate > Solver::s6::from_iter
+    0.8%  separate > Solver::sc::from_iter
+    0.7%  (separate の外) Solver::probe_cut_mode
+    0.7%  separate > _core::separation::pathh_bound_dist
+    0.4%  (separate の外) _core::separation::select_cuts
+    0.4%  (separate の外) io::stdio::_eprint
+    0.3%  (separate の外) Solver::randomized_rounding
+    0.3%  (separate の外) Solver::separate_face_split
+    0.3%  (separate の外) _core::localmip::chain_move
+    0.2%  separate > _core::separation::pathh_row_types
+    0.2%  (separate の外) Solver::add_to_pool

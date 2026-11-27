@@ -2126,6 +2126,33 @@ pub fn factorize_reusing(m: usize, rows_in: &[Vec<(usize, f64)>], prev: Option<&
     Some(ft)
 }
 
+/// 試作 `ENOMOTO_MIP_LU_EXTEND` (analysis/lpiter_20261123、既定では使わない): **与えた列順** (`pivot_col[s]` = ステップ `s` の基底スロット) と
+/// 行順の手がかり (`pivot_row_hint`) で `rows_in` を分解する ([`factorize_reusing_order`] と同じ左視の再生、探索しない)。
+/// LP に行を足した・外したときに、直前の分解の列順 ([`FtLu::pivot_order`]) を写した順で分解し直すのに使う: 足した行のスラック (基底) を
+/// 列順の最後に置くと、古い基底列の新しい行の係数は `L` に入り、新しいスラックは対角 1 のピボットになる (`B' = [B 0; R I]` の分解
+/// `diag(L,I) [I 0; R U^-1 I] diag(U,I)` と同じ形)。`fill_baseline` は直前の通常の分解の非ゼロ数 (fill の上限の基準、
+/// [`factorize_reusing`] と同じ倍率)。順が正しくない・数値的に使い果たした・fill が上限を超えたら `None` (呼び出し側は通常の分解に任せる)。
+pub fn factorize_with_order(m: usize, rows_in: &[Vec<(usize, f64)>], pivot_col: &[usize], pivot_row_hint: &[usize], fill_baseline: usize) -> Option<FtLu> {
+    // 診断 (`ENOMOTO_MIP_XPROF`): 断った理由ごとの数 (`n_lux_dense`・`n_lux_border`・`n_lux_replay`)
+    use crate::simplex::slope_intercept_dual::xcount;
+    if m == 0 || is_dense_input(m, rows_in) {
+        xcount("n_lux_dense");
+        return None;
+    }
+    if border_wanted(m, detect_border_columns(m, rows_in).len()) {
+        xcount("n_lux_border");
+        return None;
+    }
+    let max_nnz = (reuse_fill_limit() * fill_baseline as f64) as usize + m;
+    let Some(lu) = factorize_reusing_order(m, rows_in, pivot_col, pivot_row_hint, max_nnz) else {
+        xcount("n_lux_replay");
+        return None;
+    };
+    let mut ft = FtLu::new(lu);
+    ft.fill_baseline = fill_baseline.max(1);
+    Some(ft)
+}
+
 /// [`factorize`] がこの入力を [`factorize_bordered`] に回すか (同じ判定を切り出したもの)。
 /// [`factorize_reusing`] は境界付きになる基底には再利用を使わない。
 #[allow(dead_code)]
@@ -3733,7 +3760,7 @@ impl EtaFile {
     fn push_scaled_dense(&mut self, key: usize, pivot: f64, src: &[f64], skip: usize, scale: f64, dense_fraction: f64) -> usize {
         let len = src.len();
         // この絶対値未満は格納しない (0 なら厳密な 0 だけ落とす)
-        let tiny = tiny_drop();
+        let tiny = tiny_out();
         let k = self.key.len();
         self.key.push(key as u32);
         self.pivot.push(pivot);
@@ -3801,7 +3828,7 @@ impl EtaFile {
     #[allow(clippy::too_many_arguments)]
     fn push_scaled_list(&mut self, key: usize, pivot: f64, src: &[f64], list: &[usize], skip: usize, scale: f64, dense_fraction: f64) -> usize {
         debug_assert!(list.windows(2).all(|w| w[0] < w[1]));
-        let tiny = tiny_drop();
+        let tiny = tiny_out();
         // 格納する値か (密版の判定と同じ)
         let keep = |i: usize, v: f64| i != skip && if tiny > 0.0 { v.abs() >= tiny } else { v != 0.0 };
         let nnz = list.iter().filter(|&&i| keep(i, scale * src[i])).count();
@@ -3901,11 +3928,55 @@ pub(crate) fn tiny_drop() -> f64 {
     tunable!("ENOMOTO_TINY", TINY_DROP, f64)
 }
 
+/// 診断 `ENOMOTO_DEBUG_LU_CAL=1` (振る舞いは変えない。analysis/lpgap_20261126/README.md 9.6 節): 分解ごとに大きさ (m・nnz(L+U)・消去の積和・見積り
+/// `build_tick`) を残し、[`super::basis_kernel::factorize_basis`] が実際の秒と並べて `LU_CAL` の行を出す (ticks の分解の数え方の較正用)。
+pub(crate) fn lu_cal_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_DEBUG_LU_CAL").is_some())
+}
+
+thread_local! {
+    /// [`lu_cal_on`]: 直近の分解の [m, nnz(L+U), 消去の積和, build_tick]
+    pub(crate) static LU_CAL: std::cell::Cell<[u64; 4]> = const { std::cell::Cell::new([0; 4]) };
+}
+
+/// 試作 `ENOMOTO_LU_TINY_HS` (既定では使わない。analysis/lpgap_20261126/README.md): FTRAN・BTRAN の結果と新しい eta の
+/// 絶対値 1e-14 (HiGHS の `kHighsTiny`) 未満の値を 0 にする。[`tiny_drop`] (`ENOMOTO_TINY`) と違って超疎の経路
+/// ([`FtLu::u_hyper_ok`]・BTRAN の超疎) を切らず、書き出す点 (置換の最終段・非ゼロ一覧) と `U` 段の走査の起点の判定でだけ落とす
+/// (analysis/dense_scan_audit_20260924_150502.md 6 節の方針)。uccase12 の LP 緩和では FTRAN の列の非零の 3 分の 2 が 1e-14 未満だった。
+#[inline]
+pub(crate) fn tiny_hs() -> f64 {
+    static V: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| if env_str!("ENOMOTO_LU_TINY_HS").is_some_and(|v| v != "0" && !v.contains('r')) { 1e-14 } else { 0.0 })
+}
+
+/// `ENOMOTO_LU_TINY_HS` に `r` があれば、書き出す点の切り捨てを絶対 1e-14 でなく「1e-14 × そのベクトルの最大の絶対値」(相対) で行う
+/// (尺度を調整しない LP の経路では、絶対値の判定は値の大きい列で効かず、値の小さい列で意味のある値を捨てうる。README 6.3 節)。
+#[inline]
+pub(crate) fn tiny_hs_rel() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_LU_TINY_HS").is_some_and(|v| v.contains('r')))
+}
+
+/// `ENOMOTO_LU_TINY_HS` に `i` があれば、超疎の `U` 段 (`u_solve_hyper_*`) で絶対値 1e-14 以下の値を起点にせず 0 にする
+/// (HiGHS の `ftranU` の `fabs(pivotX) > kHighsTiny` と同じ。雑音から eta をたどる手間を省く)。
+#[inline]
+fn tiny_in() -> f64 {
+    static V: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| if env_str!("ENOMOTO_LU_TINY_HS").is_some_and(|v| v.contains('i')) { 1e-14 } else { 0.0 })
+}
+
+/// 書き出す点で使う切り捨ての閾値 ([`tiny_drop`] と [`tiny_hs`] の大きいほう)。
+#[inline]
+fn tiny_out() -> f64 {
+    tiny_drop().max(tiny_hs())
+}
+
 /// BTRAN の最終段: ステップ空間の `w` を元の行順 `y[row_perm[s]] = w[s]` に戻す
 /// ([`tiny_drop`] 未満は 0 にする)。
 #[inline]
 fn permute_btran_out(row_perm: &[usize], w: &[f64], y: &mut [f64]) {
-    let tiny = tiny_drop();
+    let tiny = tiny_out();
     if tiny > 0.0 {
         for (s, &v) in w.iter().enumerate() {
             y[row_perm[s]] = if v.abs() < tiny { 0.0 } else { v };
@@ -4400,7 +4471,7 @@ fn finish_b_scratch(scratch_b: &mut [f64], b_list: Option<&[usize]>, track: Opti
 /// `ZERO_W` なら同じパスで `w` を全 0 に戻す ([`UnitBtranWork`] 用)。
 #[inline]
 fn permute_btran_out_capture<const ZERO_W: bool>(row_perm: &[usize], w: &mut [f64], y: &mut [f64], cap: &mut StepCapture) {
-    let tiny = tiny_drop();
+    let tiny = tiny_out();
     // 記録できる非ゼロ数の上限
     let limit = (cap.limit_frac * w.len() as f64) as usize;
     cap.steps.clear();
@@ -4436,7 +4507,7 @@ fn btran_full_out(row_perm: &[usize], w: &mut [f64], y: &mut [f64], cap: Option<
 /// 同じパスで `w` を全 0 に戻す [`permute_btran_out`]。
 #[inline]
 fn permute_btran_out_zeroing(row_perm: &[usize], w: &mut [f64], y: &mut [f64]) {
-    let tiny = tiny_drop();
+    let tiny = tiny_out();
     for (s, wv) in w.iter_mut().enumerate() {
         let v = *wv;
         *wv = 0.0;
@@ -4700,6 +4771,9 @@ pub struct FtLu {
     /// `m` と `L`/`U` の非対角非ゼロ数から 1 回だけ計算する。`CLOCK` トリガは
     /// `tick` が `FACTOR * build_tick` に達したら再分解する。
     build_tick: u64,
+    /// 試作 `ENOMOTO_LU_REFAC_BAL=t`: 分解 1 回の実際の秒 ([`super::basis_kernel::factorize_basis`] が測る) と分解し終えた時刻。
+    build_secs: f64,
+    built_at: std::time::Instant,
     /// [`btran_l_scatter_gate`] の値 (再分解ごとに 1 回取得)。
     btran_l_scatter: f64,
     /// [`u_zero_skip_enabled`] の値 (再分解ごとに 1 回取得、[`Self::u_solve_into`] 参照)。
@@ -4761,6 +4835,25 @@ impl FtLu {
         if flop_coef > 0 {
             let flops: u64 = (0..m).map(|s| base.l_col.seg(s).len() as u64 * owner_count[s] as u64).sum();
             build_tick += flop_coef * flops;
+        }
+        // `ENOMOTO_LU_REFAC_BAL` (2026-11-27 から既定 `k`) ([`super::basis_kernel`] の `refac_bal_due`): 構築の手間を見積りの係数でなく演算の数で数える
+        // (行の走査 m + 因子の非零 + 消去の積和 Σ_s |L 列 s| · |U 行 s|。密なブロックも割り引かない)
+        // `kr`: ticks の時計 ([`crate::ticks`] の LU) には既定の見積りを入れ、再分解の判定だけ下の数え方にする
+        let est_tick = build_tick;
+        if super::basis_kernel::refac_bal_on() || lu_cal_on() {
+            let flops: u64 = (0..m).map(|s| base.l_col.seg(s).len() as u64 * owner_count[s] as u64).sum();
+            if lu_cal_on() {
+                LU_CAL.with(|c| c.set([m as u64, l_nnz + u_off, flops, build_tick]));
+            }
+            if super::basis_kernel::refac_bal_ticks() {
+                // `k`: 実際の秒に合わせて較正した数え方 (密なブロックも割り引かない)。ticks の時計 ([`crate::ticks`] の LU) にもこの値が入る
+                use crate::params::lu::{CAL_BUILD_FLOP_COEF, CAL_BUILD_LU_COEF, CAL_BUILD_M_COEF};
+                build_tick = tunable!("ENOMOTO_T_CAL_BUILD_M_COEF", CAL_BUILD_M_COEF, u64) * m as u64
+                    + tunable!("ENOMOTO_T_CAL_BUILD_LU_COEF", CAL_BUILD_LU_COEF, u64) * (l_nnz + u_off)
+                    + tunable!("ENOMOTO_T_CAL_BUILD_FLOP_COEF", CAL_BUILD_FLOP_COEF, u64) * flops;
+            } else if super::basis_kernel::refac_bal_on() {
+                build_tick = m as u64 + l_nnz + u_off + flops;
+            }
         }
         // fill 基準は対角も含めた全格納要素数 (`factorize_reusing_order` の数え方と一致)。
         let fill_baseline = (l_nnz + u_off) as usize + m;
@@ -4865,10 +4958,12 @@ impl FtLu {
             fill,
             tick: TickCell::new({
                 // 手間の単位 ([`crate::ticks`]): 分解の構築の手間
-                crate::ticks::add(crate::ticks::LU, build_tick);
+                crate::ticks::add(crate::ticks::LU, if super::basis_kernel::refac_bal_ticks_est() { est_tick } else { build_tick });
                 0
             }),
             build_tick,
+            build_secs: 0.0,
+            built_at: std::time::Instant::now(),
             fill_baseline,
             lu_nnz: fill_baseline,
             reuse_fail_streak: 0,
@@ -4950,6 +5045,22 @@ impl FtLu {
     /// この分解自体の構築コスト ([`Self::synth_tick`] と同じ単位)。
     pub fn build_tick(&self) -> u64 {
         self.build_tick
+    }
+
+    /// 試作 `ENOMOTO_LU_REFAC_BAL=t`: 分解 1 回の秒を記録し、経過の起点をいまにする。
+    pub fn set_build_secs(&mut self, secs: f64) {
+        self.build_secs = secs;
+        self.built_at = std::time::Instant::now();
+    }
+
+    /// 試作 `ENOMOTO_LU_REFAC_BAL=t`: 分解 1 回の秒。
+    pub fn build_secs(&self) -> f64 {
+        self.build_secs
+    }
+
+    /// 試作 `ENOMOTO_LU_REFAC_BAL=t`: 分解し終えてからの経過 (ナノ秒)。
+    pub fn secs_since_build_ns(&self) -> u64 {
+        self.built_at.elapsed().as_nanos() as u64
     }
 
     /// 求解段の非ゼロ数 `n` を tick に加える (係数 [`TICK_SOLVE_NNZ_COEF`])。
@@ -5305,6 +5416,7 @@ impl FtLu {
     /// - `U` に密 eta がある場合は `x` に触れずに [`UHyper::NotTried`] を返す (呼び出し側が全走査する)。
     fn u_solve_hyper_heap(&self, x: &mut [f64], gp: &mut GpScratch) -> UHyper {
         let m = self.base.m;
+        let tin = tiny_in();
         if !self.u_seq.dense.is_empty() {
             return UHyper::NotTried;
         }
@@ -5332,6 +5444,10 @@ impl FtLu {
             let k = k as usize;
             let p = self.u_seq.key[k] as usize;
             if x[p] == 0.0 {
+                continue;
+            }
+            if tin > 0.0 && x[p].abs() <= tin {
+                x[p] = 0.0;
                 continue;
             }
             x[p] /= self.u_seq.pivot[k];
@@ -5373,6 +5489,7 @@ impl FtLu {
 
     /// 作業 #10 (F): [`Self::u_solve_hyper_heap`] の待ち行列を [`MonoMaxQueue`] にしたもの (取り出し順・演算は同じ)。
     fn u_solve_hyper_queue(&self, x: &mut [f64], gp: &mut GpScratch, limit: usize) -> UHyper {
+        let tin = tiny_in();
         let GpScratch { reach, r_seeds, u_marks, u_queue, u_list, .. } = gp;
         u_queue.ensure(self.u_seq.key.len());
         u_marks.begin();
@@ -5391,6 +5508,10 @@ impl FtLu {
         while let Some(k) = u_queue.pop() {
             let p = self.u_seq.key[k] as usize;
             if x[p] == 0.0 {
+                continue;
+            }
+            if tin > 0.0 && x[p].abs() <= tin {
+                x[p] = 0.0;
                 continue;
             }
             x[p] /= self.u_seq.pivot[k];
@@ -5591,6 +5712,7 @@ impl FtLu {
     /// 付きで散布する。非ゼロ数を返す。`u_zero_skip` on かつ微小値切捨てなしのときのみ使う。
     fn permute_list(&self, scratch: &[f64], out: &mut [f64], list: &[usize]) -> usize {
         out.fill(0.0);
+        let tiny = if tiny_hs_rel() { 1e-14 * list.iter().map(|&q| (scratch[q] / if self.single_piv[q] != 0.0 { self.single_piv[q] } else { 1.0 }).abs()).fold(0.0, f64::max) } else { tiny_hs() };
         let mut nnz = 0usize;
         let col_perm = &self.base.col_perm;
         let piv = &self.single_piv;
@@ -5599,6 +5721,9 @@ impl FtLu {
             let d = piv[s];
             if d != 0.0 && v != 0.0 {
                 v /= d;
+            }
+            if v.abs() < tiny {
+                v = 0.0;
             }
             out[col_perm[s]] = v;
             nnz += (v != 0.0) as usize;
@@ -5609,6 +5734,7 @@ impl FtLu {
     /// 前回の位置を消してから書き、書いた位置を `t` に記録する [`Self::permute_list`] (策1)。
     fn permute_list_tracked(&self, scratch: &[f64], out: &mut [f64], list: &[usize], t: &mut NzTrack) -> usize {
         t.reset(out);
+        let tiny = if tiny_hs_rel() { 1e-14 * list.iter().map(|&q| (scratch[q] / if self.single_piv[q] != 0.0 { self.single_piv[q] } else { 1.0 }).abs()).fold(0.0, f64::max) } else { tiny_hs() };
         let mut nnz = 0usize;
         let col_perm = &self.base.col_perm;
         let piv = &self.single_piv;
@@ -5617,6 +5743,9 @@ impl FtLu {
             let d = piv[s];
             if d != 0.0 && v != 0.0 {
                 v /= d;
+            }
+            if v.abs() < tiny {
+                v = 0.0;
             }
             let i = col_perm[s];
             out[i] = v;
@@ -6639,7 +6768,7 @@ impl FtLu {
     #[inline]
     fn permute_out(&self, scratch: &[f64], out: &mut [f64]) -> usize {
         let mut nnz = 0usize;
-        let tiny = tiny_drop();
+        let tiny = if tiny_hs_rel() { tiny_drop().max(1e-14 * (0..self.base.m).map(|q| (scratch[q] / if self.u_zero_skip && self.single_piv[q] != 0.0 { self.single_piv[q] } else { 1.0 }).abs()).fold(0.0, f64::max)) } else { tiny_out() };
         let m = self.base.m;
         let col_perm = &self.base.col_perm[..m];
         let scratch = &scratch[..m];
@@ -7782,6 +7911,12 @@ impl FtLu {
     }
 
     /// 最後の分解以降に成功した FT 更新の数 (= `R` eta の数)。
+    /// 試作 `ENOMOTO_MIP_LU_EXTEND` ([`factorize_with_order`]): この分解の列順・行順 (ステップ `s` の基底スロットと行) と、fill の上限の
+    /// 基準 (直前の通常の分解の非ゼロ数)。密ブロックを持つ分解は `None` (左視の再生には向かない)。
+    pub fn pivot_order(&self) -> Option<(&[usize], &[usize], usize)> {
+        (self.base.dense_s0 >= self.base.col_perm.len()).then_some((&self.base.col_perm[..], &self.base.row_perm[..], self.fill_baseline))
+    }
+
     pub fn update_count(&self) -> usize {
         self.r_etas.n_headers()
     }
@@ -8843,6 +8978,97 @@ mod tests {
         let first = factorize(m, &rows).expect("factorizes");
         // `max_nnz` が対角だけより小さい: どんな分解も収まらないのでガードが働くこと。
         assert!(factorize_reusing_order(m, &rows, &first.col_perm, &first.row_perm, 1).is_none());
+    }
+
+    /// 試作 `ENOMOTO_MIP_LU_EXTEND` の確かめ: 2 つの分解が FTRAN・BTRAN で同じ答えを返し、どちらも残差が小さい。
+    fn assert_same_solves(rows: &[Vec<(usize, f64)>], a: &FtLu, b: &FtLu, what: &str) {
+        let m = rows.len();
+        let mut state = 4242u64;
+        for t in 0..5 {
+            let rhs: Vec<f64> = (0..m).map(|_| next_rand(&mut state)).collect();
+            let mut scratch = vec![0.0; m];
+            let (mut xa, mut xb) = (vec![0.0; m], vec![0.0; m]);
+            a.solve_into(&rhs, &mut scratch, &mut xa);
+            b.solve_into(&rhs, &mut scratch, &mut xb);
+            assert!(residual_inf(rows, &xa, &rhs) < 1e-9, "{what} {t}: FTRAN residual");
+            for i in 0..m {
+                assert!((xa[i] - xb[i]).abs() < 1e-9, "{what} {t}, {i}: FTRAN {} vs {}", xa[i], xb[i]);
+            }
+            let (ya, yb) = (a.solve_transpose(&rhs), b.solve_transpose(&rhs));
+            for i in 0..m {
+                assert!((ya[i] - yb[i]).abs() < 1e-9, "{what} {t}, {i}: BTRAN {} vs {}", ya[i], yb[i]);
+            }
+        }
+    }
+
+    /// 試作 `ENOMOTO_MIP_LU_EXTEND`: 基底にスラックとして入る行を足した `B' = [B 0; R I]` を、直前の分解の列順の後ろに
+    /// 新しいスラックを置いた順で分解 ([`factorize_with_order`]) すると、一からの分解と同じ答えになる (列を入れ替えて順が古く
+    /// なった場合も)。
+    #[test]
+    fn factorize_with_order_extends_a_basis_by_slack_rows() {
+        for (seed, replaced) in [(11u64, 0usize), (12, 3), (13, 6)] {
+            let m0 = 40;
+            let mut rows = random_sparse_diag_dominant(m0, seed);
+            let lu0 = FtLu::new(factorize(m0, &rows).expect("factorizes"));
+            let (col, row, fill) = lu0.pivot_order().expect("sparse factorization has an order");
+            let (mut col, mut row) = (col.to_vec(), row.to_vec());
+            if replaced > 0 {
+                replace_columns(&mut rows, replaced, seed + 100);
+            }
+            let k = 6;
+            let mut state = seed * 7 + 1;
+            for i in 0..k {
+                let mut r: Vec<(usize, f64)> = (0..3).map(|t| ((i * 5 + t * 13 + seed as usize) % m0, next_rand(&mut state))).collect();
+                r.sort_unstable_by_key(|e| e.0);
+                r.dedup_by_key(|e| e.0);
+                r.push((m0 + i, 1.0));
+                rows.push(r);
+            }
+            let m = m0 + k;
+            col.extend(m0..m);
+            row.extend(m0..m);
+            let ext = factorize_with_order(m, &rows, &col, &row, fill).expect("extends");
+            let fresh = FtLu::new(factorize(m, &rows).expect("factorizes"));
+            assert_same_solves(&rows, &ext, &fresh, &format!("extend seed {seed} replaced {replaced}"));
+        }
+    }
+
+    /// 試作 `ENOMOTO_MIP_LU_EXTEND`: スラック (単位列) が基底にある行を外した基底を、直前の分解の列順・行順からその位置と行を抜いて
+    /// 番号を詰めた順で分解すると、一からの分解と同じ答えになる。
+    #[test]
+    fn factorize_with_order_shrinks_a_basis_by_slack_rows() {
+        for seed in [21u64, 22, 23] {
+            let m0 = 40;
+            let mut rows = random_sparse_diag_dominant(m0, seed);
+            // 位置 p を行 r のスラックにする (列 p は行 r の 1 だけ)
+            let slacks: Vec<(usize, usize)> = (0..5).map(|t| ((t * 7 + seed as usize) % m0, (t * 11 + 3 + seed as usize) % m0)).collect();
+            let mut used_p = std::collections::HashSet::new();
+            let mut used_r = std::collections::HashSet::new();
+            let slacks: Vec<(usize, usize)> = slacks.into_iter().filter(|&(p, r)| used_p.insert(p) && used_r.insert(r)).collect();
+            for &(p, r) in &slacks {
+                for row in rows.iter_mut() {
+                    row.retain(|&(c, _)| c != p);
+                }
+                rows[r].push((p, 1.0));
+                rows[r].sort_unstable_by_key(|e| e.0);
+            }
+            let Some(lu0) = factorize(m0, &rows).map(FtLu::new) else { continue };
+            let (col, row, fill) = lu0.pivot_order().expect("sparse factorization has an order");
+            let gone_p: Vec<bool> = (0..m0).map(|p| slacks.iter().any(|s| s.0 == p)).collect();
+            let gone_r: Vec<bool> = (0..m0).map(|r| slacks.iter().any(|s| s.1 == r)).collect();
+            let map = |gone: &[bool]| -> Vec<usize> {
+                let mut k = 0;
+                gone.iter().map(|&g| if g { usize::MAX } else { k += 1; k - 1 }).collect()
+            };
+            let (np, nr) = (map(&gone_p), map(&gone_r));
+            let small: Vec<Vec<(usize, f64)>> = (0..m0).filter(|&r| !gone_r[r]).map(|r| rows[r].iter().filter(|e| !gone_p[e.0]).map(|&(c, v)| (np[c], v)).collect()).collect();
+            let col: Vec<usize> = col.iter().filter(|&&p| np[p] != usize::MAX).map(|&p| np[p]).collect();
+            let row: Vec<usize> = row.iter().filter(|&&r| nr[r] != usize::MAX).map(|&r| nr[r]).collect();
+            let m = small.len();
+            let shr = factorize_with_order(m, &small, &col, &row, fill).expect("shrinks");
+            let fresh = FtLu::new(factorize(m, &small).expect("factorizes"));
+            assert_same_solves(&small, &shr, &fresh, &format!("shrink seed {seed}"));
+        }
     }
 
     /// 列置換を繰り返しながら `factorize_reusing` で再分解した結果が、同じ行列の

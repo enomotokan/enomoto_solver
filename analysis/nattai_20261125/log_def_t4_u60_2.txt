@@ -1,0 +1,17 @@
+Root LP: the two-phase method finished first (0.33s)
+HNFPRE: round 0 eq 2308 int_eq 20 rat_skip 0 comps 20 done 20 gave_up 0 cols 162 rank 20 fixes 0 congs 0 (gen 0, tighten 0, max_mod 0) infeasible false (0.000s) gave_up_why 0/0/0
+HNFPRE: round 0 tightened 0 columns
+Presolve: 29452 rows, 14544 columns -> 24881 rows, 11162 columns (0.85s)
+Root LP: objective 0.0000000000e0 (0.06s)
+Root cuts: objective 0.0000000000e0 -> 0.0000000000e0, 23 cuts in the LP (0.86s)
+     time      nodes      open        best bound         incumbent       gap
+    55.5s          1         0     0.000000000e0    9.074615350e-1    90.75%
+MIP: MEMCAP: tid 0 limit 12575 MB peak rss 590 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0
+MIP: MEMCAP: tid 1 limit 12575 MB peak rss 590 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0
+MIP: MEMCAP: tid 2 limit 12575 MB peak rss 601 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0
+MIP: MEMCAP: tid 3 limit 12575 MB peak rss 601 MB level-reads 0/0/0 first-at 0.0/0.0/0.0 s; strips 0 local dse 0 basis 0 pool dse 0 basis 0 siblu 0
+    59.1s          1         0     0.000000000e0    9.074614860e-1    90.75%
+MIP: RCSTRONG: knapsack row (all threads, cumulative): calls 0, pruned 0, tightened 0, built 1 (mean length 0.0)
+MIP: POLISH_WARM: LPs 1 (replaced 1, not solved 0), leak estimates 11, 0.063s, 2317 iters; uncertain estimates in the tree 11; uncertain at the end 1 (returned the verified solution 0, polished without the deadline 1 in 0.063s); final leak estimate 0.000e0 (added)
+MIP: POLISH_STRICT=2: incumbent polishes 0 (replaced 0), 0.000s
+{"cfg": "def_t4", "env": {"ENOMOTO_MIP_POLISH_STATS": "1u", "ENOMOTO_MIP_SEEDU": "2"}, "status": "time_limit", "objective": 0.9074614859999939, "bound": 0.0, "nodes": 1, "time": 60.130209579999246}
