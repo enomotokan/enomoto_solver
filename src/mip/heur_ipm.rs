@@ -286,5 +286,5 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
 /// 試作 `ENOMOTO_MIP_HO4_ACFIX` の `d` ([`Solver::acfix_dual`])
 pub(super) fn acfix_d() -> bool {
-    env_str!("ENOMOTO_MIP_HO4_ACFIX").is_some_and(|v| v.contains('d'))
+    env_str!("ENOMOTO_MIP_HO4_ACFIX").is_some_and(|v| v.contains('d')) || super::solver::rootrestart2('a')
 }

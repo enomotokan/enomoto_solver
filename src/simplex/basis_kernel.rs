@@ -803,7 +803,7 @@ pub(super) fn factorize_basis(
     prev: Option<&sparse_lu::FtLu>,
 ) -> Option<sparse_lu::FtLu> {
     let m = std.n_rows;
-    let t_build = refac_bal_secs().then(std::time::Instant::now);
+    let t_build = (refac_bal_secs() || sparse_lu::lu_cal_on()).then(std::time::Instant::now);
     if let Some(p) = prev {
         if env_str!("ENOMOTO_DEBUG_FT_FILL").is_some() {
             let (u, r) = p.u_r_nnz();
@@ -851,7 +851,12 @@ pub(super) fn factorize_basis(
     // 試作 `ENOMOTO_LU_REFAC_BAL=t` ([`refac_bal_due`]): 分解 1 回の実際の秒と、分解し終えた時刻を因子に残す
     r.map(|mut lu| {
         if let Some(t0) = t_build {
-            lu.set_build_secs(t0.elapsed().as_secs_f64());
+            let secs = t0.elapsed().as_secs_f64();
+            lu.set_build_secs(secs);
+            if sparse_lu::lu_cal_on() {
+                let [mm, nnz, flops, bt] = sparse_lu::LU_CAL.with(|c| c.get());
+                eprintln!("LU_CAL m={mm} nnz={nnz} flops={flops} build_tick={bt} secs={secs:.6} prev_solve_tick={}", prev.map_or(0, |p| p.synth_tick()));
+            }
         }
         lu
     })
@@ -979,6 +984,13 @@ pub(super) fn refac_bal_on() -> bool {
 pub(super) fn refac_bal_secs() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
     *V.get_or_init(|| env_str!("ENOMOTO_LU_REFAC_BAL").is_some_and(|v| v.contains('t')))
+}
+
+/// `ENOMOTO_LU_REFAC_BAL` に `k` があれば、分解の手間を ticks の時計 ([`crate::ticks`] の LU と同じ `build_tick`) で数える (決定的)。
+#[inline]
+pub(super) fn refac_bal_ticks() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_LU_REFAC_BAL").is_some_and(|v| v.contains('k')))
 }
 
 fn refac_bal_due(lu: &sparse_lu::FtLu, hist: &mut Vec<u64>) -> bool {

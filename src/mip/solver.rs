@@ -4445,9 +4445,15 @@ thread_local! {
     pub(crate) static OBJSHAVE_CARRY: std::cell::Cell<f64> = const { std::cell::Cell::new(f64::NEG_INFINITY) };
 }
 
-/// `ENOMOTO_MIP_OBJSHAVE=d` (木が止まりかけたときだけ専任に回す形)
+/// 試作 `ENOMOTO_MIP_OBJSHAVE` の文字 (値に含まれるか): `d` = 木が止まりかけたときだけ専任に回す形、`j` = 証明の前に締めた問題で FJ・Local-MIP を
+/// 軽く回す形 ([`ShaveShared::try_fj`])、`c` = 目的が整数の刻みを取らない問題にも広げる形 (δ をギャップの二分で決める)。`1` (文字なし) ははじめから専任のスレッド
+pub(super) fn objshave_has(c: char) -> bool {
+    objshave_on() && env_str!("ENOMOTO_MIP_OBJSHAVE").is_some_and(|v| v.contains(c))
+}
+
+/// `ENOMOTO_MIP_OBJSHAVE` に `d` (木が止まりかけたときだけ専任に回す形)
 pub(super) fn objshave_dynamic() -> bool {
-    env_str!("ENOMOTO_MIP_OBJSHAVE") == Some("d")
+    objshave_has('d')
 }
 
 /// 下界の専任 (試作 `ENOMOTO_MIP_OBJSHAVE`) の共有の状態。専任のスレッド (`1`) か、役に就いた木のスレッド (`d`) が [`Self::try_once`] で
@@ -4472,10 +4478,12 @@ pub(super) struct ShaveShared {
     active: std::sync::atomic::AtomicBool,
     /// 直前の試しで証明が当たったか (当たり続ける間は役を続ける)
     hit: std::sync::atomic::AtomicBool,
-    /// (k, 1 回の時間の上限 [秒])
+    /// (k、1 回の時間の上限 [秒])。k は整数の刻みのときは δ の段の数、連続の目的 (`c`、`step` = 0) のときはギャップに対する δ の割合
     kb: std::sync::Mutex<(f64, f64)>,
-    /// (試し, 証明, 時間切れ, 解あり, 役に就いた回数, 主が受け取った解)
-    stats: [std::sync::atomic::AtomicU64; 6],
+    /// 主のギャップの許容 (rel_gap, abs_gap)。連続の目的の二分の終わりと、C を暫定解の値から離す幅に使う (主の刈り [`prune_limit_of`] と同じ水準)
+    gap_tol: (f64, f64),
+    /// (試し, 証明, 時間切れ, 解あり, 役に就いた回数, 主が受け取った解, FJ・Local-MIP を回した回数, FJ・Local-MIP が解を見つけた回数)
+    stats: [std::sync::atomic::AtomicU64; 8],
     /// 写しの求解が見つけた解 (主の問題の空間。主が `try_incumbent` で検査してから受け取る)
     out: std::sync::Mutex<Vec<Vec<f64>>>,
 }
@@ -4484,13 +4492,15 @@ impl ShaveShared {
     fn summary(&self) -> String {
         let s: Vec<u64> = self.stats.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
         format!(
-            "tries {} proved {} time limit {} solution {} role entries {} solutions accepted {} lower bound {:.10e}",
+            "tries {} proved {} time limit {} solution {} role entries {} solutions accepted {} fj tries {} fj found {} lower bound {:.10e}",
             s[0],
             s[1],
             s[2],
             s[3],
             s[4],
             s[5],
+            s[6],
+            s[7],
             f64::from_bits(self.lb.load(std::sync::atomic::Ordering::Acquire))
         )
     }
@@ -4513,21 +4523,55 @@ impl ShaveShared {
         let proven = f64::from_bits(self.lb.load(Ordering::Acquire));
         let l = proven.max(l_hint).max(f64::from_bits(self.tree_lb.load(Ordering::Relaxed))).max(self.l0);
         let (step, off) = (self.step, self.off);
-        let m0 = ((l - off) / step - 1e-9).ceil();
         let lim = self.snap.valid_below.min(ub);
-        let kmax = if lim.is_finite() { ((lim - off) / step + 0.5 - 1e-9).floor() - m0 } else { f64::INFINITY };
-        if kmax < 1.0 {
-            // 間隙は閉じている (主が閉じる) か、写しの固定が成り立つ範囲を越えた
-            if self.verbose && env_str!("ENOMOTO_MIP_OBJSHAVE_DEBUG").is_some() {
-                eprintln!("MIP: OBJSHAVE: nothing to try (L {l:.10e}, valid below {:.10e}, ub {ub:.10e})", self.snap.valid_below);
-            }
-            return (false, false);
-        }
         let (k, budget) = *self.kb.lock().unwrap();
-        let kk = k.min(kmax);
-        let c = off + (m0 + kk - 0.5) * step;
+        // 打ち切り値 C、示せたときの下界 v、この回の k (kk)、k の下限に着いているか (着いていれば時間切れで 1 回の時間を 2 倍にする)
+        let (c, v, kk, at_floor) = if step > 0.0 {
+            // 整数の刻み: C = off + (m0 + kk − 1/2) step <= lim となる最大の kk まで
+            let m0 = ((l - off) / step - 1e-9).ceil();
+            let kmax = if lim.is_finite() { ((lim - off) / step + 0.5 - 1e-9).floor() - m0 } else { f64::INFINITY };
+            if kmax < 1.0 {
+                // 間隙は閉じている (主が閉じる) か、写しの固定が成り立つ範囲を越えた
+                if self.verbose && env_str!("ENOMOTO_MIP_OBJSHAVE_DEBUG").is_some() {
+                    eprintln!("MIP: OBJSHAVE: nothing to try (L {l:.10e}, valid below {:.10e}, ub {ub:.10e})", self.snap.valid_below);
+                }
+                return (false, false);
+            }
+            let kk = k.min(kmax);
+            (off + (m0 + kk - 0.5) * step, off + (m0 + kk) * step, kk, kk <= 1.0)
+        } else {
+            // 連続の目的 (`c`): 間隙 g = lim − L を二分する。C = L + kk g (kk は始め 1/2)。C は lim から主のギャップの許容 tol
+            // (= max(rel_gap |lim|, abs_gap)、主の刈りの水準) だけ下に抑え、間隙が tol 以下なら試さない (二分の終わり)。δ = kk g の下限は tol
+            if !lim.is_finite() || !l.is_finite() {
+                return (false, false);
+            }
+            let tol = (self.gap_tol.0 * lim.abs()).max(self.gap_tol.1).max(1e-9 * lim.abs().max(1.0));
+            let g = lim - l;
+            if g <= tol {
+                return (false, false);
+            }
+            let kmax = (g - tol) / g;
+            let kfloor = (tol / g).min(kmax);
+            let kk = k.min(kmax).max(kfloor);
+            let c = l + kk * g;
+            (c, c, kk, kk <= kfloor * (1.0 + 1e-9))
+        };
         let t = budget.min(left);
         let ts = Instant::now();
+        // `j`: 証明の前に、締めた問題 (写しの大域の境界 + 「目的 <= C」) で FJ・Local-MIP を軽く回す。解があれば、この段は示せない
+        // (C より良い解がある) ので証明を回さず、見つけた解を主に渡し、証明で解が見つかったときと同じく k を半分にする
+        if objshave_has('j') {
+            if let Some(x) = self.try_fj(c, t) {
+                self.out.lock().unwrap().push(x);
+                let mut kb = self.kb.lock().unwrap();
+                kb.0 = if step > 0.0 { (kk * 0.5).floor().max(1.0) } else { kk * 0.5 };
+                self.hit.store(false, Ordering::Relaxed);
+                if self.verbose {
+                    eprintln!("MIP: OBJSHAVE: L {l:.10e} cutoff {c:.10e} (k {kk}) -> FJ/Local-MIP found a solution ({:.2}s); next k {} ({:.2}s)", ts.elapsed().as_secs_f64(), kb.0, self.t0.elapsed().as_secs_f64());
+                }
+                return (true, false);
+            }
+        }
         // 写しの求解は、このスレッドの共有の値 (ポートフォリオ)・LP の止める合図・デバッグ解を持ち込まない (木のスレッドが役で試すとき)
         let pf = thread_portfolio();
         set_thread_portfolio(None);
@@ -4551,7 +4595,6 @@ impl ShaveShared {
         let mut kb = self.kb.lock().unwrap();
         let what = if complete {
             self.stats[1].fetch_add(1, Ordering::Relaxed);
-            let v = off + (m0 + kk) * step;
             let mut cur = self.lb.load(Ordering::Relaxed);
             while v > f64::from_bits(cur) {
                 match self.lb.compare_exchange_weak(cur, v.to_bits(), Ordering::AcqRel, Ordering::Relaxed) {
@@ -4563,12 +4606,12 @@ impl ShaveShared {
             "proved"
         } else if r.objective.is_some_and(|z| z < c) {
             self.stats[3].fetch_add(1, Ordering::Relaxed);
-            kb.0 = (kk * 0.5).floor().max(1.0);
+            kb.0 = if step > 0.0 { (kk * 0.5).floor().max(1.0) } else { kk * 0.5 };
             "solution"
         } else {
             self.stats[2].fetch_add(1, Ordering::Relaxed);
-            if kk > 1.0 {
-                kb.0 = (kk * 0.5).floor().max(1.0);
+            if !at_floor {
+                kb.0 = if step > 0.0 { (kk * 0.5).floor().max(1.0) } else { kk * 0.5 };
             } else {
                 kb.1 *= 2.0;
             }
@@ -4589,6 +4632,43 @@ impl ShaveShared {
             );
         }
         (true, complete)
+    }
+}
+
+impl ShaveShared {
+    /// `j`: 写しの問題に写しの大域の境界と「目的 <= C」の行を足した問題で、FJ2 と Local-MIP を 1 本で交互に回す (既存の
+    /// [`super::feas_fj_lmip_early_from`]、試作 `ENOMOTO_MIP_FP_STAGE3_LS` と同じ呼び方。`ENOMOTO_MIP_TICKS` の `f` なら上限を手間で数える)。
+    /// 上限は根の後のやり直しの FJ と同じ配分 (この回の時間 `t` の `ENOMOTO_T_MIP_ROBUST_FJ_FRAC` 倍、`ENOMOTO_T_MIP_ROBUST_FJ_SECS` 秒まで) に、
+    /// 当たりの率 (見つけた回数 + 1) / (回した回数 + 2) (= 当たりの対数オッズのシグモイド) を掛ける。0.1 秒以下なら回さない (やり直しの FJ と同じ)
+    fn try_fj(&self, c: f64, t: f64) -> Option<Vec<f64>> {
+        use std::sync::atomic::Ordering;
+        let (tries, found) = (self.stats[6].load(Ordering::Relaxed), self.stats[7].load(Ordering::Relaxed));
+        let rate = (found as f64 + 1.0) / (tries as f64 + 2.0);
+        let cap = tunable!("ENOMOTO_T_MIP_ROBUST_FJ_SECS", 6.0, f64).min(tunable!("ENOMOTO_T_MIP_ROBUST_FJ_FRAC", 0.15, f64) * t) * rate;
+        if cap <= 0.1 {
+            return None;
+        }
+        let p = &self.snap.p;
+        let mut rows = p.rows.clone();
+        let mut row_lo = p.row_lo.clone();
+        let mut row_up = p.row_up.clone();
+        let row: Vec<(usize, f64)> = (0..p.n).filter(|&j| p.cost[j] != 0.0).map(|j| (j, p.cost[j])).collect();
+        if row.is_empty() {
+            return None;
+        }
+        rows.push(row);
+        row_lo.push(f64::NEG_INFINITY);
+        row_up.push(c - p.offset);
+        let q = super::problem::MipProblem::from_rows(self.snap.lo.clone(), self.snap.up.clone(), p.cost.clone(), p.offset, 1.0, p.is_int.clone(), rows, row_lo, row_up);
+        let salt = 0x0B75_4A7E_0000_0001u64 ^ self.params.seed ^ tries.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        self.stats[6].fetch_add(1, Ordering::Relaxed);
+        let x = super::with_presolve_deadline(Some(self.deadline), || super::feas_fj_lmip_early_from(&q, 1, cap, false, salt, None, false))?;
+        // 締めた問題で実行可能 (= 写しの問題で実行可能で目的 <= C) なものだけを渡す。主は主の問題でもう一度確かめる
+        if !q.is_feasible(&x, 1e-6) {
+            return None;
+        }
+        self.stats[7].fetch_add(1, Ordering::Relaxed);
+        Some(x)
     }
 }
 
@@ -4938,6 +5018,16 @@ pub(crate) fn better_obj(z: f64, b: f64, scale: f64) -> bool {
     } else {
         z < b - 1e-9 * scale.abs().max(1.0)
     }
+}
+
+/// 試作 `ENOMOTO_MIP_ROOTRESTART2` (既定では使わない。analysis/rootrestart_20261126): 根の再スタートの判定を、固定の割合の閾値
+/// (初回 1%・2 回目以降 2.5%、分母は全部の整数列) から「次の段の手間 W × 縮む割合 s」と「再スタートの手間 C」の比べにする
+/// ([`Solver::rr2_value`])。新しい閾値は置かない。文字:
+/// - `e`: 根の最後の判定 (`maybe_restart`、木の中の再スタートは今のまま)。W = 期限までの残り (木は解けるまで残りの時間を使う)
+/// - `m`: 根のカットのラウンドの頭でも判定する (被約費用で固定できる列も数える)。W = 残りのラウンドの見込みの秒
+/// - `a`: 根の内点法の丸めの初めに、費用 0 の内点法の双対で固定する (`ENOMOTO_MIP_HO4_ACFIX=d` と同じ。HiGHS の解析的中心による固定に当たる)
+pub(crate) fn rootrestart2(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_ROOTRESTART2").is_some_and(|v| v.contains(c))
 }
 
 /// 試作 `ENOMOTO_MIP_LMBOOST` (COMP07、既定では使わない): [`Solver::lmip_boost`]。
@@ -6686,6 +6776,9 @@ pub(super) fn rcloop_has(c: char) -> bool {
 thread_local! {
     /// [`Solver::rcloop_restart_ok`]: 前の再スタートを決めたときの根の下界 (外側の主の求解のスレッド、最初の根で NaN に戻す)
     static RCLOOP_PREV_ROOT_LB: std::cell::Cell<f64> = const { std::cell::Cell::new(f64::NAN) };
+    /// 試作 `ENOMOTO_MIP_ROOTRESTART2` ([`rootrestart2`]): 根の再スタートを決めた時刻 (外側の経過秒) と、前の再スタートに実際にかかった秒
+    /// (決めてから次の根の LP が解けるまで: 前処理のかけ直し + 根の LP の解き直し)
+    static RR2_STATE: std::cell::Cell<(f64, f64)> = const { std::cell::Cell::new((f64::NAN, f64::NAN)) };
 }
 
 pub(super) fn lp_int_bounds() -> bool {
@@ -12153,6 +12246,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // (CMS750_4 の 1 スレッド: 根の LP が前処理の LP の基底から 1 反復で終わり、FP の LP が予算約 1000 反復で 2 回目に打ち切られていた)
         let root_iters = if env_str!("ENOMOTO_MIP_P2RIT").is_some_and(|v| v.contains('a')) || heur_adapt() { self.root_lp_iters } else { root_iters };
         self.root_lp_secs = t_root_lp.elapsed().as_secs_f64();
+        if rootrestart2('e') || rootrestart2('m') {
+            self.rr2_root_done();
+        }
         self.root_lp_ticks = crate::ticks::total() - tk_root_lp;
         if !self.params.submip {
             // 最大を残す (裏のカットの写しの根の LP は主の基底から 1 反復で終わり、0 秒で上書きしてしまうので)。正の f64 のビットは
@@ -26268,6 +26364,49 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 早めの再スタートの判定 ([`Self::proto_restart_ok`] と同じ形、割合は `ENOMOTO_T_MIP_LOSE6_3_CUTRESTART_FRAC` (既定 0.1)) を通るなら、
     /// 固定できる列の数を返す (固定はしない。ループを抜けた後の早めの被約費用の記録で固定される)。p200x1188c では Local-MIP が
     /// カットのループの途中 (25 ラウンド目の前後) で最適解を出しても、強いカットの延長で 85 ラウンドまで回してから再スタートしていた
+    /// 試作 `ENOMOTO_MIP_ROOTRESTART2` の `m`: 根のカットのラウンドの頭で、被約費用で今すぐ固定できる整数列 (暫定解の打ち切り値で) と
+    /// 新たに固定済みの整数列の割合 s (自由だった整数列に対する本数の割合) を数え、残りのラウンドの見込み `w` 秒との比べ ([`Self::rr2_value`])
+    /// が通れば、固定できる本数を返す
+    pub(super) fn rr2_cut_restart_due(&self, w: f64) -> Option<usize> {
+        if self.params.submip || self.snap.is_some() || self.incumbent.is_none() || self.time_up() || env_str!("ENOMOTO_MIP_NO_RESTART").is_some() {
+            return None;
+        }
+        if self.params.restarts >= max_restarts(self.p) {
+            return None;
+        }
+        let would = self.redcost_fixable_now()?;
+        let free = self.p.nint.saturating_sub(self.root_fixed0);
+        let s = (self.newly_fixed_ints() + would) as f64 / free.max(1) as f64;
+        (would > 0 && self.rr2_value(w, s, "cut round")).then_some(would)
+    }
+
+    /// 今の LP (根) の被約費用と打ち切り値で、新たに固定できる整数列の数 (`lose6_3_cut_restart_due` と同じ数え方)。打ち切り値がなければ None
+    fn redcost_fixable_now(&self) -> Option<usize> {
+        let p = self.p;
+        let gap = self.prune_limit() - (self.lp.objective() + p.offset);
+        if !gap.is_finite() || gap < 0.0 {
+            return None;
+        }
+        let b = self.lp.basis_ref();
+        let d = self.lp.reduced_costs_ref();
+        let mut would = 0usize;
+        for j in 0..p.n {
+            if !p.is_int[j] || self.dom.global_lo[j] >= self.dom.global_up[j] {
+                continue;
+            }
+            let (lo, up) = (self.dom.global_lo[j], self.dom.global_up[j]);
+            let fixes = match b.col[j] {
+                VarStatus::Lower if d[j] > 1e-7 => (gap / d[j]).floor() < 1.0 && up - lo >= 1.0,
+                VarStatus::Upper if d[j] < -1e-7 => (gap / -d[j]).floor() < 1.0 && up - lo >= 1.0,
+                _ => false,
+            };
+            if fixes {
+                would += 1;
+            }
+        }
+        Some(would)
+    }
+
     pub(super) fn lose6_3_cut_restart_due(&self) -> Option<usize> {
         if self.params.submip || self.snap.is_some() || self.incumbent.is_none() || self.time_up() || env_str!("ENOMOTO_MIP_NO_RESTART").is_some() {
             return None;
@@ -26722,6 +26861,40 @@ impl<'a, L: MipLp> Solver<'a, L> {
         );
     }
 
+    /// 試作 `ENOMOTO_MIP_ROOTRESTART2` の判定: 縮む割合 `s` (新たに固定した列の非零 / 根の始めに自由だった列の非零) の分だけ次の段の手間
+    /// `w` 秒が軽くなる見込み `w s` と、再スタートの手間 `C` 秒 (前の再スタートで実際にかかった秒、初回はここまでの外側の経過秒 = 前処理 +
+    /// 根の LP + カット) を比べ、シグモイド σ(ln(w s / C)) が 1/2 以上 (w s >= C) なら真
+    pub(super) fn rr2_value(&self, w: f64, s: f64, tag: &str) -> bool {
+        let (_, last) = RR2_STATE.with(|c| c.get());
+        let c = if last.is_finite() && last > 0.0 { last } else { super::outer_elapsed().unwrap_or_else(|| self.start.elapsed().as_secs_f64()).max(1e-3) };
+        let g = if s > 0.0 && w > 0.0 { (w * s / c).ln() } else { f64::NEG_INFINITY };
+        let sig = 1.0 / (1.0 + (-g).exp());
+        if self.params.verbose {
+            eprintln!("MIP: ROOTRESTART2 {tag}: next stage {w:.2}s x shrink {s:.4} vs restart cost {c:.2}s{}: sigmoid {sig:.3} -> restart {}", if last.is_finite() { " (measured)" } else { " (estimated)" }, sig >= 0.5);
+        }
+        sig >= 0.5
+    }
+
+    /// [`rootrestart2`] の再スタートを決めた時刻を置く (次の根の LP の後で [`Self::rr2_root_done`] が手間を測る)
+    fn rr2_mark(&self) {
+        let t = super::outer_elapsed().unwrap_or(f64::NAN);
+        RR2_STATE.with(|c| c.set((t, c.get().1)));
+    }
+
+    /// [`rootrestart2`]: 再スタートの後の根の LP が解けたら、再スタートにかかった秒を記録する
+    pub(super) fn rr2_root_done(&self) {
+        if self.params.submip || self.params.restarts == 0 {
+            if !self.params.submip {
+                RR2_STATE.with(|c| c.set((f64::NAN, f64::NAN)));
+            }
+            return;
+        }
+        let (t0, _) = RR2_STATE.with(|c| c.get());
+        if let (true, Some(now)) = (t0.is_finite(), super::outer_elapsed()) {
+            RR2_STATE.with(|c| c.set((f64::NAN, now - t0)));
+        }
+    }
+
     fn maybe_restart(&mut self) -> Option<MipResult> {
         let p = self.p;
         if self.params.restarts == 0 && !self.params.submip {
@@ -26777,6 +26950,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if !go {
                 return None;
             }
+        } else if rootrestart2('e') && !self.force_restart {
+            // 試作 `ENOMOTO_MIP_ROOTRESTART2` の `e`: 固定の割合の閾値と RSTCRIT の代わりに、次の段 (木: 期限までの残り) の縮む分と再スタートの手間を比べる
+            let (_, nnz_new, nnz_free, _, _) = self.restart_shrink();
+            let s = nnz_new as f64 / nnz_free.max(1) as f64;
+            if nint == 0 || newly == 0 || !self.rr2_value(self.secs_left(), s, "end") {
+                return None;
+            }
         } else {
             // 試作 `ENOMOTO_MIP_RCLOOP` の `r` ([`rcloop_restart_ok`]): 2 回目以降は、前の再スタートで根の下界が上がっていれば数の条件を見ない
             let rc_r = self.rcloop_restart_ok(newly);
@@ -26829,6 +27009,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let ng = self.rcs_apply_pending();
         if ng > 0 && self.params.verbose {
             eprintln!("MIP: RCSTRONG g: applied {ng} pending implied-integer roundings before the restart");
+        }
+        // 試作 `ENOMOTO_MIP_ROOTRESTART2`: 再スタートの手間を測り始める (根の再スタートだけ)
+        if rootrestart2('e') || rootrestart2('m') {
+            self.rr2_mark();
         }
         // 新しい問題: 大域的な境界 + 元の行 + LP に残ったカット (どれも大域的に成り立つ)
         let mut rows = p.rows.clone();
@@ -28500,7 +28684,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if !objshave_on() || self.snap.is_some() || self.params.submip || self.watch.is_some() || self.shave.is_some() || self.params.threads < 2 {
             return None;
         }
-        self.p.objective_step().filter(|&s| s > 0.0 && s.is_finite())
+        // 目的が整数の刻みを取らない問題は `c` のときだけ (刻み 0 = 連続の目的の二分)
+        match self.p.objective_step().filter(|&s| s > 0.0 && s.is_finite()) {
+            Some(s) => Some(s),
+            None if objshave_has('c') && self.p.cost.iter().any(|&c| c != 0.0) => Some(0.0),
+            None => None,
+        }
     }
 
     /// 試作 `ENOMOTO_MIP_OBJSHAVE` (既定では使わない。analysis/objshave_20261126): 下界の専任スレッドを始める。CP-SAT の objective shaving と
@@ -28551,8 +28740,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             stop: std::sync::Arc::new(AtomicBool::new(false)),
             active: AtomicBool::new(false),
             hit: AtomicBool::new(false),
-            kb: std::sync::Mutex::new((1.0, budget0)),
-            stats: [const { AtomicU64::new(0) }; 6],
+            kb: std::sync::Mutex::new((if step > 0.0 { 1.0 } else { 0.5 }, budget0)),
+            gap_tol: (self.params.rel_gap, self.params.abs_gap),
+            stats: [const { AtomicU64::new(0) }; 8],
             out: std::sync::Mutex::new(Vec::new()),
         });
         if dynamic {
