@@ -210,3 +210,42 @@ BTRAN の `U^T` (`u_transpose_sweep*`・`u_transpose_sweep_heap`)・`R` eta (3 �
 - 超疎の判定を HiGHS の `U` 段並みに緩める A/B (`ENOMOTO_T_BTRAN_HYPER_FRACTION=0.3`、診断) は、bnatt400 で BTRAN が 15.5 → 21.5 µs と
   遅くなった (当方の超疎の経路はヒープ・整列の分の定数が大きい)。判定を合わせる案 (違い 2) は、超疎の経路の定数を減らしてから。
 - 残る BTRAN の差は 2〜2.8 倍。次の候補は違い 3 (全走査の経路の O(m) の走査を減らす。bnatt400 は呼び出しの 4 割が全走査)。
+
+## 8. LP の時間の割合の下見と、大きい LP での確かめ (親の依頼 2、`lpshare.py`・`lpbig.py`)
+
+- 下見 (`lpshare.py 30` → `lpshare.jsonl`・`lpshare.out`): combo3 s2 の def_t1 で時間切れか 30 秒以上かかった 202 問を、既定・1 スレッド・
+  種 1・30 秒で解き、`ENOMOTO_MIP_XPROF` の単体法の主ループの秒 (`main`) と全体の時間の比で並べた。上位 20 問 (比 0.84〜0.59) を
+  `lpbig_shards.json` にした: neos-873061, map10, fhnw-binpack4-4, neos-1171448, neos-1171737, csched008, qap10, sct2, bnatt400,
+  supportcase42, wachplan, rmatr100-p10, neos-5049753-cuanza, bnatt500, neos-4387871-tavua, neos-933966, mcsched, seymour1,
+  rococoC10-001000, fastxgemm-n2r6s0t2。
+- 本番 (`lpbig.py K`): この 20 問 × {def_t1, rtib_t1, def_t4, rtib_t4} を 600 秒・種 1 で。問題ごとに 4 設定を同じ分担で回す
+  (分担 0 = 偶数番目、分担 1 = 奇数番目)。ソースは 6d61a4874 (試作 `rtib` = `RETA_TICK=1`・`LU_TINY_HS=1i`・`BTRAN_TINY=1`)。結果はこの後に書く。
+
+## 9. BTRAN の全走査の経路の O(m) の走査 (違い 3、試作 `ENOMOTO_LU_BTRAN_OUT`)
+
+bnatt400 の根の LP (`rtib`、1 回) を callgrind で数えた (命令数)。BTRAN (`solve_transpose_unit_work_sparse`) は全体の 11.4%。全走査の経路
+(549 回、m = 3974) の 1 回あたり:
+
+| 部分 | 命令 / 回 | 1 行あたり |
+|---|---|---|
+| 出力の並べ替えと非ゼロの記録 (`permute_btran_out_capture`) | 90.7k | 22.8 |
+| `U^T` の全走査 (`u_transpose_sweep_track_live`) | 98k | 24.7 |
+| `L^T` の前の非ゼロの数え上げ (`l_transpose_solve_into_ext` 自身) | 31.6k | 8.0 |
+| `L^T` の散布 (`l_transpose_scatter_rows`、`l_row_active` の行だけ) | 28.4k | — |
+
+参考: FTRAN の `permute_out` (`pair_r_u_permute_tracked` から 1853 回) が全体の 13% で、BTRAN 全体より大きい (1 行 27 命令。結果が密
+(col_aq の予測密度 0.84) なので割り算の分は実の仕事)。
+
+試作 `ENOMOTO_LU_BTRAN_OUT=1` (既定オフ、src/simplex/lu.rs `btran_out_fast`): 出力の並べ替えで非ゼロのステップを分岐なしで作業領域
+(`StepCapture::buf`) に書いて最後に上限と比べ、数え上げを 256 個ずつにする。結果・判定はビット一致 (反復数が同じ)。新しい閾値はない。
+cargo test は既定・`BTRAN_OUT`・`BTRAN_OUT` + `rtib` で 426 成功。
+
+根の LP (`rtib` 対 `rtib` + `BTRAN_OUT`、`logs/ours_root_<問題>_{rtib9,rtibo9}.out`、BTRAN µs/反復):
+
+| 根の LP | `rtib` | `rtibo` | 備考 |
+|---|---|---|---|
+| bnatt400 (5 回 × 3 組の中央値) | 17.2 | **15.2** | 呼び出しの 4 割が全走査 |
+| rocI-4-11 | 3.1 | 3.7 | ほぼ超疎の経路、差は雑音 |
+| uccase12 | 5.5 | 6.1 | 全部が超疎の経路、差は雑音 |
+
+bnatt400 で 1 割強。HiGHS (7.6) との差はまだ 2 倍あり、残りは `U^T` の全走査 (1 行 25 命令) と、超疎の経路の定数 (ヒープ・整列)。
