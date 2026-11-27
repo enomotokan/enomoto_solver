@@ -1,37 +1,20 @@
-"""alns の広い計測の分担表 (def と試作 X の対。X は cfg.py の名前、既定 alns)。cmirgen_20261122/plan.py の写し。P1 (1 スレッド) は shards_P.json の設定の名前に _t1 を付けた写し (下の mk_p1)。
-python plan.py P 6 [X]  → shards_P.json (MIPLIB の 58 問 × 種 1〜3 × {def, X}、60 秒)。見積りは analysis/final_20261118 の P の def の時間 + 8 秒。
-python plan.py M 20 [X] → shards_M.json (Mittelmann 186 問 × 種 1 × {def, X}、600 秒)。見積りは analysis/vsscip_20261120 の M の def の時間
-(解けなかった回は上限) + 30 秒。設定の順は問題・種で入れ替える。slowm_20261119/plan.py の CP・CM の写し。"""
+"""divebudget の P の分担表 (alns_20261126/plan.py を 3 設定にした形): python plan.py → shards_P.json (4 スレッド: def・db・ub) と
+shards_P1.json (1 スレッド: def_t1・db_t1・ub_t1)。MIPLIB の 58 問 × 種 1〜3、60 秒、どちらも分担 1 つ (P は FMjE、P1 は FVbj)。
+設定の順は問題・種で回す。見積りは analysis/final_20261118 の P の def の時間 + 8 秒。"""
 import json, glob, sys
 from pathlib import Path
 D = Path(__file__).resolve().parent
 sys.path.insert(0, str(D.parent / "cbcimpl_20261029"))
 from probs import PROBS  # noqa: E402
-SET, NS = sys.argv[1], int(sys.argv[2])
-CF = ["def", sys.argv[3] if len(sys.argv) > 3 else "alns"]
 def solved(r): return str(r["result"].get("status", "")).lower() in ("optimal", "infeasible")
-def times(pat, cap):
-    T = {}
-    for f in glob.glob(str(pat)):
-        for l in open(f):
-            if not l.strip(): continue
-            r = json.loads(l)
-            if r["cfg"] == "def" and "time" in r["result"]: T[(r["problem"], r["seed"])] = min(r["result"]["time"], cap) if solved(r) else cap
-    return T
-def balance(groups, est, n, out, tl):
-    gl = sorted(groups.items(), key=lambda kv: -sum(est(*t) for t in kv[1]))
-    load = [0.0] * n; shards = [[] for _ in range(n)]
-    for _, ts in gl:
-        i = min(range(n), key=lambda j: load[j]); shards[i] += [list(t) + [tl] for t in ts]; load[i] += sum(est(*t) for t in ts)
-    (D / out).write_text(json.dumps({"shards": shards, "est_hours": [round(x / 3600, 2) for x in load]}, indent=0))
-    print(out, len(groups), "組", sum(len(s) for s in shards), "回", "見積り (時間):", min(round(x / 3600, 2) for x in load), "〜",
-          max(round(x / 3600, 2) for x in load), "計", round(sum(load) / 3600, 1))
-if SET == "P":
-    TP = times(D.parent / "final_20261118" / "res_P_s*.jsonl", 60)
-    balance({(p, s): [(p, c, s) for c in (CF[(i + s) % 2:] + CF[:(i + s) % 2])] for i, p in enumerate(PROBS) for s in (1, 2, 3)},
-            lambda p, c, s: TP.get((p, s), TP.get((p, 1), 60)) + 8, NS, "shards_P.json", 60)
-elif SET == "M":
-    TM = times(D.parent / "vsscip_20261120" / "res_M_s*.jsonl", 600)
-    MP = sorted({x for part in json.loads((D.parent / "cbcimpl_20261029/mitt_parts.json").read_text()) for x in part})
-    balance({(p, 1): [(p, c, 1) for c in (CF[i % 2:] + CF[:i % 2])] for i, p in enumerate(MP)},
-            lambda p, c, s: TM.get((p, s), 600) + 30, NS, "shards_M.json", 600)
+T = {}
+for f in glob.glob(str(D.parent / "final_20261118" / "res_P_s*.jsonl")):
+    for l in open(f):
+        if not l.strip(): continue
+        r = json.loads(l)
+        if r["cfg"] == "def" and "time" in r["result"]: T[(r["problem"], r["seed"])] = min(r["result"]["time"], 60) if solved(r) else 60
+for out, cf in (("shards_P.json", ["def", "db", "ub"]), ("shards_P1.json", ["def_t1", "db_t1", "ub_t1"])):
+    jobs = [[p, cf[(i + s + j) % 3], s, 60] for i, p in enumerate(PROBS) for s in (1, 2, 3) for j in range(3)]
+    est = sum(T.get((p, s), T.get((p, 1), 60)) + 8 for p, _, s, _ in jobs)
+    (D / out).write_text(json.dumps({"shards": [jobs], "est_hours": [round(est / 3600, 2)]}, indent=0))
+    print(out, len(jobs), "回", "見積り (時間):", round(est / 3600, 2))
