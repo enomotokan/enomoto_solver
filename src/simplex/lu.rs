@@ -3966,6 +3966,14 @@ fn tiny_in() -> f64 {
     *V.get_or_init(|| if env_str!("ENOMOTO_LU_TINY_HS").is_some_and(|v| v.contains('i')) { 1e-14 } else { 0.0 })
 }
 
+/// 試作 `ENOMOTO_LU_RETA_TICK` (既定オフ、analysis/lpiter_20261127/README.md): 再分解の時計に `R` eta を 1 本たどる手間を足す
+/// ([`FtLu::reta_tick_ftran`]・[`FtLu::reta_tick_btran`])。
+#[inline]
+fn reta_tick() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_LU_RETA_TICK").is_some_and(|v| v != "0"))
+}
+
 /// 書き出す点で使う切り捨ての閾値 ([`tiny_drop`] と [`tiny_hs`] の大きいほう)。
 #[inline]
 fn tiny_out() -> f64 {
@@ -5071,6 +5079,29 @@ impl FtLu {
         crate::ticks::add(crate::ticks::LU, n);
     }
 
+    /// 試作 `ENOMOTO_LU_RETA_TICK` (既定オフ、analysis/lpiter_20261127): FTRAN の `R` 段を `vecs` 本のベクトルに当てるとき、
+    /// 再分解の時計 (`tick`、[`Self::synth_tick`]) にだけ eta を 1 本たどる手間を足す。比は HiGHS `HFactor::ftranFT` の
+    /// `pf_pivot_count * 20 + 非ゼロ * 5` (1 本あたりの非ゼロが平均 5 未満ならさらに `非ゼロ * 5`) に合わせる (非ゼロ 1 個 = tick 1 なので
+    /// 1 本 = 4、平均 5 未満なら非ゼロ 1 個ぶん)。非ゼロの分は既存の tick が数えている。手間の単位 ([`crate::ticks`]) は変えない
+    #[inline]
+    fn reta_tick_ftran(&self, vecs: u64) {
+        if reta_tick() {
+            let n = self.r_etas.n_headers() as u64;
+            let nnz = self.r_nnz_total as u64;
+            let extra = if nnz / (n + 1) < 5 { nnz } else { 0 };
+            self.tick.add(TICK_SOLVE_NNZ_COEF * vecs * (4 * n + extra));
+        }
+    }
+
+    /// [`Self::reta_tick_ftran`] の BTRAN 版。HiGHS `HFactor::btranFT` の `pf_pivot_count * 10` 対 (値が 0 でない eta の) `非ゼロ * 15` に合わせ、
+    /// 1 本 = 2/3 を足す (値が 0 で飛ばした eta も数える)
+    #[inline]
+    fn reta_tick_btran(&self) {
+        if reta_tick() {
+            self.tick.add(TICK_SOLVE_NNZ_COEF * (2 * self.r_etas.n_headers() as u64 / 3));
+        }
+    }
+
     /// [`Self::add_tick`] と同じ tick を加えるが、手間の単位では行の数に比例する分 ([`crate::ticks::LUM`]) に数える
     #[inline]
     fn add_tick_m(&self, n: u64) {
@@ -5769,6 +5800,7 @@ impl FtLu {
         self.base.l_solve_into(&self.l_active, rhs, z);
         // CLOCK トリガ用: 密 `L` 段は fill に関係なく `O(m)`。
         self.add_tick_m(self.base.m as u64);
+        self.reta_tick_ftran(1);
         for reta in self.r_etas.iter() {
             let dot = self.r_etas.dot(reta.k, z);
             // `R` eta は `z` の疎性に関係なく全部訪れる (ゼロスキップなし) ので、
@@ -6004,6 +6036,7 @@ impl FtLu {
         hyper_b: Option<&mut GpScratch>,
     ) -> (usize, usize, usize) {
         let m = self.base.m as u64;
+        self.reta_tick_ftran(3);
         for reta in self.r_etas.iter() {
             let dot_a = self.r_etas.dot(reta.k, scratch_a);
             let dot_b = self.r_etas.dot(reta.k, scratch_b);
@@ -6089,6 +6122,7 @@ impl FtLu {
         hyper_b: Option<&mut GpScratch>,
     ) -> (usize, usize) {
         let m = self.base.m as u64;
+        self.reta_tick_ftran(2);
         for reta in self.r_etas.iter() {
             let dot_a = self.r_etas.dot(reta.k, scratch_a);
             let dot_b = self.r_etas.dot(reta.k, scratch_b);
@@ -6573,6 +6607,7 @@ impl FtLu {
     ) -> (usize, usize, usize, bool) {
         let m = self.base.m as u64;
         clear_r_seeds(&mut gp_a, &mut gp_b);
+        self.reta_tick_ftran(3);
         for reta in self.r_etas.iter() {
             let dot_a = self.r_etas.dot(reta.k, scratch_a);
             let dot_b = self.r_etas.dot(reta.k, scratch_b);
@@ -6647,6 +6682,7 @@ impl FtLu {
         let m = self.base.m as u64;
         if let (true, Some(ga), Some(gb)) = (self.r_sparse_ready(), gp_a.as_deref_mut(), gp_b.as_deref_mut()) {
             // 両ベクトルとも `L` 段が Gilbert-Peierls (非ゼロ位置が分かっている): 追加策 R の疎な `R` 段。
+            self.reta_tick_ftran(2);
             self.add_tick(2 * self.r_nnz_total as u64);
             let GpScratch { reach, r_seeds, r_work, .. } = ga;
             self.apply_r_sparse(scratch_a, reach, r_seeds, r_work);
@@ -6654,6 +6690,7 @@ impl FtLu {
             self.apply_r_sparse(scratch_b, reach, r_seeds, r_work);
         } else {
             clear_r_seeds(&mut gp_a, &mut gp_b);
+            self.reta_tick_ftran(2);
             for reta in self.r_etas.iter() {
                 let dot_a = self.r_etas.dot(reta.k, scratch_a);
                 let dot_b = self.r_etas.dot(reta.k, scratch_b);
@@ -6818,6 +6855,7 @@ impl FtLu {
         self.base.l_solve_sparse_into(rhs_sparse, scratch, gp);
         // CLOCK トリガ用: 疎 `L` 段のコストは到達集合のサイズ。
         self.add_tick(gp.reach.len() as u64);
+        self.reta_tick_ftran(1);
         for reta in self.r_etas.iter() {
             let dot = self.r_etas.dot(reta.k, scratch);
             self.add_tick(self.r_etas.nnz(reta.k) as u64);
@@ -6846,11 +6884,13 @@ impl FtLu {
         self.add_tick(gp.reach.len() as u64);
         if self.u_hyper_ok(gp) && self.r_sparse_ready() {
             // 疎な `R` 段 (追加策 R、tick は全 eta 分を一括で)。
+            self.reta_tick_ftran(1);
             self.add_tick(self.r_nnz_total as u64);
             let GpScratch { reach, r_seeds, r_work, .. } = &mut *gp;
             self.apply_r_sparse(scratch, reach, r_seeds, r_work);
         } else {
             gp.r_seeds.clear();
+            self.reta_tick_ftran(1);
             for reta in self.r_etas.iter() {
                 let dot = self.r_etas.dot(reta.k, scratch);
                 self.add_tick(self.r_etas.nnz(reta.k) as u64);
@@ -6892,11 +6932,13 @@ impl FtLu {
         self.base.l_solve_sparse_into(rhs_sparse, scratch, gp);
         self.add_tick(gp.reach.len() as u64);
         if self.u_hyper_ok(gp) && self.r_sparse_ready() {
+            self.reta_tick_ftran(1);
             self.add_tick(self.r_nnz_total as u64);
             let GpScratch { reach, r_seeds, r_work, .. } = &mut *gp;
             self.apply_r_sparse(scratch, reach, r_seeds, r_work);
         } else {
             gp.r_seeds.clear();
+            self.reta_tick_ftran(1);
             for reta in self.r_etas.iter() {
                 let dot = self.r_etas.dot(reta.k, scratch);
                 self.add_tick(self.r_etas.nnz(reta.k) as u64);
@@ -6937,6 +6979,7 @@ impl FtLu {
     pub fn add_zero_rhs_solve_ticks(&self, sparse: bool) {
         let m = self.base.m as u64;
         self.add_tick(if sparse { 0 } else { m });
+        self.reta_tick_ftran(1);
         for reta in self.r_etas.iter() {
             self.add_tick(self.r_etas.nnz(reta.k) as u64);
         }
@@ -6965,6 +7008,7 @@ impl FtLu {
     ) -> usize {
         self.base.l_solve_sparse_into(rhs_sparse, scratch, gp);
         self.add_tick(gp.reach.len() as u64);
+        self.reta_tick_ftran(1);
         for reta in self.r_etas.iter() {
             let dot = self.r_etas.dot(reta.k, scratch);
             self.add_tick(self.r_etas.nnz(reta.k) as u64);
@@ -7012,11 +7056,13 @@ impl FtLu {
         self.add_tick(gp.reach.len() as u64);
         if self.r_sparse_ready() {
             // tick は全 eta を当てたときと同じ (`r_nnz_total` は全 `R` eta の非ゼロ数の和)。
+            self.reta_tick_ftran(1);
             self.add_tick(self.r_nnz_total as u64);
             let GpScratch { reach, r_seeds, r_work, .. } = &mut *gp;
             self.apply_r_sparse(scratch, reach, r_seeds, r_work);
         } else {
             gp.r_seeds.clear();
+            self.reta_tick_ftran(1);
             for reta in self.r_etas.iter() {
                 let dot = self.r_etas.dot(reta.k, scratch);
                 self.add_tick(self.r_etas.nnz(reta.k) as u64);
@@ -7089,6 +7135,7 @@ impl FtLu {
     #[inline]
     fn btran_tail_cap(&self, scratch: &mut [f64], out: &mut [f64], cap: Option<&mut StepCapture>) {
         // 超疎: `yp` が各 `R` eta の要素に掛かる唯一の値なので、0 なら飛ばす。
+        self.reta_tick_btran();
         for reta in self.r_etas.iter().rev() {
             let yp = scratch[reta.slot];
             if yp == 0.0 {
@@ -7161,6 +7208,7 @@ impl FtLu {
             work.e_full = true;
         }
         // `btran_tail` と同じ処理を、非ゼロ数の上界を `R` eta 分増やしながら行う。
+        self.reta_tick_btran();
         for reta in self.r_etas.iter().rev() {
             let yp = w[reta.slot];
             if yp == 0.0 {
@@ -7300,6 +7348,7 @@ impl FtLu {
         // `touch` が `L^T` 段入力の非ゼロ位置をすべて含むか (超疎経路のみ)
         let mut list_ok = hyper && tracked;
         // `btran_tail` と同じ処理を、非ゼロ数の上界を `R` eta 分増やしながら行う。
+        self.reta_tick_btran();
         for reta in self.r_etas.iter().rev() {
             let yp = w[reta.slot];
             if yp == 0.0 {
