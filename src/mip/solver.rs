@@ -4218,6 +4218,10 @@ pub(crate) fn divebudget_on() -> bool {
 ///   木の中 (深さ余り 3・7) と、暫定解がない間の巡回 (`ENOMOTO_MIP_NOINC_BANDIT` でないとき) のダイビングの枠で使う。
 ///   `ENOMOTO_MIP_LSDIVE` が入っていれば線探索も候補に入れる。
 /// - `b`: 種類ごとの上限 (`ENOMOTO_MIP_DIVEBUDGET` と同じ)。`ub` なら上限の残る種類の中から UCB1 で選ぶ。
+/// - `g` (`b` と一緒に): 上限の割合 0.05 (SCIP の `maxlpiterquot`) に、ギャップの係数 2·laplace(ギャップ, n) を掛ける
+///   ([`super::adapt`]、T1PRIMAL v2 の g と同じならし方。項が 1 つなので σ(logit(·)) は値を変えず、省く。n はその種類の呼んだ数)。
+///   情報がない (n = 0) と係数 1 で `ub` と同じ所から始まり、ギャップが小さいほど潜る手間を減らし、大きいままなら 2 に近づく。
+///   暫定解がない間はギャップ 1 で 2(n + 1)/(n + 2) < 2 になり、振り切れない。MINLPITER の最低保証はそのまま。
 pub(crate) fn divesel(c: char) -> bool {
     env_str!("ENOMOTO_MIP_DIVESEL").is_some_and(|v| v != "0" && v != "off" && v.contains(c))
 }
@@ -11305,6 +11309,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 探索全体の下界 (最小化形): 自分の待ち行列・処理中のノード、木を分け合うときは共有の待ち行列と各スレッドの下界の最小。
+    /// 相対ギャップ (z − lb) / max(|z|, |lb|, 1) を [0, 1] に収めたもの。暫定解なし・下界なしは 1 (T1PRIMAL v2 の g のならす前、
+    /// [`super::adapt`])
+    pub(super) fn gap_frac(&self) -> f64 {
+        match &self.incumbent {
+            None => 1.0,
+            Some((z, _)) => {
+                let lb = self.global_lower_bound();
+                if lb.is_finite() { ((z - lb) / z.abs().max(lb.abs()).max(1.0)).clamp(0.0, 1.0) } else { 1.0 }
+            }
+        }
+    }
+
     pub(super) fn global_lower_bound(&self) -> f64 {
         let mut lb = self.queue.best_lower_bound().min(self.cur_lb);
         if let Some(pool) = &self.pool {
@@ -16678,10 +16694,18 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             }
                             let kinds = &kinds_v[..];
                             // 種類の反復の上限の残り (`db` なら種類ごと、そうでなければ共有の残り)
+                            // `ENOMOTO_MIP_DIVESEL` の `g` ([`divesel`]): 割合 0.05 にギャップの係数 2·laplace(ギャップ, その種類の回数) を掛ける
+                            let dg = divesel('g');
+                            let gap = if dg { self.gap_frac() } else { 1.0 };
+                            if dg && self.params.verbose && env_str!("ENOMOTO_MIP_DEBUG_DIVESEL").is_some() {
+                                let cs: Vec<String> = kinds.iter().map(|k| format!("{:.3}", 2.0 * super::adapt::laplace(gap, self.dive_k[k.idx()].0 as f64))).collect();
+                                eprintln!("MIP:   DIVESEL g: node {} depth {} gap {gap:.4} coefficients {} ({:.2}s, tree dive secs {:.2})", self.nodes, node.depth, cs.join(" "), self.start.elapsed().as_secs_f64(), self.dive_secs);
+                            }
                             let room = |s: &Self, k: K| -> Option<u64> {
                                 if db {
                                     let st = s.dive_k[k.idx()];
-                                    let lim = (0.05 * (11 * st.1 + 1) as f64 / (st.0 + 1) as f64 * ni) as u64 + 1000;
+                                    let gq = if dg { 2.0 * super::adapt::laplace(gap, st.0 as f64) } else { 1.0 };
+                                    let lim = (0.05 * gq * (11 * st.1 + 1) as f64 / (st.0 + 1) as f64 * ni) as u64 + 1000;
                                     (st.2 < lim).then(|| (lim - st.2).max(DIVE_MINLPITER))
                                 } else {
                                     Some(quota.saturating_sub(s.dive_iters))

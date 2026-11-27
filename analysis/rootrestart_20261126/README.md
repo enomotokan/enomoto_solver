@@ -198,3 +198,8 @@
   - h80x6320d は、このビルドでは既定でも再スタートしない (7 節の 2 回は 7810d8f7b のとき)。
 - 10teams と physiciansched6-2 は、どちらの設定でも根の再スタートがなかった。P の 4 スレッドで効いた (0.53・0.75) のは、再スタートの判定から来たものではない (並列の道筋か文字 `a`)。
 - satellites2 は効き目が残る。根の下界 −29 に対して暫定解が 18・79 とギャップが大きく、W が期限までの残りになる。
+- 正しさ (ビルド 025d9c607): check_default が新しい基準 (mik 3937・markshare_4_0 240417・exp-1-500-5-5 9 ノード) と全部一致。
+  fuzz (`ENOMOTO_MIP_ROOTRESTART2=eam`) は標準 7 本と bigact 2 本すべて bad 0・mismatches 0、cargo test 425 passed (`fuzz_rr2b.out`)。
+- P の 2 回目 (同じ shards.json、4 本 × 約 1.6 時間): `python analysis/rootrestart_20261126/run.py K analysis/rootrestart_20261126/shards.json analysis/rootrestart_20261126/res2_sK.jsonl`。
+  - 分担: 0・3 は GATE、1・2 は HJZ2。
+  - 集計: `python analysis/rootrestart_20261126/summ.py analysis/rootrestart_20261126/res2_s*.jsonl`。
