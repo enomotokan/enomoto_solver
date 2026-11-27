@@ -2216,12 +2216,30 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 根のヒューリスティクスを飛ばし早めの再スタートへ進む (HiGHS は根の分離のラウンドごとに被約費用で固定し、再スタートを判定する)。
         // 値の文字: `h` = 根のヒューリスティクスは飛ばさない、`w` = 抜けた後に裏のカットを待たない
         let l63_cut = !self.params.submip && job.is_none() && self.snap.is_none() && env_str!("ENOMOTO_MIP_LOSE6_3_CUTRESTART").is_some() && super::early_restart_on();
+        // 試作 `ENOMOTO_MIP_ROOTRESTART2` の `m` ([`Solver::rr2_cut_restart_due`]): ラウンドの頭ごとに、残りのラウンドの縮む分と再スタートの手間を比べる
+        let rr2_m = !self.params.submip && job.is_none() && self.snap.is_none() && super::solver::rootrestart2('m') && super::early_restart_on();
+        let t_rr2 = std::time::Instant::now();
         let l63_min = tunable!("ENOMOTO_T_MIP_LOSE6_3_CUTRESTART_MIN", 3usize, usize);
         loop {
             self.poll_fj_thread();
             if self.root_gap_closed() {
                 cutstop = "gap_closed";
                 break;
+            }
+            if rr2_m && round_ctr >= 1 && !self.early_restart {
+                // 残りのラウンドの見込み: ここまでの 1 ラウンドの平均の秒 × 残りのラウンドの数
+                let per = t_rr2.elapsed().as_secs_f64() / round_ctr as f64;
+                let w = per * max_rounds.saturating_sub(round_ctr) as f64;
+                if let Some(nw) = self.rr2_cut_restart_due(w) {
+                    self.early_restart = true;
+                    self.er_at.get_or_insert_with(std::time::Instant::now);
+                    self.l63_cut_left = true;
+                    if self.params.verbose {
+                        eprintln!("MIP: early restart: {nw} integer columns fixable by reduced costs at cut round {round_ctr} (newly fixed {}), leaving the cut loop (ENOMOTO_MIP_ROOTRESTART2 m, {:.2}s)", self.newly_fixed_ints(), self.start.elapsed().as_secs_f64());
+                    }
+                    cutstop = "early_restart";
+                    break;
+                }
             }
             if l63_cut && round_ctr >= l63_min && !self.early_restart {
                 if let Some(w) = self.lose6_3_cut_restart_due() {
