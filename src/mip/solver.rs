@@ -4218,9 +4218,10 @@ pub(crate) fn divebudget_on() -> bool {
 ///   木の中 (深さ余り 3・7) と、暫定解がない間の巡回 (`ENOMOTO_MIP_NOINC_BANDIT` でないとき) のダイビングの枠で使う。
 ///   `ENOMOTO_MIP_LSDIVE` が入っていれば線探索も候補に入れる。
 /// - `b`: 種類ごとの上限 (`ENOMOTO_MIP_DIVEBUDGET` と同じ)。`ub` なら上限の残る種類の中から UCB1 で選ぶ。
-/// - `g` (`b` と一緒に): 上限の割合 0.05 (SCIP の `maxlpiterquot`) に、ギャップの係数 σ(logit(laplace(ギャップ, n))) を掛ける
-///   ([`super::adapt`]、T1PRIMAL v2 の g と同じ式。n は木の中のダイビングの回数)。ギャップが小さいほど潜る手間を減らす。
-///   暫定解がない間はギャップ 1 で (n + 1)/(n + 2) (n = 0 で 1/2) になり、0.05 を超えず、振り切れない。MINLPITER の最低保証はそのまま。
+/// - `g` (`b` と一緒に): 上限の割合 0.05 (SCIP の `maxlpiterquot`) に、ギャップの係数 2·laplace(ギャップ, n) を掛ける
+///   ([`super::adapt`]、T1PRIMAL v2 の g と同じならし方。項が 1 つなので σ(logit(·)) は値を変えず、省く。n はその種類の呼んだ数)。
+///   情報がない (n = 0) と係数 1 で `ub` と同じ所から始まり、ギャップが小さいほど潜る手間を減らし、大きいままなら 2 に近づく。
+///   暫定解がない間はギャップ 1 で 2(n + 1)/(n + 2) < 2 になり、振り切れない。MINLPITER の最低保証はそのまま。
 pub(crate) fn divesel(c: char) -> bool {
     env_str!("ENOMOTO_MIP_DIVESEL").is_some_and(|v| v != "0" && v != "off" && v.contains(c))
 }
@@ -16683,21 +16684,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             }
                             let kinds = &kinds_v[..];
                             // 種類の反復の上限の残り (`db` なら種類ごと、そうでなければ共有の残り)
-                            // `ENOMOTO_MIP_DIVESEL` の `g` ([`divesel`]): 割合 0.05 にギャップの係数を掛ける
-                            let gq = if divesel('g') {
-                                use super::adapt::{laplace, logit, sigmoid};
-                                let n: u64 = self.dive_k.iter().map(|e| e.0).sum();
-                                let c = sigmoid(logit(laplace(self.gap_frac(), n as f64)));
-                                if self.params.verbose && env_str!("ENOMOTO_MIP_DEBUG_DIVESEL").is_some() {
-                                    eprintln!("MIP:   DIVESEL g: node {} depth {} gap {:.4} n {n} coefficient {c:.4} ({:.2}s, tree dive secs {:.2})", self.nodes, node.depth, self.gap_frac(), self.start.elapsed().as_secs_f64(), self.dive_secs);
-                                }
-                                c
-                            } else {
-                                1.0
-                            };
+                            // `ENOMOTO_MIP_DIVESEL` の `g` ([`divesel`]): 割合 0.05 にギャップの係数 2·laplace(ギャップ, その種類の回数) を掛ける
+                            let dg = divesel('g');
+                            let gap = if dg { self.gap_frac() } else { 1.0 };
+                            if dg && self.params.verbose && env_str!("ENOMOTO_MIP_DEBUG_DIVESEL").is_some() {
+                                let cs: Vec<String> = kinds.iter().map(|k| format!("{:.3}", 2.0 * super::adapt::laplace(gap, self.dive_k[k.idx()].0 as f64))).collect();
+                                eprintln!("MIP:   DIVESEL g: node {} depth {} gap {gap:.4} coefficients {} ({:.2}s, tree dive secs {:.2})", self.nodes, node.depth, cs.join(" "), self.start.elapsed().as_secs_f64(), self.dive_secs);
+                            }
                             let room = |s: &Self, k: K| -> Option<u64> {
                                 if db {
                                     let st = s.dive_k[k.idx()];
+                                    let gq = if dg { 2.0 * super::adapt::laplace(gap, st.0 as f64) } else { 1.0 };
                                     let lim = (0.05 * gq * (11 * st.1 + 1) as f64 / (st.0 + 1) as f64 * ni) as u64 + 1000;
                                     (st.2 < lim).then(|| (lim - st.2).max(DIVE_MINLPITER))
                                 } else {
