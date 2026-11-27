@@ -49,6 +49,15 @@ try:
     COMMIT = subprocess.run(["git", "-C", str(WT), "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
 except Exception:  # noqa: BLE001
     COMMIT = None
+# 機械の記録 (前回の combo2 の第 2 段には無い欄。前回との比べで機械の違いを注記するため): /proc/cpuinfo の model name と、台のメモリ (GB)
+def _cpu():
+    try:
+        m = next(l.split(":", 1)[1].strip() for l in open("/proc/cpuinfo") if l.startswith("model name"))
+        g = int(next(l.split()[1] for l in open("/proc/meminfo") if l.startswith("MemTotal:"))) / 2**20
+        return f"{m} / {g:.0f} GB"
+    except Exception:  # noqa: BLE001
+        return "?"
+CPU = _cpu()
 
 
 def rss_mb(pid):
@@ -90,5 +99,5 @@ for p, cfg, seed, tl in mine:
     res, peak, wall = run(cfg, seed, mps, tl)
     with open(OUT, "a") as f:
         f.write(json.dumps({"problem": p, "cfg": cfg, "seed": seed, "tl": tl, "result": res, "max_rss_mb": peak, "wall": wall, "shard": k, "tail": TAIL,
-                            "nproc": os.cpu_count(), "commit": COMMIT, "at": time.strftime("%m-%d %H:%M:%S")}) + "\n")
+                            "nproc": os.cpu_count(), "cpu": CPU, "commit": COMMIT, "at": time.strftime("%m-%d %H:%M:%S")}) + "\n")
     print(p, cfg, seed, res.get("status"), res.get("time"), peak, flush=True)
