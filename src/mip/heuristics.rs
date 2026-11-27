@@ -591,6 +591,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 暫定解がない間は木の中でも根と同じだけ後戻りする
         let noinc = self.incumbent.is_none() && env_str!("ENOMOTO_MIP_NOINC_HEUR").is_some();
         let max_bt = if self.nodes <= 1 || noinc { tunable!("ENOMOTO_T_MIP_DIVE_BACKTRACKS", 10usize, usize) } else { tunable!("ENOMOTO_T_MIP_NODE_DIVE_BACKTRACKS", 0usize, usize) };
+        let ls_root = if kind == DiveKind::LineSearch { self.ls_root_x.clone().filter(|r| r.len() == p.n) } else { None };
+        if kind == DiveKind::LineSearch && ls_root.is_none() {
+            return false;
+        }
         let guide = if kind == DiveKind::Guided { self.incumbent.as_ref().map(|(_, x)| x.clone()) } else { None };
         if kind == DiveKind::Guided && guide.is_none() {
             return false;
@@ -721,6 +725,22 @@ impl<'a, L: MipLp> Solver<'a, L> {
                         let up = if c != 0.0 { c < 0.0 } else { f >= 0.5 };
                         let dist = if up { 1.0 - f } else { f };
                         (up, -c.abs() / (1.0 + cmax) + 0.01 * dist + if binary { 0.0 } else { 0.5 })
+                    }
+                    DiveKind::LineSearch => {
+                        // SCIP の linesearchdiving (`divesetGetScoreLinesearchdiving`): 根の LP 解 r から今の値 v への直線を
+                        // 延ばした向きへ丸め、整数値に届くまでの距離 / |v - r| の小さい列から。その向きに自明に丸められる列は
+                        // 1000 倍で後回し、根と同じ値の列は最後 (SCIP は無限大)
+                        let r = ls_root.as_ref().unwrap()[j];
+                        let eps = 1e-6;
+                        if v < r - eps {
+                            let q = (f + 1e-12) / (r - v);
+                            (false, if dl == 0 { 1000.0 * q } else { q })
+                        } else if v > r + eps {
+                            let q = (1.0 - f + 1e-12) / (v - r);
+                            (true, if ul == 0 { 1000.0 * q } else { q })
+                        } else {
+                            (false, 1e300)
+                        }
                     }
                     DiveKind::Conflict => {
                         // 衝突制約の lock の少ない向きへ (同数なら通常の lock、それも同数なら近い側)
@@ -1877,6 +1897,9 @@ pub enum DiveKind {
     /// 目的を外したダイビング (SCIP の objpscostdiving の簡略版、試作 `ENOMOTO_MIP_OBJDIVE`): 境界の代わりに LP の目的関数を
     /// 変えて潜る ([`Solver::obj_pscost_dive`])。
     ObjPscost,
+    /// 線探索ダイビング (SCIP の linesearchdiving、試作 `ENOMOTO_MIP_LSDIVE`): 根の LP 解から今の LP 解への直線を延ばし、
+    /// 根の値から離れる向きへ、先に整数値に届く (整数値までの距離 / 根からの移動量 の小さい) 列から丸める。
+    LineSearch,
 }
 
 /// 試作 `ENOMOTO_MIP_OBJDIVE` の値に文字 `c` を含むか ([`Solver::obj_pscost_dive`] の切り替え)。
@@ -1896,6 +1919,7 @@ impl DiveKind {
             DiveKind::Farkas => 5,
             DiveKind::Conflict => 6,
             DiveKind::ObjPscost => 7,
+            DiveKind::LineSearch => 8,
         }
     }
 }
