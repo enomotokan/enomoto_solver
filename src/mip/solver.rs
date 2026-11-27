@@ -764,7 +764,7 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// ALNS の腕ごとの報酬の合計と試した回数。
     pub(super) alns_reward: [f64; 6],
     pub(super) alns_count: [u32; 6],
-    /// 試作 `ENOMOTO_MIP_ALNS` の `b` ([`super::alns_cp::budget_on`]): 測り始め (暫定解があって初めて予算を決めた時) の (主ギャップ, 手間, 大近傍探索の手間) と、
+    /// `ENOMOTO_MIP_ALNS` (既定) の `b` ([`super::alns_cp::budget_on`]): 測り始め (暫定解があって初めて予算を決めた時) の (主ギャップ, 手間, 大近傍探索の手間) と、
     /// その後に ALNS-CP が出した相対改善の合計
     pub(super) alns_bud0: Option<(f64, f64, f64)>,
     /// ALNS-CP が出した Φ の減りの合計 (主ギャップの減り × その時の未処理の重み [`Self::alns_w`])
@@ -5447,7 +5447,7 @@ pub fn solve(p: &MipProblem, params: MipParams) -> MipResult {
     if !params.submip {
         let _ = super::heuristics::frag_t0();
     }
-    // 試作 `ENOMOTO_MIP_ALNS`: 外側の求解の始め (再スタートの後の求解は除く) で、全スレッドで共有する近傍の状態を初めに戻す
+    // `ENOMOTO_MIP_ALNS` (既定): 外側の求解の始め (再スタートの後の求解は除く) で、全スレッドで共有する近傍の状態を初めに戻す
     if !params.submip && params.restarts == 0 {
         super::alns_cp::reset();
     }
@@ -16264,7 +16264,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     let frac = if stalled { frac.max(tunable!("ENOMOTO_T_MIP_ROBUST_LNSFREQ_TIME", 0.1, f64)) } else { frac };
                     // 試作 `ENOMOTO_MIP_HEUR1T` の `l` ([`heur1t`]): 1 スレッドの外側の木では、時間の割合を 4 スレッドのヒューリスティクス役の
                     // 割合 (`ENOMOTO_T_MIP_HEUR_ROLE_FRAC`、[`heur_role_count`]) まで上げる (暫定解があるときだけ。役も暫定解があるときだけ就く)
-                    // 試作 `ENOMOTO_MIP_ALNS` の `b` ([`super::alns_cp::budget_on`]): 1 スレッドの木で、割合を ALNS-CP の効き目のシグモイドで決める
+                    // `ENOMOTO_MIP_ALNS` (既定) の `b` ([`super::alns_cp::budget_on`]): 1 スレッドの木で、割合を ALNS-CP の効き目のシグモイドで決める
                     let frac = if super::alns_cp::budget_on() && !self.params.submip && self.pool.is_none() && self.params.threads <= 1 && self.incumbent.is_some() {
                         self.alns_budget_frac(node.depth)
                     } else {
@@ -26862,11 +26862,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 試作 `ENOMOTO_MIP_ROOTRESTART2` の判定: 縮む割合 `s` (新たに固定した列の非零 / 根の始めに自由だった列の非零) の分だけ次の段の手間
-    /// `w` 秒が軽くなる見込み `w s` と、再スタートの手間 `C` 秒 (前の再スタートで実際にかかった秒、初回はここまでの外側の経過秒 = 前処理 +
-    /// 根の LP + カット) を比べ、シグモイド σ(ln(w s / C)) が 1/2 以上 (w s >= C) なら真
+    /// `w` 秒が軽くなる見込み `w s` と、再スタートの手間 `C` 秒 (前の再スタートで実際にかかった秒、初回は同じ量の見積もり = 前処理の秒
+    /// (外側の経過秒 − このソルバーの経過秒) + 根の LP の秒) を比べ、シグモイド σ(ln(w s / C)) が 1/2 以上 (w s >= C) なら真。
+    /// 初回を外側の経過秒にすると根のヒューリスティクス (satellites2-40 の RINS 174 秒) まで手間に入り、再スタートを見送る (cmp6)
     pub(super) fn rr2_value(&self, w: f64, s: f64, tag: &str) -> bool {
         let (_, last) = RR2_STATE.with(|c| c.get());
-        let c = if last.is_finite() && last > 0.0 { last } else { super::outer_elapsed().unwrap_or_else(|| self.start.elapsed().as_secs_f64()).max(1e-3) };
+        let c = if last.is_finite() && last > 0.0 {
+            last
+        } else {
+            let pre = super::outer_elapsed().map_or(0.0, |o| (o - self.start.elapsed().as_secs_f64()).max(0.0));
+            (pre + self.root_lp_secs).max(1e-3)
+        };
         let g = if s > 0.0 && w > 0.0 { (w * s / c).ln() } else { f64::NEG_INFINITY };
         let sig = 1.0 / (1.0 + (-g).exp());
         if self.params.verbose {
@@ -27963,7 +27969,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         adapt_sigmoid(a * (g - tunable!("ENOMOTO_T_MIP_FJ_POOR_GAP", 0.5, f64)))
     }
 
-    /// 試作 `ENOMOTO_MIP_ALNS` の `b`: 1 スレッドの木の大近傍探索の割合 = `LNS_TIME_MIN` + (`HEUR_ROLE_FRAC` − `LNS_TIME_MIN`) × σ(ln(r_lns / r_tree))
+    /// `ENOMOTO_MIP_ALNS` (既定) の `b`: 1 スレッドの木の大近傍探索の割合 = `LNS_TIME_MIN` + (`HEUR_ROLE_FRAC` − `LNS_TIME_MIN`) × σ(ln(r_lns / r_tree))
     /// = 下限 + 幅 × r_lns / (r_lns + r_tree)。新しい閾値はなく、両端は今の木の大近傍探索の下限 (0.02) と 4 スレッドのヒューリスティクス役の割合 (0.25)。
     /// 残りの仕事を Φ = 主ギャップ (暫定解 − 下界)/max(|暫定解|, 1) × 未処理の重み (Σ 0.5^深さ、今のノードを含む) で測る
     /// (下界が動かない証明の段階でも、刈って木が進めば Φ が減る。重みは 4 スレッドの `publish_tree_weight` と同じ量)。

@@ -1,4 +1,4 @@
-//! 試作 `ENOMOTO_MIP_ALNS` (既定では使わない。analysis/alns_20261126/README.md): OR-Tools CP-SAT の「難しさを自動で合わせる大近傍探索」
+//! `ENOMOTO_MIP_ALNS` (2026-11-27 から既定 `1b`。`=0`・`off` で以前の木の大近傍探索 (6 本の腕) に戻る。analysis/alns_20261126/README.md): OR-Tools CP-SAT の「難しさを自動で合わせる大近傍探索」
 //! (ortools/sat/cp_model_lns.{h,cc}、ortools/util/adaptative_parameter_value.h) を、木の大近傍探索 ([`Solver::alns`]) の中で使う。
 //!
 //! - 近傍 3 本: `rins` (LP 解と暫定解の違う整数列を先に外す)、`random` (乱数)、`graph` (制約グラフで近い整数列、目的に効く列から幅優先)。
@@ -9,24 +9,29 @@
 //! - 選び方: CP-SAT の `GetUCBScore` と同じ UCB1 (10 回までは無限大、以後 平均利得 + √(2 ln N / n))。利得 = 相対改善 /
 //!   (1 + 決定的な時間 (tick 秒))。100 回までは単純平均、以後は 0.9 / 0.1 の指数平均。
 //! - 呼ぶ時期・予算 (`ENOMOTO_T_MIP_LNS_FREQ`・`LNS_TIME_*`・HEUR_ADAPT など) と、4 スレッドのヒューリスティクス役 (tid 3 の
-//!   `heur_role_run`) は今の木の大近傍探索のものをそのまま使う (`ENOMOTO_MIP_ALNS=1` の間は今の 6 本の腕の代わりにこの 3 本を使う)。
+//!   `heur_role_run`) は今の木の大近傍探索のものをそのまま使う (使う間は今の 6 本の腕の代わりにこの 3 本を使う)。
 
 use super::lp_api::MipLp;
 use super::solver::{MipStatus, Solver};
 
+/// 値 (付けなければ既定の `1b`: 1 スレッドの予算 b と、1 回を分ける形)。付けた値は既定に置き換わる (`=1` なら予算 b なし)
+fn val() -> Option<&'static str> {
+    env_def!("ENOMOTO_MIP_ALNS", "1b")
+}
+
 pub(crate) fn on() -> bool {
-    env_str!("ENOMOTO_MIP_ALNS").is_some_and(|v| v != "0")
+    val().is_some()
 }
 
 /// `b` (budget): 1 スレッドの木の大近傍探索の割合を、ALNS-CP の効き目のシグモイドで決める ([`super::solver::Solver::alns_budget_frac`])
 pub(crate) fn budget_on() -> bool {
-    on() && env_str!("ENOMOTO_MIP_ALNS").is_some_and(|v| v.contains('b'))
+    val().is_some_and(|v| v.contains('b'))
 }
 
 /// 1 回の呼び出しの手間の期限を `ENOMOTO_T_MIP_LNS_CALL_MIN` ずつに分けて近傍を続ける ([`super::solver::Solver::alns`])。
-/// 既定 (`ENOMOTO_MIP_ALNS=1`) は分ける。値に `w` (whole) を含めば以前の 1 回 1 本
+/// 既定は分ける。値に `w` (whole) を含めば以前の 1 回 1 本
 pub(crate) fn split_on() -> bool {
-    !env_str!("ENOMOTO_MIP_ALNS").is_some_and(|v| v.contains('w'))
+    !val().is_some_and(|v| v.contains('w'))
 }
 
 /// CP-SAT の `AdaptiveParameterValue`
