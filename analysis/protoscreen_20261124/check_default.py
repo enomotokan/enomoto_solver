@@ -3,6 +3,9 @@
 基準と比べる。基準は analysis/losses_20261123/res_pgocheck.jsonl の lto_v3 の回 (40be041e4 のソース、今回のふるい分けの試作の多くが入る前。
 作り方 (LTO・target-cpu) は道筋を変えないことを buildopt・losses 3.1 節で確かめてある)。
 環境変数を渡すと、その設定で解いて基準と比べる (試作を入れたときにどこから道筋が変わるかを見る用)。
+**設定は必ず引数 (`ENOMOTO_…=値`) で渡す。** 既定の確かめなので、呼んだ側の環境にある `ENOMOTO_` で始まる環境変数はすべて外して解く
+(`ENOMOTO_LU_REFAC_BAL=0 python check_default.py` は効かない。`python check_default.py ENOMOTO_LU_REFAC_BAL=0` と書く)。
+外した環境変数は、始めに名前と値を標準エラーに出す (2026-11-27、黙って無視しないように)。
 2026-11-25: POLISH_STRICT=2 + POLISH_WARM=d の既定化で mik-250-20-75-4 のノード数が変わった (6333 → 6261、目的値は同じ) ので、
 基準を `ref_default.json` (既定化の後のソースで、この台本で解いた 6 問) に取り替えた。前の基準は `--old` で使う
 (`ENOMOTO_MIP_POLISH_STRICT=0 ENOMOTO_MIP_POLISH_WARM=0` を付けると前の基準と全部一致する)。
@@ -40,6 +43,10 @@ for l in open(D.parent / "losses_20261123" / "res_pgocheck.jsonl"):
 if not OLD and (D / "ref_default.json").exists():
     REF = {p: v for p, v in json.loads((D / "ref_default.json").read_text())["results"].items()}
 extra = dict(a.split("=", 1) for a in sys.argv[1:] if not a.startswith("--"))
+dropped = sorted(k for k in os.environ if k.startswith("ENOMOTO_"))
+if dropped:
+    print("check_default: 環境変数 " + " ".join(f"{k}={os.environ[k]}" for k in dropped) + " は無視した。設定は引数で渡すこと"
+          + " (例: python check_default.py ENOMOTO_LU_REFAC_BAL=0)", file=sys.stderr, flush=True)
 got = {}
 bad = []
 for p, ref in REF.items():
