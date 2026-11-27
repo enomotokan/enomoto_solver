@@ -3819,7 +3819,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 self.alns_reward[k] += if ok && z1 < z0 { 1.0 + ((z0 - z1) / z0.abs().max(1.0)).min(1.0) } else { 0.0 };
                 any |= ok;
                 if z1 < z0 {
-                    self.alns_lns_gain += (z0 - z1) / z0.abs().max(1.0);
+                    // Φ ([`Self::alns_rates`]) の減り: 主ギャップの減り × 未処理の重み (相対改善でなく、Φ と同じ式で測る)
+                    let lb = self.global_lower_bound();
+                    let gap = |z: f64| ((z - lb) / z.abs().max(1.0)).max(0.0);
+                    self.alns_lns_gain += (gap(z0) - gap(z1)).max(0.0) * self.alns_w;
                 }
                 if !split || ok || crate::ticks::left() <= 0.0 || self.time_up() || self.incumbent.is_none() {
                     break;

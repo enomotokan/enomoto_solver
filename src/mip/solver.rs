@@ -767,7 +767,12 @@ pub(super) struct Solver<'a, L: MipLp> {
     /// 試作 `ENOMOTO_MIP_ALNS` の `b` ([`super::alns_cp::budget_on`]): 測り始め (暫定解があって初めて予算を決めた時) の (主ギャップ, 手間, 大近傍探索の手間) と、
     /// その後に ALNS-CP が出した相対改善の合計
     pub(super) alns_bud0: Option<(f64, f64, f64)>,
+    /// ALNS-CP が出した Φ の減りの合計 (主ギャップの減り × その時の未処理の重み [`Self::alns_w`])
     pub(super) alns_lns_gain: f64,
+    /// 今のノードでの未処理の重み (Σ 0.5^深さ、[`Self::alns_rates`] が書く。ALNS-CP の改善の重み付けに使う)
+    pub(super) alns_w: f64,
+    /// r_lns の窓: (最後に見た暫定解の値, 1 つ前に暫定解が変わった時の (大近傍探索の手間, ALNS-CP の改善の合計), 最後に変わった時の同じ組)
+    pub(super) alns_win: (f64, (f64, f64), (f64, f64)),
     /// `ENOMOTO_MIP_SUBB_DIV` (試作): 近傍の多様化の状態 ([`super::subb::DivState`])
     pub(super) subb: super::subb::DivState,
     /// `ENOMOTO_MIP_MEMBQ_LNSGROW` (試作、analysis/membq_path_20261105.md): ALNS の腕ごとの、サブ MIP の時間の上限の倍率。
@@ -6044,6 +6049,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         alns_count: [0; 6],
         alns_bud0: None,
         alns_lns_gain: 0.0,
+        alns_w: 1.0,
+        alns_win: (f64::NAN, (0.0, 0.0), (0.0, 0.0)),
         subb: Default::default(),
         lns_grow: [1.0; 6],
         submip_nosol_timeout: false,
@@ -16163,7 +16170,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // 割合 (`ENOMOTO_T_MIP_HEUR_ROLE_FRAC`、[`heur_role_count`]) まで上げる (暫定解があるときだけ。役も暫定解があるときだけ就く)
                     // 試作 `ENOMOTO_MIP_ALNS` の `b` ([`super::alns_cp::budget_on`]): 1 スレッドの木で、割合を ALNS-CP の効き目のシグモイドで決める
                     let frac = if super::alns_cp::budget_on() && !self.params.submip && self.pool.is_none() && self.params.threads <= 1 && self.incumbent.is_some() {
-                        self.alns_budget_frac()
+                        self.alns_budget_frac(node.depth)
                     } else {
                         frac
                     };
@@ -27774,30 +27781,39 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 試作 `ENOMOTO_MIP_ALNS` の `b`: 1 スレッドの木の大近傍探索の割合 = `LNS_TIME_MIN` + (`HEUR_ROLE_FRAC` − `LNS_TIME_MIN`) × σ(ln(r_lns / r_tree))
     /// = 下限 + 幅 × r_lns / (r_lns + r_tree)。新しい閾値はなく、両端は今の木の大近傍探索の下限 (0.02) と 4 スレッドのヒューリスティクス役の割合 (0.25)。
-    /// - r_tree: 測り始めからの主ギャップ (暫定解 − 下界) / max(|暫定解|, 1) の減り (ALNS-CP の改善の分を除く) ÷ 木の手間 (大近傍探索の手間を除く)
-    /// - r_lns: ALNS-CP の相対改善の合計 ÷ 大近傍探索の手間。r_tree と同じ速さの仮の 1 回 (手間 `LNS_CALL_MIN`) を足しておく
+    /// 残りの仕事を Φ = 主ギャップ (暫定解 − 下界)/max(|暫定解|, 1) × 未処理の重み (Σ 0.5^深さ、今のノードを含む) で測る
+    /// (下界が動かない証明の段階でも、刈って木が進めば Φ が減る。重みは 4 スレッドの `publish_tree_weight` と同じ量)。
+    /// - r_tree: 測り始めからの Φ の減り (ALNS-CP の改善の分を除く) ÷ 木の手間 (大近傍探索の手間を除く)
+    /// - r_lns: ALNS-CP の改善 (主ギャップの減り × その時の重み) ÷ 大近傍探索の手間を、1 つ前に暫定解が変わった時からの窓で数える
+    ///   (昔の改善を忘れ、証明だけが残ると下がる)。r_tree と同じ速さの仮の 1 回 (手間 `LNS_CALL_MIN`) を足しておく
     ///   (呼ぶ前は σ(0) = 0.5 で真ん中から始め、効かなければ下がる)
-    /// どちらも 0 なら真ん中
-    pub(super) fn alns_budget_frac(&mut self) -> f64 {
+    /// どちらも 0 なら真ん中。`depth` は今のノードの深さ
+    pub(super) fn alns_budget_frac(&mut self, depth: usize) -> f64 {
         let lo = tunable!("ENOMOTO_T_MIP_LNS_TIME_MIN", 0.02, f64);
         let hi = tunable!("ENOMOTO_T_MIP_HEUR_ROLE_FRAC", 0.25, f64).max(lo);
-        let Some((r_lns, r_tree)) = self.alns_rates() else { return lo };
+        let Some((r_lns, r_tree)) = self.alns_rates(depth) else { return lo };
         let share = if r_lns + r_tree > 0.0 { r_lns / (r_lns + r_tree) } else { 0.5 };
         lo + (hi - lo) * share
     }
 
     /// 改善の大きさ / 手間 (1 手間 ≒ 1 ns) の (r_lns, r_tree) ([`Self::alns_budget_frac`] の説明のとおり)。暫定解がなければ None。
-    /// 初めて呼んだ時を測り始めにする。ほかの 1 スレッドの解探し (T1PRIMAL など) の効き目の入力にも使える
-    pub(super) fn alns_rates(&mut self) -> Option<(f64, f64)> {
+    /// 初めて呼んだ時を測り始めにする。ほかの 1 スレッドの解探し (T1PRIMAL など) の効き目の入力にも使える。`depth` は今のノードの深さ
+    pub(super) fn alns_rates(&mut self, depth: usize) -> Option<(f64, f64)> {
         let z = self.incumbent.as_ref().map(|(z, _)| *z)?;
-        let gap = ((z - self.global_lower_bound()) / z.abs().max(1.0)).max(0.0);
+        let w = 0.5f64.powi(depth.min(2000) as i32) + self.queue.iter().map(|n| 0.5f64.powi(n.depth.min(2000) as i32)).sum::<f64>();
+        self.alns_w = w;
+        let phi = ((z - self.global_lower_bound()) / z.abs().max(1.0)).max(0.0) * w;
         let tk = crate::ticks::total();
-        let (g0, t0, l0) = *self.alns_bud0.get_or_insert((gap, tk, self.lns_ticks));
+        let (p0, t0, l0) = *self.alns_bud0.get_or_insert((phi, tk, self.lns_ticks));
+        if z != self.alns_win.0 {
+            self.alns_win = (z, self.alns_win.2, (self.lns_ticks, self.alns_lns_gain));
+        }
         let piece = tunable!("ENOMOTO_T_MIP_LNS_CALL_MIN", 0.3, f64) * 1e9;
         let lns_tk = (self.lns_ticks - l0).max(0.0);
         let tree_tk = (tk - t0 - lns_tk).max(piece);
-        let r_tree = ((g0 - gap) - self.alns_lns_gain).max(0.0) / tree_tk;
-        let r_lns = (self.alns_lns_gain + r_tree * piece) / (lns_tk + piece);
+        let r_tree = ((p0 - phi) - self.alns_lns_gain).max(0.0) / tree_tk;
+        let (wl, wg) = self.alns_win.1;
+        let r_lns = (self.alns_lns_gain - wg + r_tree * piece) / ((self.lns_ticks - wl).max(0.0) + piece);
         Some((r_lns, r_tree))
     }
 
