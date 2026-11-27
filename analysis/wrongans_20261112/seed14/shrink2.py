@@ -5,12 +5,12 @@ src = (Path(__file__).resolve().parents[2] / "objint_20261112" / "wrong_seed14.p
 ns = {}
 exec(src.split("sys.path")[0] + src.split("import fuzz_objint as f")[1].split("print(")[0], ns)
 lo, up, c, it, rows, rlo, rup, off, sense = ns["LP"]
-from enomoto_solver import Model, Variable
+from enomoto_solver import Model
 inf = math.inf
 
 def solve(rs):
     cols = sorted({j for r, _, _ in rs for j, _ in r} | {j for j, v in enumerate(c) if v})
-    M = Model(); xs = {j: Variable(int if it[j] else float, lo[j], up[j]) for j in cols}
+    M = Model(); xs = {j: M.add_variable(int if it[j] else float, lo[j], up[j]) for j in cols}
     M.set_objective(sum(c[j] * xs[j] for j in cols) + off, sense)
     for r, l, u in rs:
         e = sum(v * xs[j] for j, v in r)
