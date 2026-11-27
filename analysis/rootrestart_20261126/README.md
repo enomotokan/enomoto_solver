@@ -127,3 +127,11 @@
 - **根の途中の判定 (`m`)**: 6 問とも `ROOTRESTART2 cut round` の行は出なかった。行は本数が 1 本以上のときだけ出るので、どのラウンドの頭でも、新たな固定 + 被約費用で固定できる本数が 0 だった (固定は根の LP とヒューリスティクスの後にまとまって起きる)。
 - **K・nra との干渉**: sct2 と uccase12 の木の中の再スタート (TREE restart) は def と同じく起きる (force の道は判定を通らない)。上限 4 回の共有で、uccase12 の eam は根 3 + 木 1 = 4 回で止まる。
 - neos-873061・csched008 は変わらない (固定が起きない。3 節)。
+
+## 6. 正しさと P の用意
+
+- fuzz (`FUZZ_VENV=/usr/local bash analysis/unify_20261126/fuzz.sh rr2 ENOMOTO_MIP_ROOTRESTART2=eam`、ビルド 1a0080065 = ALNS 既定の後): 標準 7 本と fuzz_bigact 2 本すべて bad 0・mismatches 0、cargo test 425 passed (`fuzz_rr2.out`)。
+- P (58 問 × 種 1〜3 × {1, 4 スレッド} × {def, rr2}、60 秒、計 696 回): `shards.json` の 4 本 (各約 1.6 時間)。
+  - ビルド: 1a0080065 以降 (ALNS 既定と C の見積もりの直しを含む)。
+  - 回し方 (リポジトリの根から): `python analysis/rootrestart_20261126/run.py K` (K = 0〜3) → res_sK.jsonl。
+  - 集計: `python analysis/rootrestart_20261126/summ.py`。
