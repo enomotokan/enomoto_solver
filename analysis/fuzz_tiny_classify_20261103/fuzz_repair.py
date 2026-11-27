@@ -2,7 +2,7 @@
 連続列 s を小さい係数 eps で持つ等式 `eps s + sum a x + y = b` (代入で s を消すと行の許容誤差が 1/eps 倍に広がる) と 2 値のナップサック。
 使い方: ENOMOTO_MIP_LOG=1 python fuzz_repair.py 問題数 [開始seed] 2>&1 | grep 'postsolve repair'  (seed ごとに 'SEED n' を出す)"""
 import random, sys
-from enomoto_solver import Model, Variable
+from enomoto_solver import Model
 inf = float("inf")
 def gen(seed):
     g = random.Random(seed); nb = g.randint(3, 8); ns = g.randint(1, 4); ny = g.randint(1, 4)
@@ -19,7 +19,7 @@ def gen(seed):
     return lo, up, c, it, rows, rlo, rup
 def ours(lp):
     lo, up, c, it, rows, rlo, rup = lp
-    M = Model(); xs = [Variable(int if it[j] else float, lo[j], up[j]) for j in range(len(lo))]
+    M = Model(); xs = [M.add_variable(int if it[j] else float, lo[j], up[j]) for j in range(len(lo))]
     M.set_objective(sum(cc * x for cc, x in zip(c, xs)))
     for r, l, u in zip(rows, rlo, rup):
         e = sum(v * xs[j] for j, v in r)

@@ -2,7 +2,7 @@
 (python scripts/mip_fuzz_clique.py 問題数 [開始seed])。試作 `ENOMOTO_MIP_CLQ_LAZY` (余裕のあるクリーク型の行を LP から外す) の確かめ用。
 否定の文字 (1 - x) を含む行・ナップサック行・一般整数と連続の列も混ぜ、木の探索に入る大きさ (2 値 60〜150 列) にする。"""
 import random, sys, time, highspy
-from enomoto_solver import Model, Variable
+from enomoto_solver import Model
 inf = float('inf')
 def gen(seed):
     g = random.Random(seed); nb = g.randint(60, 150); ng = g.randint(0, 4); nc = g.randint(0, 4); n = nb + ng + nc
@@ -51,7 +51,7 @@ def highs(lp):
     h.run(); return h.modelStatusToString(h.getModelStatus()), h.getInfo().objective_function_value
 def ours(lp):
     lo, up, c, it, rows, rlo, rup = lp
-    M = Model(); xs = [Variable(int if it[j] else float, lo[j], up[j]) for j in range(len(lo))]
+    M = Model(); xs = [M.add_variable(int if it[j] else float, lo[j], up[j]) for j in range(len(lo))]
     M.set_objective(sum(cc * x for cc, x in zip(c, xs)))
     for r, l, u in zip(rows, rlo, rup):
         e = sum(v * xs[j] for j, v in r)

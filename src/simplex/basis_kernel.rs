@@ -965,14 +965,20 @@ fn luclock_count(k: usize) {
     LUCLOCK_COUNTS.with(|c| c[k].set(c[k].get() + 1));
 }
 
-/// 試作 `ENOMOTO_LU_REFAC_BAL=1` (既定では使わない。analysis/lpgap_20261126/README.md 9 節) が有効か。
+/// `ENOMOTO_LU_REFAC_BAL` の値 (2026-11-27 から既定 `k`、`=0`・`off` で使わない (従来の合成の時計と fill の上限)。
+/// analysis/lpgap_20261126/README.md 9 節)。
 #[inline]
-pub(super) fn refac_bal_on() -> bool {
-    static V: OnceLock<bool> = OnceLock::new();
-    *V.get_or_init(|| env_str!("ENOMOTO_LU_REFAC_BAL").is_some_and(|v| v != "0"))
+fn refac_bal_mode() -> Option<&'static str> {
+    env_def!("ENOMOTO_LU_REFAC_BAL", "k")
 }
 
-/// 試作 `ENOMOTO_LU_REFAC_BAL`: 再分解するかを、分解 1 回の手間と更新で増える求解の手間の釣り合いで決める (係数・閾値なし)。
+/// `ENOMOTO_LU_REFAC_BAL` (既定 `k`) が有効か。
+#[inline]
+pub(super) fn refac_bal_on() -> bool {
+    refac_bal_mode().is_some()
+}
+
+/// `ENOMOTO_LU_REFAC_BAL` (既定 `k`): 再分解するかを、分解 1 回の手間と更新で増える求解の手間の釣り合いで決める (係数・閾値なし)。
 /// 分解してから k 回の更新の間の 1 反復あたりの平均の手間 `(B + S_k) / k` (B = 分解の演算数 [`sparse_lu::FtLu::build_tick`]、
 /// `ENOMOTO_LU_REFAC_BAL` のときは m + nnz(L+U) + 消去の積和の数、S_k = 求解で触った非零の累計 `synth_tick`) は、直近の 1 反復の手間
 /// (後半 k/2 回の平均 `(S_k - S_{k/2}) / (k - k/2)`) が平均を上回った所で最小になる。そこで再分解する (古典的な再分解の周期の最適化)。
@@ -983,14 +989,22 @@ pub(super) fn refac_bal_on() -> bool {
 #[inline]
 pub(super) fn refac_bal_secs() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
-    *V.get_or_init(|| env_str!("ENOMOTO_LU_REFAC_BAL").is_some_and(|v| v.contains('t')))
+    *V.get_or_init(|| refac_bal_mode().is_some_and(|v| v.contains('t')))
 }
 
 /// `ENOMOTO_LU_REFAC_BAL` に `k` があれば、分解の手間を ticks の時計 ([`crate::ticks`] の LU と同じ `build_tick`) で数える (決定的)。
 #[inline]
 pub(super) fn refac_bal_ticks() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
-    *V.get_or_init(|| env_str!("ENOMOTO_LU_REFAC_BAL").is_some_and(|v| v.contains('k')))
+    *V.get_or_init(|| refac_bal_mode().is_some_and(|v| v.contains('k')))
+}
+
+/// `ENOMOTO_LU_REFAC_BAL` に `r` があれば、ticks の時計 ([`crate::ticks`] の LU) には分解の手間の既定の見積りを足す
+/// (再分解の判定だけ `k`・`1` の数え方にし、ticks を使うほかの判定 (予算など) を既定と同じ数え方に保つ。`kr` の切り分け用)。
+#[inline]
+pub(super) fn refac_bal_ticks_est() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| refac_bal_mode().is_some_and(|v| v.contains('r')))
 }
 
 fn refac_bal_due(lu: &sparse_lu::FtLu, hist: &mut Vec<u64>) -> bool {

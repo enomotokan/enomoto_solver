@@ -2,7 +2,7 @@
 python fuzz_g1.py 種類 問題数 [開始seed]。種類 v = VUB の行と被覆の行 (VUBAGG が組を作る形)、c = 彩色・パッキング (パッキングのオービトープ)。
 環境変数は呼ぶ側で付ける (例: ENOMOTO_MIP_VUBAGG=1)。解の実行可能性 (行・境界・整数性) も確かめる。"""
 import random, sys, time, highspy
-from enomoto_solver import Model, Variable
+from enomoto_solver import Model
 inf = float("inf")
 
 def gen_v(seed):
@@ -63,7 +63,7 @@ def highs(lp):
 
 def ours(lp):
     lo, up, c, it, rows, rlo, rup = lp
-    M = Model(); xs = [Variable(int if it[j] else float, lo[j], up[j]) for j in range(len(lo))]
+    M = Model(); xs = [M.add_variable(int if it[j] else float, lo[j], up[j]) for j in range(len(lo))]
     M.set_objective(sum(cc * x for cc, x in zip(c, xs)))
     for r, l, u in zip(rows, rlo, rup):
         e = sum(v * xs[j] for j, v in r)
