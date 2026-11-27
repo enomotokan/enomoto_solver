@@ -661,7 +661,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             // 丸める列と最初に試す向きを選ぶ (スコアの小さいもの)
             let mut pick: Option<(usize, f64, bool, f64)> = None; // (列, 値, 上へ, スコア)
-            let multi = if multi_div > 0 && !no_multi && frac.len() >= multi_min { frac.len() / multi_div } else { 1 };
+            // 線探索は SCIP の `lpsolvefreq` 0 と同じく、同じ LP 解の候補を点数の順に続けて固定し、変わった境界が列の
+            // `lpresolvedomchgquot` (SCIP の既定 0.15) を超えたら LP を解き直す (下の「まとめて固定する分」で止める)
+            let ls_multi = kind == DiveKind::LineSearch && !no_multi;
+            let multi = if ls_multi {
+                frac.len()
+            } else if multi_div > 0 && !no_multi && frac.len() >= multi_min {
+                frac.len() / multi_div
+            } else {
+                1
+            };
             scored.clear();
             for &(j, v) in &frac {
                 let f = v - v.floor();
@@ -782,9 +791,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 scored.select_nth_unstable_by(k - 1, ord);
                 scored.truncate(k);
                 scored.sort_by(ord);
+                let ls_cap = (0.15 * p.n as f64) as usize;
                 for &(_, ej, ev, eup) in scored.iter() {
                     if ej == j {
                         continue;
+                    }
+                    if ls_multi && self.dom.stack_len() - before > ls_cap {
+                        break;
                     }
                     let b2 = self.dom.stack_len();
                     if eup {
