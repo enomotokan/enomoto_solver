@@ -70,14 +70,15 @@ OOM 2 回で確定する決まりもそのまま。
 - 問題: s2/problems.json (combo2 の第 2 段と同じ 240 問: M 186 問 + 残り 54 問)。s2/solu.json も同じ。
 - 分担: `python analysis/combo3_20261126/s2/plan.py` → s2/shards.json (11 分担、960 回、見積りは各 10.7 時間)。
   同じ (問題, スレッド) の def と c3 は、同じ分担で続けて回す。誰がどの分担を回すかは親が決める。
-- 版: **(空欄。PATHH_SLACK (Gm3w) の既定化が push された後の先端にする。親が知らせる)**。
-  (0afbb53b9 で一度確かめた: 4 節。版を決め直したら、その版でもう一度確かめる)
-  決めた版で check_default と、今の c3 (nolp 入り) の fuzz 7 本・cargo test を回し直してから始める。
+- 版: **cd10d12f7** (2026-11-27、親の決定。PATHH_SLACK・RETRY_ZMAX・PARSB・egj・UNIFY_FIX の z・p・LPPROBE_FIX=d が既定に入った版。基準 ref_default.json も更新済み)。
+  この版で check_default・c3 (nolp 入り) の fuzz 7 本・cargo test を回し直してから始める (5 節)。
+- 割り当て (親の決定): 0 は私 (HrNYnHEQ)、1 GGo5、2 GcYE、3 EwwjY、4 FinV、5 Gm3w (すぐ始める)。6 FcsJ、7 FKBv、8 HwBw、9 GU3WAp、10 GZRx
+  (ALNS の P が終わり次第)。集計は私が行う。
 
 ### 手伝いの子が回す手順 (分担 K)
 
 ほかの仕事と同じ入れ物で回すときは、計測専用の worktree を作る (`pip install -e .` はその入れ物の enomoto_solver をその worktree に向けるので、
-同じ入れ物で別の計測やビルドを同時にしない)。`<版>` は 3 節の冒頭の版。
+同じ入れ物で別の計測やビルドを同時にしない)。`<版>` は 3 節の冒頭の版 (cd10d12f7)。
 
 ```bash
 # 1. worktree を作り、決めた版のソースにする
@@ -132,3 +133,11 @@ python analysis/combo3_20261126/s2/prog.py                    # 進み
 - c3 (nolp 入り) の fuzz 7 本と cargo test (`s2/fuzz_c3.out`): 誤答 0。cargo test は 425 通過・0 失敗
   (1.1 節の ALNS の試験の失敗は、この版では直っている)。
 - 版を決め直したら、その版で同じ確かめを回し直す。
+
+## 5. 版 cd10d12f7 での確かめ (2026-11-27、240 問の版)
+
+- 先端のソース (src・python・Cargo.toml・Cargo.lock・pyproject.toml) は cd10d12f7 と同じで、そのまま `pip install -e .`。
+- check_default (`s2/check_default.out`): 6 問とも新しい基準と一致 (mik-250-20-75-4 は 3703 ノード)。ほかの子の試作は既定オフのまま。
+- c3 (nolp 入り) の fuzz 7 本 (`s2/fuzz_c3.out`): 誤答 0 (fuzz_tiny 0/400・0/400、fuzz_highs 0/300、fuzz_objint 0/1000・0/1000、
+  fuzz_slack mismatches 0 (1000・1000 回))。cargo test は 425 通過・0 失敗。
+- 分担 0 は本体のチェックアウト (この版の .so) で回す。
