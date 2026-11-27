@@ -5,11 +5,11 @@ import sys
 FM = "benchmarks/tinywidth_20261022/fuzz_mixtiny.py"
 src = open(FM).read().rsplit("N=int(sys.argv[1])", 1)[0]
 ns = {"__file__": FM}; exec(compile(src, FM, "exec"), ns)
-from enomoto_solver import Model, Variable
+from enomoto_solver import Model
 inf = float("inf")
 for seed in map(int, sys.argv[1:]):
     lo, up, c, it, rows, rlo, rup = lp = ns["gen"](seed); hs, ho = ns["highs"](lp)
-    M = Model(); xs = [Variable(int if it[j] else float, lo[j], up[j]) for j in range(len(lo))]
+    M = Model(); xs = [M.add_variable(int if it[j] else float, lo[j], up[j]) for j in range(len(lo))]
     M.set_objective(sum(cc * x for cc, x in zip(c, xs)))
     for r, l, u in zip(rows, rlo, rup):
         e = sum(v * xs[j] for j, v in r)

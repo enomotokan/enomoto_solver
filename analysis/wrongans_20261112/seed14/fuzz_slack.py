@@ -7,7 +7,7 @@ import math, os, random, sys
 os.environ.setdefault("ENOMOTO_MIP_THREADS", "1")
 os.environ.setdefault("ENOMOTO_MIP_REL_GAP", "1e-9")
 import highspy
-from enomoto_solver import Model, Variable
+from enomoto_solver import Model
 inf = math.inf
 
 
@@ -64,7 +64,7 @@ def highs(lp, zero_obj=False):
 
 def ours(lp):
     lo, up, c, it, rows, rlo, rup = lp
-    M = Model(); xs = [Variable(int if it[j] else float, lo[j], up[j]) for j in range(len(lo))]
+    M = Model(); xs = [M.add_variable(int if it[j] else float, lo[j], up[j]) for j in range(len(lo))]
     M.set_objective(sum(cc * x for cc, x in zip(c, xs)), "minimize")
     for r, l, u in zip(rows, rlo, rup):
         e = sum(v * xs[j] for j, v in r)
