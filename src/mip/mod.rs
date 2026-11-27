@@ -905,31 +905,14 @@ pub(super) fn polish_strict() -> bool {
 /// `ENOMOTO_MIP_POLISH_STRICT=2` の集計: 研磨した回数、解を取り替えた回数、かかった時間 (ナノ秒)
 pub(super) static INC_POLISH: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
 
-/// `ENOMOTO_MIP_POLISH_STRICT=2` (試作): 暫定解 `x` (問題 `p` の空間、目的値 `z`) の整数列を固定した `p` を、B&B の LP とは別に
-/// 一から (前処理 + 単体法) 解き直す。B&B の LP はカット・境界のずらしの入った問題を許容誤差の範囲で解くので、行ごとには許容誤差以下の違反が
-/// 多くの行で積もり、目的値が本当の値より低い暫定解になる (neos-5188808-nattai: 112 行 × 9.5e-7 で 1e-4)。採り方は [`polish_solution`] の
-/// 試作と同じ (違反が増えず目的値が悪くならない、または違反が真に減る)。取り替えたら新しい目的値を返す
-pub(super) fn polish_in_problem(p: &MipProblem, x: &mut Vec<f64>, z: f64) -> Option<f64> {
-    use crate::types::{LinearExpr, RowSense, Sense};
-    use std::sync::atomic::Ordering;
-    if p.is_int.iter().all(|&b| b) {
-        return None;
-    }
-    let t = std::time::Instant::now();
-    let vars: Vec<VariableData> = (0..p.n)
-        .map(|j| {
-            let (lb, ub) = if p.is_int[j] { (x[j].round(), x[j].round()) } else { (p.col_lo[j], p.col_up[j]) };
-            VariableData { vtype: VarType::Continuous, lb, ub }
-        })
-        .collect();
-    let objective = Objective {
-        expr: LinearExpr { coeffs: (0..p.n).filter(|&j| p.cost[j] != 0.0).map(|j| (j, p.cost[j])).collect(), constant: p.offset },
-        sense: Sense::Minimize,
-    };
-    let mut cons = Vec::with_capacity(p.m);
-    for i in 0..p.m {
-        let expr = LinearExpr { coeffs: p.rows[i].iter().copied().collect(), constant: 0.0 };
-        let (lo, up) = (p.row_lo[i], p.row_up[i]);
+/// 範囲つきの行 `lo <= a x <= up` の並びを、LP の入口 (`solve_lp` など) の行 ([`ConstraintRow`]) に直す: `lo == up` なら等式 1 本、
+/// そうでなければ有限な側ごとに `>=`・`<=` (この順) の 2 本まで。`cap` は行の数の見込み。研磨・後処理の修復・前処理の代わりの道・
+/// 根の LP の前処理つきの解き直しの共通部分 (analysis/unify_20261126 の 1 節の 12)
+pub(crate) fn ranged_constraints<'r>(rows: impl Iterator<Item = (&'r [(usize, f64)], f64, f64)>, cap: usize) -> Vec<ConstraintRow> {
+    use crate::types::{LinearExpr, RowSense};
+    let mut cons = Vec::with_capacity(cap);
+    for (row, lo, up) in rows {
+        let expr = LinearExpr { coeffs: row.iter().copied().collect(), constant: 0.0 };
         if lo == up {
             cons.push(ConstraintRow { expr, sense: RowSense::Eq, rhs: lo });
             continue;
@@ -941,6 +924,38 @@ pub(super) fn polish_in_problem(p: &MipProblem, x: &mut Vec<f64>, z: f64) -> Opt
             cons.push(ConstraintRow { expr, sense: RowSense::Le, rhs: up });
         }
     }
+    cons
+}
+
+/// 問題 `p` の行を [`ranged_constraints`] で直したもの
+fn problem_constraints(p: &MipProblem) -> Vec<ConstraintRow> {
+    ranged_constraints((0..p.m).map(|i| (&p.rows[i][..], p.row_lo[i], p.row_up[i])), p.m)
+}
+
+/// 費用 `cost` (0 の列は除く) と定数 `constant` の最小化の目的
+pub(crate) fn min_objective(cost: &[f64], constant: f64) -> Objective {
+    use crate::types::{LinearExpr, Sense};
+    Objective { expr: LinearExpr { coeffs: (0..cost.len()).filter(|&j| cost[j] != 0.0).map(|j| (j, cost[j])).collect(), constant }, sense: Sense::Minimize }
+}
+
+/// `ENOMOTO_MIP_POLISH_STRICT=2` (試作): 暫定解 `x` (問題 `p` の空間、目的値 `z`) の整数列を固定した `p` を、B&B の LP とは別に
+/// 一から (前処理 + 単体法) 解き直す。B&B の LP はカット・境界のずらしの入った問題を許容誤差の範囲で解くので、行ごとには許容誤差以下の違反が
+/// 多くの行で積もり、目的値が本当の値より低い暫定解になる (neos-5188808-nattai: 112 行 × 9.5e-7 で 1e-4)。採り方は [`polish_solution`] の
+/// 試作と同じ (違反が増えず目的値が悪くならない、または違反が真に減る)。取り替えたら新しい目的値を返す
+pub(super) fn polish_in_problem(p: &MipProblem, x: &mut Vec<f64>, z: f64) -> Option<f64> {
+    use std::sync::atomic::Ordering;
+    if p.is_int.iter().all(|&b| b) {
+        return None;
+    }
+    let t = std::time::Instant::now();
+    let vars: Vec<VariableData> = (0..p.n)
+        .map(|j| {
+            let (lb, ub) = if p.is_int[j] { (x[j].round(), x[j].round()) } else { (p.col_lo[j], p.col_up[j]) };
+            VariableData { vtype: VarType::Continuous, lb, ub }
+        })
+        .collect();
+    let objective = min_objective(&p.cost, p.offset);
+    let cons = problem_constraints(p);
     let r = solve_lp(&vars, &objective, &cons, RootSolver::Simplex, LpOptions::default());
     INC_POLISH[0].fetch_add(1, Ordering::Relaxed);
     let mut out = None;
@@ -1761,6 +1776,8 @@ pub(crate) fn solve_problem(p: &MipProblem, params: MipParams, use_presolve: boo
     if outer {
         subb::reset();
         heur_subfix::reset();
+        // 試作 `ENOMOTO_MIP_OBJSHAVE`: 下界の専任が示した下界の持ち越しを戻す
+        solver::OBJSHAVE_CARRY.with(|c| c.set(f64::NEG_INFINITY));
         condrev::decide(p, params.verbose);
     }
     if outer {
@@ -3590,22 +3607,8 @@ fn repair_postsolved(p: &MipProblem, x: &[f64], params: MipParams) -> Option<Vec
     // LP の前処理つきで解く (整数列を固定すると大きく縮む。前処理なしの LP は uccase12 の再スタート 1 回目の問題 (8.8 万行) で
     // 2 秒に収まらなかった。研磨 ([`polish_solution`]) と同じ経路)
     let vars: Vec<VariableData> = (0..p.n).map(|j| VariableData { vtype: VarType::Continuous, lb: lo[j], ub: up[j] }).collect();
-    let mut cons: Vec<ConstraintRow> = Vec::with_capacity(p.m);
-    for i in 0..p.m {
-        let expr = crate::types::LinearExpr { coeffs: p.rows[i].iter().cloned().collect(), constant: 0.0 };
-        let (rl, ru) = (p.row_lo[i], p.row_up[i]);
-        if rl == ru {
-            cons.push(ConstraintRow { expr, sense: crate::types::RowSense::Eq, rhs: rl });
-        } else {
-            if rl.is_finite() {
-                cons.push(ConstraintRow { expr: expr.clone(), sense: crate::types::RowSense::Ge, rhs: rl });
-            }
-            if ru.is_finite() {
-                cons.push(ConstraintRow { expr, sense: crate::types::RowSense::Le, rhs: ru });
-            }
-        }
-    }
-    let objective = Objective { expr: crate::types::LinearExpr { coeffs: (0..p.n).filter(|&j| p.cost[j] != 0.0).map(|j| (j, p.cost[j])).collect(), constant: 0.0 }, sense: crate::types::Sense::Minimize };
+    let cons = problem_constraints(p);
+    let objective = min_objective(&p.cost, 0.0);
     let r = crate::cancel::with_deadline(deadline, || solve_lp(&vars, &objective, &cons, RootSolver::Simplex, LpOptions::default()));
     let st = r.status;
     let xn = match (&st, r.x) {
@@ -5565,21 +5568,7 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
         Some(r) => r,
         None => {
             let vars: Vec<VariableData> = (0..n).map(|j| VariableData { vtype: if p.is_int[j] { VarType::Integer } else { VarType::Continuous }, lb: col_lo[j], ub: col_up[j] }).collect();
-            let mut cons: Vec<ConstraintRow> = Vec::with_capacity(aug_rows.len());
-            for i in 0..aug_rows.len() {
-                let expr = crate::types::LinearExpr { coeffs: aug_rows[i].iter().cloned().collect(), constant: 0.0 };
-                let (lo, up) = (p_row_lo[i], p_row_up[i]);
-                if lo == up {
-                    cons.push(ConstraintRow { expr, sense: crate::types::RowSense::Eq, rhs: lo });
-                } else {
-                    if lo.is_finite() {
-                        cons.push(ConstraintRow { expr: expr.clone(), sense: crate::types::RowSense::Ge, rhs: lo });
-                    }
-                    if up.is_finite() {
-                        cons.push(ConstraintRow { expr, sense: crate::types::RowSense::Le, rhs: up });
-                    }
-                }
-            }
+            let cons = ranged_constraints((0..aug_rows.len()).map(|i| (&aug_rows[i][..], p_row_lo[i], p_row_up[i])), aug_rows.len());
             let r = crate::presolve::build_a_g(&vars, &cons);
             if fastpack_check && fast_ok {
                 let f = crate::presolve::build_a_g_from_ranged_rows(&col_lo, &col_up, &aug_rows, &p_row_lo, &p_row_up).unwrap();
