@@ -15,6 +15,8 @@
 //!   - f と g は h と同じ回数 n (回した回) で (x·n + 1)/(n + 2) にならす。初めの版は g = 1 (markshare_4_0: 暫定解が最適で下界 0)
 //!     や f = 1 (暫定解なし) で logit が +∞ になり、外れが続いても取り分が上限に張り付いた (P 1 スレッド +0.6%、README 3 節)。
 //!     ならすと、外れが続けば logit h の下がりが f・g の上がりと打ち消し合い、取り分が下がる。
+//! - 3 版目: 要る側 (f・g) は平均して h と重みをそろえ (σ(logit h + (logit f + logit g)/2))、取り分に (n + 1)/(n + 2) を掛けて
+//!   事前を 0 寄りにする (n = 0 で取り分 0.0625、回すほど外れる)。短い問題で事前の 0.125 がそのまま効く損を減らす。
 //! - 主は、経過時間 × s から使った秒を引いた「貯え」が [`slice_min`] 秒 (Local-MIP の 1 切れ) 以上たまったときだけ、
 //!   根の終わりと木のノード (潜りの外) でその貯えの分だけ回す。易しい問題では貯えがたまる前に終わる。
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -207,7 +209,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let h = (t.hits as f64 + 1.0) / (n + 2.0);
         let f = laplace(if now > 0.0 { (now - t.last_imp) / now } else { 1.0 }, n);
         let g = laplace(self.gap_frac(), n);
-        let s = role_frac() * sigmoid(logit(h) + logit(f) + logit(g));
+        // 「効いているか」(h) 1 つに対し「要るか」(f・g) が 2 つなので、要る側は平均して重みをそろえる (3 版目)。
+        // 2 版目の和では、h と g が打ち消し合ったあと f だけが残り、markshare_4_0 で取り分が 0.21 に残った (README 7・8 節)。
+        // 事前は 0 寄り: 回した回数 n で (n + 1)/(n + 2) を掛け、回すほど事前 (n = 0 で 1/2) を外す (3 版目)。
+        let s = role_frac() * sigmoid(logit(h) + 0.5 * (logit(f) + logit(g))) * laplace(1.0, n);
         (s, h, f, g)
     }
 
@@ -224,6 +229,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         let (s, h, f, g) = self.t1primal_share(now);
         let t = self.t1p.as_ref().unwrap();
+        // 貯えは求解の始めから数える。始めた時刻から数えると、根の終わりに貯えがなく、木では新しい潜りの頭でしか
+        // 呼ばれないので、長く潜る 30n20b8 の最初の切れ端が 57 秒まで遅れた (3 版目の試し、README 8 節)。
         let bank = s * now - t.spent;
         if bank < slice_min() {
             return;
