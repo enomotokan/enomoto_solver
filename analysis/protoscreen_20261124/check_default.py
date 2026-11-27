@@ -17,6 +17,9 @@
 2026-11-27: `ENOMOTO_MIP_PATHH_SLACK=1` の既定化で exp-1-500-5-5 (7 → 5)・qnet1 (3 → 4)・mik-250-20-75-4 (6277 → 3703) のノード数が変わった
 (目的値は同じ。2 回解いて同じ) ので、`ref_default.json` を書き直した。`ENOMOTO_MIP_PATHH_SLACK=0` を引数で渡すと前の基準と全部一致する
 (analysis/rootbound_20261126 5 節)。
+2026-11-27 (2 回目): `ENOMOTO_MIP_ALNS=1b` (alnsc の形) の既定化で mik-250-20-75-4 (3703 → 3657)・markshare_4_0 (272319 → 248404) のノード数が変わった
+(目的値は同じ。2 回解いて同じ) ので、`ref_default.json` を書き直した。`ENOMOTO_MIP_ALNS=0` を引数で渡すと前の基準と全部一致する
+(analysis/alns_20261126 10 節)。
 `--save` で今の結果を `ref_default.json` に書く (既定の道筋を変えたときだけ。理由をここに書き足す)。"""
 import json, os, subprocess, sys
 from pathlib import Path
