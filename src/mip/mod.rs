@@ -1123,6 +1123,19 @@ pub(super) fn polish_in_problem_warm_ext(p: &MipProblem, x: &mut Vec<f64>, z: f6
         b.row.truncate(p.m);
         info.2 = b.col.iter().filter(|&&s| s == lp::VarStatus::Basic).count() + b.row.iter().filter(|&&s| s == lp::VarStatus::Basic).count();
         lp.set_basis(&b);
+        // 診断 `ENOMOTO_MIP_POLISH_STATS` の `b` (analysis/overrun240_20261127): 写した基底 (修復の後) の出発の点の主の実行不能 (数と相対の量の和)
+        if env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('b')) {
+            let tb = std::time::Instant::now();
+            let si = lp.basis_start_info(&b.col);
+            eprintln!("MIP: POLISH_STATS b: start basis primal infeasible {:?} (count, relative sum), {:.3}s", si, tb.elapsed().as_secs_f64());
+        }
+    }
+    // 診断 `ENOMOTO_MIP_POLISH_STATS` の `s`: 研磨の LP の大きさ (行・列・非零、整数を固定した列、固定されない連続列)
+    if env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('s')) {
+        let nnz: usize = p.rows.iter().map(|r| r.len()).sum();
+        let nint = p.is_int.iter().filter(|&&b| b).count();
+        let ncont_free = (0..p.n).filter(|&j| !p.is_int[j] && p.col_lo[j] < p.col_up[j]).count();
+        eprintln!("MIP: POLISH_STATS s: rows {} cols {} nonzeros {} integer (fixed) {} continuous not fixed {}", p.m, p.n, nnz, nint, ncont_free);
     }
     // 呼び出し元の手間の期限 ([`crate::ticks::push_budget`]) は外し、求解の期限 (壁時計) だけで止める。ヒューリスティクスの中で受け取った
     // 解の研磨が手間の期限で 3 反復で止まり、研磨しないまま見積り (その解を出した LP の双対値がなく、今の LP の双対値から取った小さな値) で
@@ -1154,6 +1167,16 @@ pub(super) fn polish_in_problem_warm_ext(p: &MipProblem, x: &mut Vec<f64>, z: f6
     });
     WARM_POLISH[0].fetch_add(1, Ordering::Relaxed);
     WARM_POLISH[5].fetch_add(lp.total_iterations(), Ordering::Relaxed);
+    // 診断 `ENOMOTO_MIP_POLISH_STATS` の `r` (`ENOMOTO_MIP_XOLAZY_LOG` と組): 同時実行の記録 (勝った側と時刻)。1 反復あたりの秒も出す
+    if env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('r')) {
+        let it = lp.total_iterations();
+        let secs = t.elapsed().as_secs_f64();
+        eprintln!(
+            "MIP: POLISH_STATS r: {st:?}{how} {it} iters {secs:.3}s ({:.3} ms/iter), race {:?}",
+            1e3 * secs / it.max(1) as f64,
+            crate::simplex::mip_lp::take_race_diag().map(|d| (d.winner, d.t_win, d.t_ipm, d.t_push, d.t_xo, d.t_end))
+        );
+    }
     let mut out = WarmPolish::NotSolved;
     if st == lp::LpStatus::Optimal {
         out = WarmPolish::Kept;
