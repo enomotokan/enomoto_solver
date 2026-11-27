@@ -11,7 +11,10 @@
 //! - 取り分 s = [`role_frac`] × σ(logit h + logit f + logit g)。入力は 3 つの割合 (どれも 0〜1) で、新しい閾値は置かない:
 //!   - h: 当たった率 (改善した回 + 1) / (回した回 + 2)。外れが続くと下がる。
 //!   - f: 経過時間のうち、最後に暫定解が良くなってから (なければ始めから) の割合。改善が止まっているほど上がる。
-//!   - g: 暫定解と下界の相対ギャップ (暫定解がなければ 1/2 = どちらとも言えない)。ギャップが小さい (証明だけの) 問題では下がる。
+//!   - g: 暫定解と下界の相対ギャップ (暫定解がなければ 1)。ギャップが小さい (証明だけの) 問題では下がる。
+//!   - f と g は h と同じ回数 n (回した回) で (x·n + 1)/(n + 2) にならす。初めの版は g = 1 (markshare_4_0: 暫定解が最適で下界 0)
+//!     や f = 1 (暫定解なし) で logit が +∞ になり、外れが続いても取り分が上限に張り付いた (P 1 スレッド +0.6%、README 3 節)。
+//!     ならすと、外れが続けば logit h の下がりが f・g の上がりと打ち消し合い、取り分が下がる。
 //! - 主は、経過時間 × s から使った秒を引いた「貯え」が [`slice_min`] 秒 (Local-MIP の 1 切れ) 以上たまったときだけ、
 //!   根の終わりと木のノード (潜りの外) でその貯えの分だけ回す。易しい問題では貯えがたまる前に終わる。
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -205,15 +208,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
     /// 取り分 s (上の説明) と、その入力 (h, f, g)。
     fn t1primal_share(&self, now: f64) -> (f64, f64, f64, f64) {
         let Some(t) = self.t1p.as_ref() else { return (0.0, 0.0, 0.0, 0.0) };
-        let h = (t.hits as f64 + 1.0) / (t.slices as f64 + 2.0);
-        let f = if now > 0.0 { (now - t.last_imp) / now } else { 1.0 };
-        let g = match &self.incumbent {
-            None => 0.5,
+        // h・f・g は同じ回数 n (切れ端の数) でラプラスの式 (x·n+1)/(n+2) にならす。外れが続くと logit h の下がりが
+        // logit f・logit g の上がり (暫定解がすでに最適で g が 1 のまま、暫定解なしで f が 1 のまま) と打ち消し合い、取り分が下がる。
+        let n = t.slices as f64;
+        let lap = |x: f64| (x * n + 1.0) / (n + 2.0);
+        let h = (t.hits as f64 + 1.0) / (n + 2.0);
+        let f = lap(if now > 0.0 { ((now - t.last_imp) / now).clamp(0.0, 1.0) } else { 1.0 });
+        // 暫定解なし (または下界なし) のギャップは 1 とみなす
+        let g = lap(match &self.incumbent {
+            None => 1.0,
             Some((z, _)) => {
                 let lb = self.global_lower_bound();
-                if lb.is_finite() { ((z - lb) / z.abs().max(lb.abs()).max(1.0)).clamp(0.0, 1.0) } else { 0.5 }
+                if lb.is_finite() { ((z - lb) / z.abs().max(lb.abs()).max(1.0)).clamp(0.0, 1.0) } else { 1.0 }
             }
-        };
+        });
         let s = role_frac() * sigmoid(logit(h) + logit(f) + logit(g));
         (s, h, f, g)
     }
