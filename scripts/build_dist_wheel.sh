@@ -28,6 +28,8 @@ TRAIN_ARGS=${TRAIN_ARGS:---time-limit 10 --threads 1,4}
 case "$(uname -m)" in x86_64|amd64|AMD64) DUAL=${DUAL:-1} ;; *) DUAL=${DUAL:-0} ;; esac
 BASE_RUSTFLAGS=${RUSTFLAGS:-}
 export CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
+# Windows の既定の文字コード (cp1252) では日本語の表示で落ちるので、Python の入出力を UTF-8 にする
+export PYTHONUTF8=1 PYTHONIOENCODING=utf-8
 # rustc に渡すパスは Windows では C:/... の形にする
 native() { if command -v cygpath > /dev/null 2>&1; then cygpath -m "$1"; else echo "$1"; fi; }
 venv_py() { if [ -x "$1/bin/python" ]; then echo "$1/bin/python"; else echo "$1/Scripts/python.exe"; fi; }
@@ -69,7 +71,10 @@ train() {
   fi
   t=$(now)
   echo "== train $name: scripts/pgo_train.py $TRAIN_ARGS"
-  (cd "$W" && "$vpy" "$ROOT/scripts/pgo_train.py" $TRAIN_ARGS > "$W/train-$name.out" 2> "$W/train-$name.err")
+  # 落ちたときは原因が CI のログに残るよう、エラー出力の末尾を出してから止める (-X faulthandler で落ちた所の Python の呼び出しも出す)
+  (cd "$W" && "$vpy" -X faulthandler "$ROOT/scripts/pgo_train.py" $TRAIN_ARGS > "$W/train-$name.out" 2> "$W/train-$name.err") || {
+    rc=$?; echo "== train $name: 終了コード $rc"; echo "-- train-$name.out の末尾"; tail -20 "$W/train-$name.out"
+    echo "-- train-$name.err の末尾"; tail -60 "$W/train-$name.err"; exit 1; }
   tail -1 "$W/train-$name.out"
   echo "== train $name: $(( $(now) - t )) 秒"
   "$PROFDATA" merge -o "$W/$name.profdata" "$W"/raw-$name/*.profraw
