@@ -12,4 +12,8 @@ for p in satellites2-60-fs satellites2-40 uccase12 sct2 csched008 neos-873061; d
   run $p def ENOMOTO_DUMMY=1
   run $p eam ENOMOTO_MIP_ROOTRESTART2=eam
 done
+# eam2: 初回の再スタートの手間の見積もりを「前処理 + 根の LP」に直したビルドで、見積もりの行が出た 3 問をもう一度 (設定は eam と同じ)
+for p in satellites2-60-fs satellites2-40 uccase12; do
+  run $p eam2 ENOMOTO_MIP_ROOTRESTART2=eam
+done
 echo 全部済み
