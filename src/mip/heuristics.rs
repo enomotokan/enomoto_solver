@@ -3791,7 +3791,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if self.incumbent.is_none() {
             return false;
         }
-        // 試作 `ENOMOTO_MIP_ALNS` ([`super::alns_cp`]): CP-SAT の難しさを合わせる 3 本の近傍 (rins・random・graph) を使う。
+        // `ENOMOTO_MIP_ALNS` (既定) ([`super::alns_cp`]): CP-SAT の難しさを合わせる 3 本の近傍 (rins・random・graph) を使う。
         // 呼ぶ時期・予算の決め方が今の腕の成功率を使うので、腕 0〜2 の回数・報酬にも足す
         // サブ MIP (RENS などの中の木) では使わない: 中では手間の期限があるので分けたループが期限を使い切り、全スレッドで 1 つの近傍の状態も
         // サブ MIP の呼び出しで汚れる (analysis/alns_20261126/README.md 8 節。0b4133149〜c99d75d20 はサブ MIP でも使っていた)
