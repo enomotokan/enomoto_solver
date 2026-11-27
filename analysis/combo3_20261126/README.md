@@ -141,3 +141,12 @@ python analysis/combo3_20261126/s2/prog.py                    # 進み
 - c3 (nolp 入り) の fuzz 7 本 (`s2/fuzz_c3.out`): 誤答 0 (fuzz_tiny 0/400・0/400、fuzz_highs 0/300、fuzz_objint 0/1000・0/1000、
   fuzz_slack mismatches 0 (1000・1000 回))。cargo test は 425 通過・0 失敗。
 - 分担 0 は本体のチェックアウト (この版の .so) で回す。
+
+## 6. 計測の途中で python/ が先へ進んだことの注記 (2026-11-27 14 時台)
+
+- 分担 0 の途中の結果を push する前の取り込み (14:09:51) で、70e0b1458 (python/ の Model・Variable の作り方の変更と quicksum) が本体の作業ツリーに入った。
+  editable のビルドは作業ツリーの python/ を読むので、それ以後の回 (分担 0 の lotsize 以降) は新しい python/ で回っている。
+- 計測の経路への影響はない: worker (`scripts/run_miplib_benchmark.py` の `worker_ours`) は `benchmark_highs._read_our_model` で MPS を読み、
+  `_core.PyModel` (Rust コア) を直接組み立てて解く。変わった `model.py`・`variable.py`・`function.py` は通らない
+  (`__init__.py` の import が増えただけ)。Rust の .so は cd10d12f7 のまま。
+- 手伝いの子の分担も、取り込んだ時刻によって同じ形になりうるが、同じ理由で影響はない。
