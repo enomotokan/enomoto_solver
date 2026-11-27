@@ -18,7 +18,7 @@
 [Python]  問題入力インターフェース
   Model()
     │
-    ├─ Variable(型, 下限, 上限)  … Function のサブクラス
+    ├─ M.add_variable(型, 下限, 上限) → Variable  … Function のサブクラス
     │     │  演算子 (+ - *)
     │     ▼
     │  Function  … coeffs: {変数index: 係数}, constant
@@ -75,7 +75,7 @@
 
 **責務分界**:
 Python 側は「式をどう書けるか」(構文・型チェック・演算子オーバーロード)にのみ関与し、
-行列そのものは一切保持しない。`Variable` を作った瞬間に Rust 側 `add_variable` が
+行列そのものは一切保持しない。`M.add_variable` で変数を作った瞬間に Rust 側 `add_variable` が
 呼ばれてインデックスが払い出され、そのインデックスが Function/Constraint が持つ
 スパース係数辞書 `{index: coeff}` のキーになる。`set_objective` / `add_constraint` の
 呼び出し時にはじめて、その辞書が `Vec<(usize, f64)>` として Rust 側に渡り、
@@ -89,9 +89,10 @@ Rust 内部の `Vec<VariableData>` / `Objective` / `Vec<ConstraintRow>` に格�
 M = Model()
 ```
 
-- インスタンス化した瞬間に「カレントモデル」スタックに積まれる。以後、モデルを明示指定
-  しない `Variable(...)` 呼び出しは最後に作られた(あるいは `with M:` で入った)モデルに
-  紐づく。
+- 変数は `M.add_variable(型, 下限, 上限, name=None)` で、そのモデルに作る。暗黙の「現在のモデル」
+  (以前のカレントモデルのスタック) は持たない。どのモデルに入るかがコードの上で明らかになり、
+  使い終わったモデルは参照が無くなれば解放され、スレッドごとに別のモデルを組んでも混ざらない。
+  `Variable(...)` を直接呼ぶと `TypeError`。
 - `M.set_objective(f, sense="minimize")`: `f` が `Function` 型でなければ `TypeError`。
 - `M.add_constraint(g)`: `g` が `Constraint` 型でなければ `TypeError`。
 - `M.solve() -> Solution`: Rust 側の前処理・最適化アルゴリズムを実行。
@@ -103,16 +104,16 @@ M = Model()
 ### 3.2 Variable(Function のサブクラス)
 
 ```python
-x = Variable(float, 0, 10)   # 型, 下限, 上限 ― float は連続変数
-y = Variable(int, 0, 5)      # int は整数変数
-z = Variable(int, 0, 1)      # バイナリ変数は [0, 1] に境界を絞った整数変数として表す
+x = M.add_variable(float, 0, 10)   # 型, 下限, 上限 ― float は連続変数
+y = M.add_variable(int, 0, 5)      # int は整数変数
+z = M.add_variable(int, 0, 1)      # バイナリ変数は [0, 1] に境界を絞った整数変数として表す
 ```
 
 - `型` は組み込み型 `float`(連続) / `int`(整数)を第一引数に渡す。
   後方互換として文字列 `"continuous"` / `"integer"` / `"binary"`
   (`"c"`/`"i"`/`"b"` 等の別名含む)も引き続き受け付け、`"binary"` を使うと
   Rust コア側の専用バイナリ型(渡した下限・上限に関わらず常に `[0, 1]` に固定)になる。
-- コンストラクタ内で `model._core.add_variable(vtype, lb, ub)` を呼び、Rust 内部の
+- `Model.add_variable` の中で `model._core.add_variable(vtype, lb, ub)` を呼び、Rust 内部の
   `Vec<VariableData>` に新しい行が追加され、その添字 `index` を受け取る。
 - `下限`・`上限` は**どちらも有限な実数でなければならない**(`math.inf` /
   `-math.inf` を渡すと `add_variable` 側 [`model.rs`] が `ValueError` を送出する)。

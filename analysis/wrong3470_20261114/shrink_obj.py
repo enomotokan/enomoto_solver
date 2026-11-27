@@ -1,6 +1,6 @@
 """dmp_q0.mps から行・列を落として、HiGHS と ENOMOTO の最適値が食い違ったままの最小の問題を探す。"""
 import highspy, os, sys, io, contextlib
-from enomoto_solver import Model, Variable
+from enomoto_solver import Model
 inf=float('inf')
 def load(f):
     h=highspy.Highs(); h.setOptionValue('output_flag',False); h.readModel(f)
@@ -23,7 +23,7 @@ def highs(P,cols,rws):
         h.addRow(max(P['rlo'][i],-K),min(P['rup'][i],K),len(r),[a for a,_ in r],[b for _,b in r])
     h.run(); return (h.modelStatusToString(h.getModelStatus()), h.getInfo().objective_function_value)
 def ours(P,cols,rws):
-    M=Model(); xs={j:Variable(int if P['it'][j] else float,P['lo'][j],P['up'][j]) for j in cols}
+    M=Model(); xs={j:M.add_variable(int if P['it'][j] else float,P['lo'][j],P['up'][j]) for j in cols}
     M.set_objective(sum(P['c'][j]*xs[j] for j in cols))
     for i in rws:
         r=[(j,v) for j,v in P['rows'][i] if j in xs]
