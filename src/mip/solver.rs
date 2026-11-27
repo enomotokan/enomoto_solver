@@ -20417,7 +20417,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             && env_str!("ENOMOTO_MIP_PAR_SB").is_some()
             && self.pool.as_ref().is_none_or(|pl| pl.idle.load(std::sync::atomic::Ordering::Relaxed) + 1 >= pl.threads);
         let mut pre: std::collections::HashMap<usize, [SbSide; 2]> = std::collections::HashMap::new();
-        // 試作 `ENOMOTO_MIP_PARSB` (analysis/parsb_20261126、既定では使わない): 強分枝の子の LP を空いたスレッドで先に解いておく
+        // `ENOMOTO_MIP_PARSB` (2026-11-26 から既定、analysis/parsb_20261126): 強分枝の子の LP を空いたスレッドで先に解いておく
         // (投機)。選び方・打ち切りは下の逐次の繰り返しのまま (候補の順に当てはめる)。先に解いた結果は、その子の「入力」
         // (打ち切り値のビット、子の伝播で LP に渡す境界の並び) が逐次で解くときと全く同じときだけ使い、違えば逐次で解く。
         // 子の LP 解が整数のとき (暫定解の候補、`try_lp_solution` が LP の状態を使う) も逐次で解き直す。
@@ -31665,11 +31665,13 @@ fn sb_objprop() -> bool {
     env_str!("ENOMOTO_MIP_SB_OBJPROP").is_some()
 }
 
-/// 試作 `ENOMOTO_MIP_PARSB` (analysis/parsb_20261126、既定では使わない): 強分枝の子の LP を空いたスレッドで先に解く。
-/// 値は文字の並び (`1` など何でも有効、`v` を含めば確かめ)。`0`・`off` で使わない
+/// `ENOMOTO_MIP_PARSB` (analysis/parsb_20261126): 強分枝の子の LP を空いたスレッドで先に解く (2 スレッド以上のときだけ働く)。
+/// 値は文字の並び (`1` など何でも有効、`v` を含めば確かめ、`s`・`p` は診断)。
+/// **2026-11-26 に既定にした: 値 `1` (利用者の判断)。`0`・`off` で使わない (前の形)。** P の 4 スレッドで 0.981 [0.966, 0.995] (3d8853863)・
+/// 0.994 [0.979, 1.010] (ed02a8cc8)、解けた数は減らず (137 → 137・138 → 140)、食い違い 0、根の強分枝は 1.7〜2.5 倍速い。
+/// 先に解いた結果は逐次で解く結果とビットで同じ (子の LP はどれも強分枝の前の LP の複製から解く。既定の逐次とは解の下の桁が違いうる)
 fn parsb_flags() -> Option<&'static str> {
-    static V: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_str!("ENOMOTO_MIP_PARSB").filter(|v| *v != "0" && *v != "off").map(|v| v.to_string())).as_deref()
+    env_def!("ENOMOTO_MIP_PARSB", "1")
 }
 
 /// `ENOMOTO_MIP_PARIDLE` (analysis/paridle_20261126): 複数スレッドの木の始まりの遊びを減らす。値の文字で部品を選ぶ。
