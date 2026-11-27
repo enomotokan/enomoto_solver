@@ -26862,11 +26862,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// 試作 `ENOMOTO_MIP_ROOTRESTART2` の判定: 縮む割合 `s` (新たに固定した列の非零 / 根の始めに自由だった列の非零) の分だけ次の段の手間
-    /// `w` 秒が軽くなる見込み `w s` と、再スタートの手間 `C` 秒 (前の再スタートで実際にかかった秒、初回はここまでの外側の経過秒 = 前処理 +
-    /// 根の LP + カット) を比べ、シグモイド σ(ln(w s / C)) が 1/2 以上 (w s >= C) なら真
+    /// `w` 秒が軽くなる見込み `w s` と、再スタートの手間 `C` 秒 (前の再スタートで実際にかかった秒、初回は同じ量の見積もり = 前処理の秒
+    /// (外側の経過秒 − このソルバーの経過秒) + 根の LP の秒) を比べ、シグモイド σ(ln(w s / C)) が 1/2 以上 (w s >= C) なら真。
+    /// 初回を外側の経過秒にすると根のヒューリスティクス (satellites2-40 の RINS 174 秒) まで手間に入り、再スタートを見送る (cmp6)
     pub(super) fn rr2_value(&self, w: f64, s: f64, tag: &str) -> bool {
         let (_, last) = RR2_STATE.with(|c| c.get());
-        let c = if last.is_finite() && last > 0.0 { last } else { super::outer_elapsed().unwrap_or_else(|| self.start.elapsed().as_secs_f64()).max(1e-3) };
+        let c = if last.is_finite() && last > 0.0 {
+            last
+        } else {
+            let pre = super::outer_elapsed().map_or(0.0, |o| (o - self.start.elapsed().as_secs_f64()).max(0.0));
+            (pre + self.root_lp_secs).max(1e-3)
+        };
         let g = if s > 0.0 && w > 0.0 { (w * s / c).ln() } else { f64::NEG_INFINITY };
         let sig = 1.0 / (1.0 + (-g).exp());
         if self.params.verbose {
