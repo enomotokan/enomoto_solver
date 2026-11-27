@@ -356,3 +356,9 @@ crash 0・目的値の食い違い 0。
   遅く: nw04 (14 → 19〜23 秒)・nu25-pr12 (1.4 → 3.7〜4.1)・qiu (16〜20 → 26)。LUCLOCK と同じく、P の差の大半は LP の解が変わった後の MIP の道筋。
 - rbt は勝ち負けがほぼ打ち消し合う (最適 −2: mc11 ×2・roll3000 ×2・swath1・mzzv42z を失い、10teams ×2・mzzv42z・timtab1 を得る)。
 - LP 単独で分解し直しが多すぎた rb1 が P では良い向き (P の LP は小さく、分解が軽いので多すぎても損が小さい)。決定的な形 `k` (ticks の較正、親の方針) を作って並べる。
+
+### 8.2 既定にした (2026-11-27、利用者の承認、親の指示)
+
+`ENOMOTO_SIMPLEX_RETRY_ZMAX` を既定で有効にした (`=0`・`off` で使わない、`env_def!` で既定 `1`)。先端 64e0058de (70010bfd6 以降、新しい check_default の基準) で確かめた:
+check_default 6 問一致 (既定の道筋は変わらない。破綻の後の解き直しのときだけ効く)、fuzz 7 本 (`analysis/comboharm_20261124/fuzz.sh`) すべて誤答 0
+(fuzz_tiny 0/400・fuzz_highs 0/300・fuzz_objint 0/1000・fuzz_slack 0/1000・fuzz_tiny2 0/400・fuzz_objint2 0/1000・fuzz_slack2 0/1000)、cargo test 425 通過 (無視 19)。
