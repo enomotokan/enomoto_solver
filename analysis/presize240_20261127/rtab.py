@@ -1,4 +1,4 @@
-"""rules.jsonl を表にする: 問題ごとに、規則を 1 つ切ったときの前処理後の行・列 (既定との差)。"""
+"""rules.jsonl を表にする: 問題ごとに、規則を 1 つ切ったときの前処理後の行・列・非零 (既定との差、行/列/非零)。"""
 import json, collections
 from pathlib import Path
 NAMES = {64: "強制行", 128: "強制列", 256: "自由列の代入", 512: "2 項等式", 1024: "従属な等式", 2048: "従属な自由列", 4096: "Aggregator",
@@ -10,5 +10,5 @@ for l in (Path(__file__).parent / "rules.jsonl").read_text().splitlines():
 for p, d in R.items():
     b = d.get(0)
     if not b: continue
-    s = [f"{NAMES[k]} {d[k]['rows'] - b['rows']:+d}/{d[k]['cols'] - b['cols']:+d}" for k in sorted(d) if k and (d[k]['rows'], d[k]['cols']) != (b['rows'], b['cols'])]
-    print(f"{p}: 既定 {b['rows']}×{b['cols']} ({b['secs']}s) | " + ("、".join(s) or "どれを切っても同じ"))
+    s = [f"{NAMES[k]} {d[k]['rows'] - b['rows']:+d}/{d[k]["cols"] - b["cols"]:+d}/{d[k]["nnz"] - b["nnz"]:+d}" for k in sorted(d) if k and (d[k]["rows"], d[k]["cols"], d[k]["nnz"]) != (b["rows"], b["cols"], b["nnz"])]
+    print(f"{p}: 既定 {b["rows"]}×{b["cols"]} ({b["nnz"]}) ({b['secs']}s) | " + ("、".join(s) or "どれを切っても同じ"))

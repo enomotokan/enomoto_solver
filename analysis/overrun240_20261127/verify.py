@@ -9,6 +9,8 @@ sys.path.insert(0, str(WT / "scripts"))
 import run_miplib_benchmark as rb  # noqa: E402
 PROBS = ["neos-5114902-kasavu", "neos-5049753-cuanza", "neos-873061", "thor50dday", "dano3_5", "snp-02-004-104"]
 CFGS = {"def": {}, "p": {"ENOMOTO_MIP_OVERRUN240": "p"}}
+# 最終候補 (7 節): 先端 (7d43fcdac 以降) を merge したビルドで回す
+CFGS["pp1"] = {"ENOMOTO_MIP_POLISH_PRESOLVE": "1", "ENOMOTO_MIP_OVERRUN240": "p"}
 OUT = D / "res_v.jsonl"
 done = set()
 if OUT.exists():
