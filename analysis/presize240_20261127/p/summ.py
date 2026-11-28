@@ -13,10 +13,12 @@ from pathlib import Path
 D = Path(__file__).resolve().parent
 sys.path.insert(0, str(D))
 from cfg import CFGS, P1  # noqa: E402
+if "--zs" in sys.argv:  # 8 節の P3 (既定 1st と 1stz+ROWCLEAN)
+    P1 = {1: ("zs", CFGS["zs_t1"], True, True, "presize240_20261127/p")}
 import os
 TL, SH = float(os.environ.get("T1P_TL", "60")), 10.0  # L (600 秒) は T1P_TL=600
 PERPROB = "--perprob" in sys.argv
-files = [a for a in sys.argv[1:] if a != "--perprob"] or [str(D / "res_s*.jsonl")]
+files = [a for a in sys.argv[1:] if a not in ("--perprob", "--zs")] or [str(D / "res_s*.jsonl")]
 R = {}
 for f in files:
     for g in glob.glob(f):
