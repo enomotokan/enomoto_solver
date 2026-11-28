@@ -10,7 +10,7 @@ python analysis/lpiter_20261127/lpbench.py 集合 [--shard i/n] [--mode simplex|
 - mode auto4: 既定の lp_solver="auto"・4 スレッド (二段解法と内点法の競争) で 1 回。HiGHS は既定 (choose)・4 スレッド。
 - 当方は ENOMOTO_PROF_PHASES_EXT=1 で解き、標準エラーに出る段階別の時間 (単体法の呼び出しごとの表) を足し合わせて記録する
   (反復数 `iters`、`ftran`・`btran(rho_p)` などの ms)。計時の手間は 1 反復に十数回の時刻の読み取りで、どの設定にも同じだけかかる。
-- 設定: def = 既定、rtib = RETA_TICK=1・LU_TINY_HS=1i・BTRAN_TINY=1、rtibo = rtib + BTRAN_OUT=1。
+- 設定: def = 既定、rtib = RETA_TICK=1・LU_TINY_HS=1i・BTRAN_TINY=1、rtibo = rtib + BTRAN_OUT=1、rtibou = rtibo + BTRAN_UT=1、defo = 既定 + BTRAN_OUT=1、defu = 既定 + BTRAN_UT=1。
 """
 import json, os, re, statistics, subprocess, sys, time
 from pathlib import Path
@@ -19,7 +19,9 @@ D = Path(__file__).resolve().parent
 REPO = D.parents[1]
 TL = 600.0
 RTIB = {"ENOMOTO_LU_RETA_TICK": "1", "ENOMOTO_LU_TINY_HS": "1i", "ENOMOTO_LU_BTRAN_TINY": "1"}
-CFGS = {"def": {}, "rtib": RTIB, "rtibo": {**RTIB, "ENOMOTO_LU_BTRAN_OUT": "1"}, "highs": None}
+CFGS = {"def": {}, "rtib": RTIB, "rtibo": {**RTIB, "ENOMOTO_LU_BTRAN_OUT": "1"}, "highs": None,
+        "defo": {"ENOMOTO_LU_BTRAN_OUT": "1"}, "defu": {"ENOMOTO_LU_BTRAN_UT": "1"},
+        "rtibou": {**RTIB, "ENOMOTO_LU_BTRAN_OUT": "1", "ENOMOTO_LU_BTRAN_UT": "1"}}
 # Mittelmann LPopt のうち、以前の計測 (benchmarks/paper、16 スレッド) で当方・HiGHS・CLP (1 スレッドの単体法) のどれかが 600 秒以内に解いたもの
 MITTEL = ["Linf_520c", "cont1", "datt256", "ex10", "fome13", "irish-electricity", "neos", "neos-5052403-cygnet", "neos-5251015",
           "ns1688926", "nug08-3rd", "pds-100", "physiciansched3-3", "qap15", "rail4284", "rmine15", "s250r10", "scpm1", "square41",
@@ -120,7 +122,7 @@ def problems(sel):
             else:
                 print(f"mittelmann: {n} が無い", file=sys.stderr)
         return out
-    allp = dict(problems("netlib") + problems("kennington"))
+    allp = dict(problems("netlib") + problems("kennington") + problems("mittelmann"))
     return [(n, allp[n]) for n in sel.split(",")]
 
 

@@ -989,10 +989,14 @@ pub(super) fn polish_in_problem(p: &MipProblem, x: &mut Vec<f64>, z: f64) -> Opt
 /// LP の前処理 + 単体法で解く ([`polish_in_problem`] と同じ解き方、[`polish_presolved`])。`1` = 最適で終わらないとき (時間切れなど。W を使う最適の判定に関わらない) だけ、`a` = いつも。
 /// 整数を固定すると多くの行が 1 列の境界になる問題 (thor50dday・neos-873061・cuanza・kasavu) で、研磨の LP が前処理で大きく縮む (README 4.3 節)。
 /// この経路は双対値を返さないので、許容の漏れの上界 W ([`POLISH_TOL_LEAK`]) は 0 にする (最適の判定が厳しい側になるだけ)
+/// `d` (利用者の承認 (δ)、2026-11-28、10 節): `1` と同じ場面で、LP の前処理だけを先にかけ、前処理の後の LP (行 + 列 + 非零) が研磨の LP
+/// (行 + 固定していない列 + その列の非零) より小さければ前処理つきで解き、小さくなければ解かずに温めた単体法へ回す ([`polish_presolved`] の `gate`)。
+/// 前処理で縮まない型 (dano3_5・snp-02-004-104) で、一から解く前処理の経路が温めた研磨より遅かった (8 節) ため
 pub(super) fn polish_presolve_mode() -> Option<char> {
     static V: std::sync::OnceLock<Option<char>> = std::sync::OnceLock::new();
     *V.get_or_init(|| match env_str!("ENOMOTO_MIP_POLISH_PRESOLVE") {
         Some(v) if v.contains('a') => Some('a'),
+        Some(v) if v.contains('d') || v.contains('r') => Some('d'),
         Some(v) if v != "0" && v != "off" => Some('1'),
         _ => None,
     })
@@ -1003,6 +1007,94 @@ pub(super) fn polish_presolve_mode() -> Option<char> {
 /// 解けなければ `NotSolved` (呼び出し側は温めた単体法に回す)。元の空間への戻し (前処理の後始末) の誤りは、戻した解の違反を元の問題で測る
 /// 採り方の判定で捨てられる
 pub(super) fn polish_presolved(p: &MipProblem, x: &mut Vec<f64>, z: f64, deadline: Option<std::time::Instant>) -> WarmPolish {
+    polish_presolved_ext(p, x, z, deadline, polish_presolve_mode() == Some('d'))
+}
+
+/// 試作 `ENOMOTO_MIP_POLISH_PRESOLVE=r` (利用者の提案、2026-11-28、10 節。`d` を含む): 2 スレッド以上の最後の研磨で、前処理つきの研磨と
+/// 温めた研磨を同時に回し、先に終わったほうを採る ([`polish_race`])。1 スレッドは `d` のまま
+pub(super) fn polish_presolve_race() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_str!("ENOMOTO_MIP_POLISH_PRESOLVE").is_some_and(|v| v.contains('r')))
+}
+
+/// `POLISH_PRESOLVE=r` ([`polish_presolve_race`]): 最後の研磨を 2 本で回す。別のスレッドで前処理つきの研磨 ([`polish_presolved_ext`]、
+/// `d` の大きさの門つき、期限 `dl_pre`) を始め、門の判定を待つ。
+/// - 前処理の後の LP が小さくなければ (`d` と同じ): その研磨は解かずに終わるので、温めた研磨を期限 `dl_warm` で 1 本で解く。
+/// - 小さければ: このスレッドで温めた研磨 (基底 `basis`、期限 `dl_pre`) を同時に解き、先に終わったほう (解けたもの) を採って、もう一方は打ち切る。
+///
+/// どちらも打ち切りのトークンを持つので、温めた研磨は内点法との同時実行をしない (単体法 1 本。mip_lp の `solve`)。使うのは 2 本だけ。
+/// 前処理つきの研磨が勝てば、許容の漏れの上界 W ([`POLISH_TOL_LEAK`]) は 0 (前処理の経路と同じ)
+pub(super) fn polish_race(p: &MipProblem, x: &mut Vec<f64>, z: f64, basis: &lp::Basis, dl_pre: Option<std::time::Instant>, dl_warm: Option<std::time::Instant>) -> WarmPolish {
+    use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+    use std::sync::Arc;
+    let t0 = std::time::Instant::now();
+    let sig = Arc::new(AtomicU8::new(0));
+    let (tok_pre, tok_warm) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+    let done_pre = Arc::new(AtomicBool::new(false));
+    let stats = env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('v'));
+    let (r, xo, who) = std::thread::scope(|sc| {
+        let x0 = x.clone();
+        let (sig2, tp, tw, dp) = (sig.clone(), tok_pre.clone(), tok_warm.clone(), done_pre.clone());
+        let h = sc.spawn(move || {
+            let mut xp = x0;
+            crate::simplex::PRESOLVE_GATE_SIGNAL.with(|g| *g.borrow_mut() = Some(sig2));
+            let r = crate::cancel::with_token(Some(tp), || polish_presolved_ext(p, &mut xp, z, dl_pre, true));
+            crate::simplex::PRESOLVE_GATE_SIGNAL.with(|g| *g.borrow_mut() = None);
+            dp.store(true, Ordering::Release);
+            // 解けたら温めた研磨を打ち切る
+            if matches!(r, WarmPolish::Replaced(_) | WarmPolish::Kept) {
+                tw.store(true, Ordering::Relaxed);
+            }
+            (r, xp)
+        });
+        // 門の判定 (か、前処理つきの研磨の終わり) を待つ
+        while sig.load(Ordering::Acquire) == 0 && !done_pre.load(Ordering::Acquire) {
+            std::thread::sleep(std::time::Duration::from_micros(200));
+        }
+        if sig.load(Ordering::Acquire) != 1 {
+            // 縮まない (または前処理の経路が門の前に終わった): 前処理つきの研磨の結果を待ち、解けていればそれを、なければ温めた研磨を 1 本で
+            let (rp, xp) = h.join().expect("polish_race: presolve thread");
+            if matches!(rp, WarmPolish::Replaced(_) | WarmPolish::Kept) {
+                POLISH_TOL_LEAK.with(|c| c.set((0.0, 0.0)));
+                return (rp, xp, "presolve");
+            }
+            let mut xw = x.clone();
+            let rw = polish_in_problem_warm(p, &mut xw, z, Some(basis), dl_warm);
+            return (rw, xw, "warm alone");
+        }
+        // 縮んだ: 温めた研磨を同時に解く
+        let mut xw = x.clone();
+        let rw = crate::cancel::with_token(Some(tok_warm.clone()), || polish_in_problem_warm(p, &mut xw, z, Some(basis), dl_pre));
+        let warm_ok = matches!(rw, WarmPolish::Replaced(_) | WarmPolish::Kept) && !tok_warm.load(Ordering::Relaxed);
+        if warm_ok {
+            tok_pre.store(true, Ordering::Relaxed);
+        }
+        let (rp, xp) = h.join().expect("polish_race: presolve thread");
+        let pre_ok = matches!(rp, WarmPolish::Replaced(_) | WarmPolish::Kept);
+        if warm_ok {
+            (rw, xw, "warm won")
+        } else if pre_ok {
+            POLISH_TOL_LEAK.with(|c| c.set((0.0, 0.0)));
+            (rp, xp, "presolve won")
+        } else {
+            (WarmPolish::NotSolved, xw, "neither")
+        }
+    });
+    if stats {
+        eprintln!("MIP: POLISH_RACE: {who} {:.3}s -> {}", t0.elapsed().as_secs_f64(), match r {
+            WarmPolish::Replaced(_) => "replaced",
+            WarmPolish::Kept => "kept",
+            WarmPolish::NotSolved => "not solved",
+        });
+    }
+    if matches!(r, WarmPolish::Replaced(_)) {
+        *x = xo;
+    }
+    r
+}
+
+/// [`polish_presolved`] の本体。`gate` なら、前処理の後の LP が研磨の LP より小さくないとき解かずに `NotSolved` を返す (`POLISH_PRESOLVE=d`)
+pub(super) fn polish_presolved_ext(p: &MipProblem, x: &mut Vec<f64>, z: f64, deadline: Option<std::time::Instant>, gate: bool) -> WarmPolish {
     if p.is_int.iter().all(|&b| b) {
         return WarmPolish::Kept;
     }
@@ -1019,7 +1111,28 @@ pub(super) fn polish_presolved(p: &MipProblem, x: &mut Vec<f64>, z: f64, deadlin
     let objective = min_objective(&p.cost, p.offset);
     let cons = problem_constraints(p);
     let tb = t.elapsed().as_secs_f64();
+    if gate {
+        // 比べる大きさ: 温めた研磨が解く LP (行の数、固定していない列の数、その列の非零の数)
+        let free = |j: usize| vars[j].lb < vars[j].ub;
+        let n0 = (0..p.n).filter(|&j| free(j)).count();
+        let z0: usize = cons.iter().map(|c| c.expr.coeffs.keys().filter(|&&j| free(j)).count()).sum();
+        crate::simplex::PRESOLVE_GATE.with(|g| g.set(Some((cons.len(), n0, z0))));
+        crate::simplex::PRESOLVE_GATE_OUT.with(|o| o.set(None));
+    }
     let r = crate::ticks::without_budget(|| crate::cancel::with_deadline(deadline, || solve_lp(&vars, &objective, &cons, RootSolver::Simplex, LpOptions::default())));
+    let gate_info = if gate {
+        crate::simplex::PRESOLVE_GATE.with(|g| g.set(None));
+        crate::simplex::PRESOLVE_GATE_OUT.with(|o| o.take())
+    } else {
+        None
+    };
+    if let Some((m1, n1, z1, ps, false)) = gate_info {
+        if env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('v') || v.contains('r')) {
+            eprintln!("MIP: POLISH_PRESOLVE: gate: not smaller after presolve ({m1} rows, {n1} columns, {n1z} nonzeros; presolve {ps:.3}s) -> warm polish", n1z = z1);
+        }
+        return WarmPolish::NotSolved;
+    }
+    let gate_dbg = gate_info.map_or(String::new(), |(m1, n1, z1, ps, _)| format!(" gate: smaller after presolve ({m1} rows, {n1} columns, {z1} nonzeros; presolve {ps:.3}s)"));
     POLISH_TOL_LEAK.with(|c| c.set((0.0, 0.0)));
     let mut out = WarmPolish::NotSolved;
     let mut info = String::new();
@@ -1041,7 +1154,7 @@ pub(super) fn polish_presolved(p: &MipProblem, x: &mut Vec<f64>, z: f64, deadlin
         }
     }
     if env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('v') || v.contains('r')) {
-        eprintln!("MIP: POLISH_PRESOLVE: {st_dbg} {:.3}s (building {tb:.3}s){info} -> {}", t.elapsed().as_secs_f64(), match out {
+        eprintln!("MIP: POLISH_PRESOLVE: {st_dbg} {:.3}s (building {tb:.3}s){gate_dbg}{info} -> {}", t.elapsed().as_secs_f64(), match out {
             WarmPolish::Replaced(_) => "replaced",
             WarmPolish::Kept => "kept",
             WarmPolish::NotSolved => "not solved",
@@ -5580,7 +5693,7 @@ struct EnumClockGuard(Option<Option<(usize, f64, f64)>>);
 
 impl EnumClockGuard {
     fn new() -> Self {
-        let on = enum_adapt_on() && env_str!("ENOMOTO_MIP_ENUM_ADAPT").is_some_and(|v| v.contains('t')) && ENUM_T0.with(|c| c.get()).is_none();
+        let on = enum_adapt_on() && enum_adapt_val().is_some_and(|v| v.contains('t')) && ENUM_T0.with(|c| c.get()).is_none();
         if !on {
             return EnumClockGuard(None);
         }
@@ -6519,6 +6632,23 @@ fn prr_tight_mode() -> Option<&'static str> {
     }
 }
 
+/// [`represolve_after_probe`] がかけ直さずに戻るときの結果。試作 `ENOMOTO_MIP_PREGD` の `d` (既定オフ、analysis/pregd_20261128 の 4 節) なら、
+/// そのプロービングが見つけた同値な 0-1 列の組を捨てずに代入する ([`substitute_probe_equiv`])。既定では、プロービングが境界を締めて固定が 0 本だと
+/// かけ直しの判定で早く戻り、組を代入しないまま次のプロービングで消していた (rocI-4-11 を `ENOMOTO_MIP_TREE2_INTAGG=1` で解くと最後の 90 組が残り、
+/// HiGHS の前処理をかけると 1132 -> 1055 列になる)
+fn prr_early_return(prob: MipProblem, postsolve: Vec<crate::presolve::PostsolveStep>, scaling: crate::presolve::scaling::Scaling, verbose: bool, submip: bool) -> Option<Presolved> {
+    if pregd('d') && PROBE_EQUIV.with(|e| !e.borrow().is_empty()) {
+        if verbose {
+            eprintln!("MIP: presolve again after probing: substituting {} equivalent pairs before returning (ENOMOTO_MIP_PREGD d)", PROBE_EQUIV.with(|e| e.borrow().len()));
+        }
+        return match substitute_probe_equiv(&prob, postsolve, scaling, verbose, submip) {
+            Ok(r) => Some(r),
+            Err((postsolve, scaling)) => Some(Presolved::Reduced { prob, postsolve, scaling }),
+        };
+    }
+    Some(Presolved::Reduced { prob, postsolve, scaling })
+}
+
 /// プロービングの後の前処理のかけ直し (試作、`ENOMOTO_MIP_PROBE_REPRESOLVE` で使う。既定では使わない): プロービングが
 /// 境界を締めた (固定した) とき、締めた境界で前処理をもう一度かける (`ENOMOTO_T_MIP_PROBE_REPRESOLVE_MAX` 回まで、既定 2)。
 /// プロービングは連続列の境界も締める (drayage-25-23 では時刻の列の境界) が、その境界で冗長になった行・強められる係数は
@@ -6553,7 +6683,7 @@ fn represolve_after_probe(prob: MipProblem, mut postsolve: Vec<crate::presolve::
     }
     let max = if tight { u32::MAX } else if prb_table('b') { tunable!("ENOMOTO_T_MIP_PRB_TABLE_ROUNDS", 8u32, u32) } else { tunable!("ENOMOTO_T_MIP_PROBE_REPRESOLVE_MAX", 2u32, u32) };
     if !prr_active(submip) || depth >= max {
-        return Some(Presolved::Reduced { prob, postsolve, scaling });
+        return prr_early_return(prob, postsolve, scaling, verbose, submip);
     }
     if tight {
         let (gf, gt, _) = PROBE_GAIN.with(|f| f.get());
@@ -6561,7 +6691,7 @@ fn represolve_after_probe(prob: MipProblem, mut postsolve: Vec<crate::presolve::
             if verbose {
                 eprintln!("MIP: presolve again after probing: PRR_TIGHT: stopped (probing fixed {gf}, tightened {gt} of {} columns)", prob.n);
             }
-            return Some(Presolved::Reduced { prob, postsolve, scaling });
+            return prr_early_return(prob, postsolve, scaling, verbose, submip);
         }
     }
     // プロービングが列を `ENOMOTO_T_MIP_PRR_MIN_FIXED` 本 (既定 1) より少なくしか固定しなければ (境界を締めただけなら)、かけ直さない。
@@ -6572,7 +6702,7 @@ fn represolve_after_probe(prob: MipProblem, mut postsolve: Vec<crate::presolve::
         if verbose {
             eprintln!("MIP: presolve again after probing: skipped (probing fixed {fixed} columns)");
         }
-        return Some(Presolved::Reduced { prob, postsolve, scaling });
+        return prr_early_return(prob, postsolve, scaling, verbose, submip);
     }
     if verbose {
         eprintln!("MIP: presolve again after probing (round {})", depth + 1);
@@ -9729,11 +9859,16 @@ fn quick_probe_fixings(prob: &mut MipProblem, verbose: bool, submip: bool) -> Op
 /// `before` = プロービングの前だけ、`after` (既定) = プロービングの後だけ、`loop` = プロービングの後に回し、その回 (プロービングと列挙) で新しい固定・締め付け・
 /// 同値な組・衝突の組 (clique) が出れば、プロービングと列挙をもう一度回す、を何も出なくなるまで繰り返す ([`enum_probe_loop`]。回数の上限は置かない。
 /// 止めは前処理の時間の止め [`presolve_stop`] だけ)。`loop` では列挙で分かった衝突の組を含意の表に足す (足さないと次の回も同じ組を新しいと数える)
-/// 試作 `ENOMOTO_MIP_ENUM_ADAPT` (既定では使わない。analysis/cutgap_20261123 の 8 節): 列挙の前処理 (`ENOMOTO_MIP_ENUM_PRESOLVE=all`)・
+/// `ENOMOTO_MIP_ENUM_ADAPT` (2026-11-28 に `1st` で既定化、`=0`・`off` で切る。analysis/base1_20261128。もとは試作、analysis/cutgap_20261123 の 8 節): 列挙の前処理 (`ENOMOTO_MIP_ENUM_PRESOLVE=all`)・
 /// 列挙とプロービングの繰り返し (`ENOMOTO_MIP_ENUM_WHERE=loop`)・締め付けでの前処理のかけ直し (`ENOMOTO_MIP_PRR_TIGHT`) を全部使い、
 /// 2 周目からの繰り返しとかけ直しを続けるか、次の列挙で何割の行を列挙するかを、直前の周の成果と時間からシグモイドで決める ([`enum_adapt_continue`])
 fn enum_adapt_on() -> bool {
-    env_str!("ENOMOTO_MIP_ENUM_ADAPT").is_some_and(|v| v != "0")
+    enum_adapt_val().is_some()
+}
+
+/// `ENOMOTO_MIP_ENUM_ADAPT` の値 (付けていなければ既定の `1st`、`0`・`off` なら `None`)
+fn enum_adapt_val() -> Option<&'static str> {
+    env_def!("ENOMOTO_MIP_ENUM_ADAPT", "1st")
 }
 
 /// 列挙の前処理の形 (`ENOMOTO_MIP_ENUM_PRESOLVE` の値。[`enum_adapt_on`] なら `all`)。`None` は使わない
@@ -9746,7 +9881,7 @@ fn enum_presolve_mode() -> Option<&'static str> {
 
 /// `ENOMOTO_MIP_ENUM_ADAPT=log`: 判定を出すだけで常に続ける (繰り返しは以前の規則で止まる。係数を決めるためのデータ集め)
 fn enum_adapt_log() -> bool {
-    env_str!("ENOMOTO_MIP_ENUM_ADAPT") == Some("log")
+    enum_adapt_val() == Some("log")
 }
 
 /// 求解 (再スタートの前の最初の求解) の始めからの秒 ([`ENUM_T0`]。置かれていなければ無限大)
@@ -9811,7 +9946,7 @@ fn enum_adapt_midstop(gain: usize, n: usize, secs: f64, el: f64) -> bool {
 }
 
 fn enum_adapt_mid_on() -> bool {
-    enum_adapt_on() && env_str!("ENOMOTO_MIP_ENUM_ADAPT").is_some_and(|v| v.contains('s') || v.contains('z'))
+    enum_adapt_on() && enum_adapt_val().is_some_and(|v| v.contains('s') || v.contains('z'))
 }
 
 /// 試作 `ENOMOTO_MIP_ENUM_ADAPT` の `z` (analysis/presize240_20261127 の 7 節): [`enum_adapt_continue`]・[`enum_adapt_midstop`] の得を、
@@ -9820,7 +9955,7 @@ fn enum_adapt_mid_on() -> bool {
 /// 行の数の上限と空振りの規則つき (`ENOMOTO_MIP_ENUM_PRESOLVE=1` と同じ) で回し、全部の行 (`all`) に広げるのは、その得と時間の
 /// シグモイドが続けると決めた後だけ。列挙の途中の止め (`s`) も入る。シグモイドの係数は `ENUM_ADAPT` のまま (新しい閾値は作らない)
 fn enum_adapt_z() -> bool {
-    enum_adapt_on() && env_str!("ENOMOTO_MIP_ENUM_ADAPT").is_some_and(|v| v.contains('z'))
+    enum_adapt_on() && enum_adapt_val().is_some_and(|v| v.contains('z'))
 }
 
 fn enum_where() -> &'static str {
@@ -10903,7 +11038,7 @@ fn diag_costshift(prob: &MipProblem, base: usize) {
 }
 
 fn dominated_binary_fixings(prob: &MipProblem) -> Vec<(usize, f64)> {
-    // 試作 `ENOMOTO_MIP_PREGD` の `p` ([`identical_col_fixings`]): 同じ列で費用の違う列を先に固定し、固定した問題で 0-1 列の支配を調べる
+    // `ENOMOTO_MIP_PREGD` の `p` (既定で使う) ([`identical_col_fixings`]): 同じ列で費用の違う列を先に固定し、固定した問題で 0-1 列の支配を調べる
     if pregd('p') {
         let ident = identical_col_fixings(prob);
         if !ident.is_empty() {
@@ -10920,9 +11055,11 @@ fn dominated_binary_fixings(prob: &MipProblem) -> Vec<(usize, f64)> {
     dominated_binary_fixings_with(prob, env_def!("ENOMOTO_MIP_DOMCOL_PRED", "1").is_some())
 }
 
-/// 試作 `ENOMOTO_MIP_PREGD` (既定では使わない。analysis/pregd_20261128) の形の文字 `c` が入っているか
+/// `ENOMOTO_MIP_PREGD` (analysis/pregd_20261128) の形の文字 `c` が入っているか。既定は `pg` (2026-11-28 に既定にした。P で 1 スレッド 0.988・
+/// 4 スレッド 0.989、nw04 0.45〜0.53、seymour1 335 -> 167 秒、supportcase7 349 -> 235 秒)。`0`・`off` で使わない (前の形)。値を与えると既定を置き換える
+/// (`d` は試作で既定オフ。`pg` と合わせるには `pgd`)
 fn pregd(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_PREGD").is_some_and(|v| v.contains(c))
+    env_def!("ENOMOTO_MIP_PREGD", "pg").is_some_and(|v| v.contains(c))
 }
 
 /// `ENOMOTO_MIP_PREGD` の `p` (analysis/pregd_20261128): 係数が全く同じ列 (同じ型) の組で、費用の安い列 x_j が高い列 x_k を支配する
@@ -10986,7 +11123,7 @@ fn identical_col_fixings(prob: &MipProblem) -> Vec<(usize, f64)> {
 fn dominated_binary_fixings_with(prob: &MipProblem, pred: bool) -> Vec<(usize, f64)> {
     let n = prob.n;
     let binary: Vec<bool> = (0..n).map(|j| prob.is_int[j] && prob.col_lo[j] == 0.0 && prob.col_up[j] == 1.0).collect();
-    // 試作 `ENOMOTO_MIP_PREGD` の `g` (analysis/pregd_20261128): 0-1 列に限らず、両側に有限の境界を持つ列 (一般の整数・連続) も調べる。
+    // `ENOMOTO_MIP_PREGD` の `g` (既定で使う) (analysis/pregd_20261128): 0-1 列に限らず、両側に有限の境界を持つ列 (一般の整数・連続) も調べる。
     // 文字は y = x − l (s = +1) か y = u − x (s = −1) で、幅は w = u − l。支配の補題 (y_j が y_k を支配すれば、y_j = w_j か y_k = 0 の
     // 最適解がある: y_k を下げた分を y_j に移す) は、移す量が y_j の型に合う限り型によらない。整数の y_j が連続の y_k を支配することは
     // 使わない (HiGHS の dominatedColumns と同じ)。衝突グラフ (候補 (a)) は 0-1 列だけ。
