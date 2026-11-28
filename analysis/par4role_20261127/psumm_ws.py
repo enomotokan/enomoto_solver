@@ -4,7 +4,12 @@ python psumm_ws.py > psumm_ws.txt"""
 import json, math, random
 from pathlib import Path
 D = Path(__file__).resolve().parent
-rows = [json.loads(l) for k in (1, 2, 3) if (D / f"pws_s{k}.jsonl").exists() for l in (D / f"pws_s{k}.jsonl").read_text().splitlines()]
+import sys
+V = sys.argv[1] if len(sys.argv) > 1 else "ws"  # python psumm_ws.py d > psumm_d.txt (6.4 節)
+fn = (lambda k: f"pws_s{k}.jsonl") if V == "ws" else (lambda k: f"pws_{V}_s{k}.jsonl")
+rows = [json.loads(l) for k in (1, 2, 3) if (D / fn(k)).exists() for l in (D / fn(k)).read_text().splitlines()]
+for r in rows:
+    if r["cfg"] == V: r["cfg"] = "ws"  # 以下は ws の名で比べる
 by = {}
 for r in rows: by.setdefault((r["problem"], r["seed"]), {})[r["cfg"]] = r
 def t(r): return r["result"].get("time", 60.0) if r["result"].get("status") == "optimal" else 60.0
@@ -32,3 +37,12 @@ for p in probs:
     ps = [(s, (t(a) + 1) / (t(b) + 1)) for q, s, a, b in pairs if q == p]
     flag = "  全種で 1.25 倍超遅い" if len(ps) == 3 and all(x > 1.25 for _, x in ps) else ("  全種で 0.8 倍未満" if len(ps) == 3 and all(x < 0.8 for _, x in ps) else "")
     print(f"  {p}: " + ", ".join(f"種{s} {x:.2f}" for s, x in ps) + flag)
+# s が 1 つ以上回した対・回さなかった対、w が待ちを打ち切った対に分けた比 (害の出どころ)
+def grp(f):
+    v = [math.log((t(a) + 1) / (t(b) + 1)) for p, s, a, b in pairs if f(a)]
+    return (len(v), math.exp(sum(v) / len(v)) if v else float("nan"))
+print("\n分けた比 (ws / 既定、shift 1 秒 SGM):")
+print("  s が 1 つ以上回した対: %d 対 %.3f" % grp(lambda a: bool(a.get("s")) and a["s"][0] > 0))
+print("  s が回さなかった対: %d 対 %.3f" % grp(lambda a: not (a.get("s") and a["s"][0] > 0)))
+print("  w が待ちを打ち切った対: %d 対 %.3f" % grp(lambda a: bool(a.get("w_capped"))))
+print("  s が局所探索だけ回して何も見つけなかった対 (s = [1, 0]): %d 対 %.3f" % grp(lambda a: a.get("s") == [1, 0]))

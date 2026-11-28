@@ -4773,6 +4773,7 @@ pub(super) struct ShaveDecide {
 ///   (b = 待つ間に動いているスレッド、i = スレッド数 − b)
 /// - `s` (6 節): 外側の根で並列のサブ MIP を全部待つ間 ([`Solver::join_submips`])、眠る代わりに主が解発見スレッドの並びを 1 つずつ回す。
 ///   待っているサブ MIP が全部終わる (か一時停止する) と、回しているものも [`Solver::time_up`] で止める (待ちより長く根を延ばさない)
+/// - `d` (6.4 節、`s` の直し): `s` から局所探索を外し、ダイビング 3 種と Pump だけを回す (局所探索は `time_up` を見ず、P で `s` の害の元だった)
 pub(super) fn par4role(c: char) -> bool {
     static V: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     V.get_or_init(|| env_str!("ENOMOTO_MIP_PAR4ROLE").map(|v| v.to_string()).filter(|v| v != "0")).as_ref().is_some_and(|v| v.contains(c))
@@ -12702,7 +12703,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 試作 `ENOMOTO_MIP_T1PRIMAL` ([`super::t1primal`]): 1 スレッドで FJ + Local-MIP の組を補助のスレッドに持たせ、時間の取り分を
         // 当たった率・改善の止まった時間の割合・ギャップのシグモイドで決めて、根の終わりと木のノードで少しずつ回す
-        if super::t1primal::enabled() && mip_threads() == 1 && !self.params.submip && self.snap.is_none() && self.params.restarts == 0 && !proof_only() && self.fj_thread.is_none() && !self.root_gap_closed() {
+        // (再スタートの後も入れる。再スタートの solver は時刻を 0 から数え、解はその solver の問題の空間で試すので、取り分・貯えは
+        // 始めからやり直しになる。再スタートの前だけだと、30n20b8 は早い解 353 のあと木の再スタートで止まり、302 に届かなかった。
+        // analysis/t1primal_20261126 8 節)
+        if super::t1primal::enabled() && mip_threads() == 1 && !self.params.submip && self.snap.is_none() && !proof_only() && self.fj_thread.is_none() && !self.root_gap_closed() {
             self.t1primal_start();
             self.t1primal_tick(true);
         }
@@ -28088,8 +28092,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
             let sw_cap = (sw_k * subcap_root_secs()).max(tunable!("ENOMOTO_T_MIP_SUBWAIT_MIN", 1.0, f64));
             // 試作 `ENOMOTO_MIP_PAR4ROLE` の `s` ([`par4role`]): 外側の根で並列のサブ MIP を全部待つ間、眠る代わりに主が解発見スレッドの並び
             // (局所探索・ダイビング 3 種・Feasibility Pump) を 1 つずつ回す (1 周したら今までどおり待つ)。見つけた解は次の回でサブ MIP に打ち切り値として渡る
-            let p4s = par4role('s') && keep == 0 && !self.params.submip && self.snap.is_none() && self.nodes <= 1 && mip_threads() > 1 && !proof_only();
-            let mut p4s_k = 0usize;
+            let p4s = (par4role('s') || par4role('d')) && keep == 0 && !self.params.submip && self.snap.is_none() && self.nodes <= 1 && mip_threads() > 1 && !proof_only();
+            // `d` (`s` の直し、6.4 節): 局所探索は自分の時間の枠で走り `time_up` を見ない (待ちより長く根を延ばした) ので外し、ダイビング 3 種と Pump だけを回す
+            let mut p4s_k = if par4role('s') { 0usize } else { 1 };
             while self.pending_submips.len() > keep {
                 if sw_k > 0.0 && sw_cap.is_finite() {
                     for it in &self.pending_submips {
@@ -31914,7 +31919,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.relps_stats[0], self.relps_stats[1], self.relps_stats[2], self.relps_stats[3]
                 );
             }
-            if par4role('a') || par4role('b') || par4role('s') {
+            if par4role('a') || par4role('b') || par4role('s') || par4role('d') {
                 eprintln!(
                     "MIP: PAR4ROLE: helpers a {} b {}, helper solutions {}, accepted as incumbent {}, s heuristics while waiting {} found {}",
                     self.par4_stats[0], self.par4_stats[1], self.par4_stats[2], self.par4_stats[3], self.par4_stats[4], self.par4_stats[5]
