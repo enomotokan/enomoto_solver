@@ -12837,6 +12837,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 40 問 (各 2 回、threads=4): 使わない SGM 20.79・ギャップ 11.91%、使う 20.58 (−1.0%、2 回とも改善)・11.73%、heavy
         // 20.60・11.95%。根の下界は h80x6320d 5947 -> 6051、qnet1 15714 -> 15787、binkar10_1 6710.6 -> 6719.9 (heavy は
         // 停滞する問題でさらに上がる: timtab1 465655 -> 571329 だが、カットが増えて木が重くなり全体は同じ)
+        // 試作 `ENOMOTO_MIP_PAR4ROLE` の `a` (7.3 節): 手伝いはカットの周の間 (主と FJ のスレッドのほかは遊んでいる) だけ動かす。
+        // この後は背景のカット (分離のスレッド)・解発見スレッド・並列のサブ MIP が空いたスレッドを使うので、ここで止める (取り合いを避ける)。
+        // 受け取りと固定の受け渡しは今までどおり根のヒューリスティクスの終わり
+        if self.par4_sh.is_some() {
+            self.par4_poll("a", "");
+        }
         let mut find_spawned = false;
         let light_root = self.params.restarts > 0 && self.params.cutoff.is_finite() && env_str!("ENOMOTO_MIP_LIGHT_RESTART_ROOT").is_some();
         if find_thread_on() && !light_root && self.snap.is_none() && !self.params.submip && self.params.threads > if thread_budget_on() { 3 } else { 2 } && self.fj_poor() && !self.fractional(&self.lp.col_values()).is_empty() {
