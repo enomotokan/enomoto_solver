@@ -2477,12 +2477,13 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
         }
         other => other,
     };
-    // `ENOMOTO_MIP_DUALEQ` (試作、既定では使わない。analysis/presolve2_20261111.md): 前処理の最後に、双対の議論で不等式行を
+    // `ENOMOTO_MIP_DUALEQ` ([`dualeq`]、2026-11-28 から既定 `1`。`=0`・`off` で使わない。analysis/presolve2_20261111.md・
+    // analysis/dualeq2_20261127): 前処理の最後に、双対の議論で不等式行を
     // 等式にし ([`dual_row_equalities`])、等式にした行があれば前処理をもう一度かける (2 項等式の消去が `y_b = 1 - y_a` などを代入する)。
     // 前処理の後の問題でかけるのは、冗長な行が消え双対の固定が済んだ後で錠を数えるため。最適解の集合を狭めるだけなので後処理は要らない
     let presolved = match presolved {
         Some(Presolved::Reduced { prob, postsolve, scaling })
-            if env_str!("ENOMOTO_MIP_DUALEQ").is_some_and(|v| v != "early") && !params.submip && params.restarts == 0 && scaling.d.iter().all(|&d| d == 1.0) =>
+            if dualeq().is_some_and(|v| v != "early") && !params.submip && params.restarts == 0 && scaling.d.iter().all(|&d| d == 1.0) =>
         {
             let free_cols = |q: &MipProblem| (0..q.n).filter(|&j| q.col_lo[j] < q.col_up[j]).count();
             let MipProblem { col_lo, col_up, cost, offset, sense_sign, is_int, rows, mut row_lo, mut row_up, cols, .. } = prob.clone();
@@ -5666,9 +5667,9 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     let (mut col_lo, mut col_up) = (p.col_lo.clone(), p.col_up.clone());
     let (mut p_row_lo, mut p_row_up) = (p.row_lo.clone(), p.row_up.clone());
     let tiny0 = fix_tiny_width_columns(&p.rows, &mut p_row_lo, &mut p_row_up, &mut col_lo, &mut col_up, &p.is_int, submip, "pre0");
-    // `ENOMOTO_MIP_DUALEQ=early` (試作、既定では使わない。PRESOLVE2): 前処理の前に、双対の議論で不等式行を等式にする
+    // `ENOMOTO_MIP_DUALEQ=early` (試作、既定の `1` では使わない。PRESOLVE2): 前処理の前に、双対の議論で不等式行を等式にする
     // ([`dual_row_equalities`])。元の行で錠を数えるので、前処理で消える冗長な行も錠に数えてしまう (gt2)。ふつうは `=1` (前処理の最後)
-    if env_str!("ENOMOTO_MIP_DUALEQ") == Some("early") && !submip {
+    if dualeq() == Some("early") && !submip {
         let t0 = std::time::Instant::now();
         let k = dual_row_equalities(&p.rows, &mut p_row_lo, &mut p_row_up, &p.cols, &p.cost, &p.is_int, &col_lo, &col_up);
         if verbose {
@@ -12077,4 +12078,10 @@ impl Drop for DebugSolScope {
             solver::DEBUG_SOL.with(|d| *d.borrow_mut() = Some(x));
         }
     }
+}
+
+/// `ENOMOTO_MIP_DUALEQ` の値 (2026-11-28 から既定 `1`: 前処理の最後に双対の議論で行を等式にし、かけ直しで縮んだときだけ使う。
+/// `=0`・`off` で使わない (前の既定)、`=early` は前処理の前にかける試作)。analysis/dualeq2_20261127
+pub(crate) fn dualeq() -> Option<&'static str> {
+    env_def!("ENOMOTO_MIP_DUALEQ", "1")
 }
