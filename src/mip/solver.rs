@@ -500,6 +500,8 @@ thread_local! {
     /// 試作 `ENOMOTO_MIP_PAR4ROLE` ([`par4role`]) の手伝いのスレッド: (回す根のヒューリスティクスのビット ([`PAR4_B_STEPS`]、0 なら解発見スレッドと同じ並び)、
     /// 解発見スレッドの並びを回す数 (手伝いごとに始めをずらす))。`DIVE_ONLY` の 5 と組で使う
     static PAR4_STEPS: std::cell::Cell<(u32, u8)> = const { std::cell::Cell::new((0, 0)) };
+    /// `ENOMOTO_MIP_PAR4ROLE` の `a` の手伝いが主と分け合う配分の量 ([`Par4Shared`])
+    static PAR4_SH: std::cell::RefCell<Option<std::sync::Arc<Par4Shared>>> = const { std::cell::RefCell::new(None) };
     /// 根のヒューリスティクスの間にカットを強める求解 (`ENOMOTO_MIP_BG_CUTS`): このスレッドで写しから作る求解はカットの
     /// ループだけを行い、止めの合図まで続けて、最後の LP に残ったカットの行と目的値を返す。
     /// カットを強める求解の、主の根の LP の反復数 (カットの LP の反復上限に使う)
@@ -1155,6 +1157,12 @@ pub(super) struct Solver<'a, L: MipLp> {
     par4_helpers: Vec<(char, std::thread::JoinHandle<MipResult>, std::sync::Arc<std::sync::atomic::AtomicBool>, std::sync::Arc<std::sync::Mutex<Vec<Vec<f64>>>>)>,
     /// `PAR4ROLE` の `b` で手伝いに出した根のヒューリスティクス ([`heur_bit`] のビット。主はこれを飛ばす)
     par4_delegated: u64,
+    /// `PAR4ROLE` の `a` (7 節): 手伝いと分け合う配分の量
+    par4_sh: Option<std::sync::Arc<Par4Shared>>,
+    /// `PAR4ROLE` の `a`: 手伝いに使える空いたスレッドの数 (7.5 節。手伝いはカットの周ごとに少しずつ立てる)
+    par4_free: usize,
+    /// `PAR4ROLE` の `a`: 手伝いを立てる手間の目安 c (求解の始めからカットの周に入るまでの秒)
+    par4_c: f64,
     /// `PAR4ROLE` の `s`: 並列のサブ MIP を待つ間に主がヒューリスティクスを回している (待っているサブ MIP が全部終わったら [`Self::time_up`] で止める)
     p4s_active: bool,
     /// `PAR4ROLE` の数え: [`a` の手伝いの数, `b` の手伝いの数, 受け取った解の数, そのうち暫定解になった数, `s` で回した数, そのうち解を見つけた数]
@@ -2887,6 +2895,112 @@ pub(crate) struct WorkPool {
     mu: std::sync::Mutex<MuStats>,
     /// 証明の段階に入った (`ENOMOTO_MIP_PROOF_SWITCH`、[`Solver::proof_phase_check`])。主が立て、各スレッドが読む。
     proof_phase: std::sync::atomic::AtomicBool,
+    /// 試作 `ENOMOTO_MIP_POLISH_BG` ([`polish_bg`]): 暫定解の研磨を裏で回す頼みと結果
+    pbg: PolishBg,
+}
+
+/// 試作 `ENOMOTO_MIP_POLISH_BG` ([`polish_bg`]、analysis/overrun240_20261127 の 9 節): 暫定解の研磨 (整数を固定した LP、前処理つき) を
+/// 木のスレッドが裏で回すための頼みと結果。暫定解が良くなるたびに版を上げて頼みを置き換え、走っている古い研磨は打ち切る。
+/// 結果は返す値のためだけに使う (木の判断には使わない)。返すときに、返す解が研磨した解の元とまったく同じなら研磨した解を返す
+#[derive(Default)]
+pub(super) struct PolishBg {
+    /// 研磨する問題 (主の B&B の問題の写し。主が木に入るときに置く)
+    p: std::sync::OnceLock<std::sync::Arc<MipProblem>>,
+    /// 頼み (版, 目的値, 解)
+    req: std::sync::Mutex<Option<(u64, f64, std::sync::Arc<Vec<f64>>)>>,
+    /// 最新の頼みの版と、取られた最新の版
+    ver: std::sync::atomic::AtomicU64,
+    taken: std::sync::atomic::AtomicU64,
+    /// 走っている研磨の打ち切りの合図 ([`crate::cancel::with_token`])
+    cur: std::sync::Mutex<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>,
+    /// 結果 (版, 元の解, 元の目的値, 取り替えたなら新しい目的値と解 (取り替えなければ None)、研磨の秒)
+    done: std::sync::Mutex<Option<PolishBgDone>>,
+    /// 数え: [頼んだ, 始めた, 解けた, 打ち切られた・解けなかった, 返すときに使った, 返すときに使えなかった]
+    pub(super) cnt: [std::sync::atomic::AtomicU64; 6],
+}
+
+pub(super) struct PolishBgDone {
+    ver: u64,
+    x_in: std::sync::Arc<Vec<f64>>,
+    z_in: f64,
+    out: Option<(f64, Vec<f64>)>,
+    secs: f64,
+}
+
+impl PolishBg {
+    /// 暫定解が更新された: 今の頼みより良ければ置き換え、走っている研磨を打ち切る
+    fn post(&self, z: f64, x: &[f64]) {
+        use std::sync::atomic::Ordering;
+        let mut g = self.req.lock().unwrap();
+        if g.as_ref().is_some_and(|(_, zr, _)| *zr <= z) {
+            return;
+        }
+        let v = self.ver.fetch_add(1, Ordering::AcqRel) + 1;
+        *g = Some((v, z, std::sync::Arc::new(x.to_vec())));
+        drop(g);
+        self.cnt[0].fetch_add(1, Ordering::Relaxed);
+        self.cancel();
+    }
+
+    /// 走っている研磨を打ち切る
+    fn cancel(&self) {
+        if let Some(t) = self.cur.lock().unwrap().as_ref() {
+            t.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// 取られていない頼みがあれば取って研磨する (待っているスレッドから呼ぶ)。研磨したら true
+    fn run(&self, deadline: Option<Instant>) -> bool {
+        use std::sync::atomic::Ordering;
+        let Some(p) = self.p.get() else { return false };
+        let v = self.ver.load(Ordering::Acquire);
+        let t = self.taken.load(Ordering::Acquire);
+        if v <= t || self.taken.compare_exchange(t, v, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            return false;
+        }
+        let Some((vr, z, x0)) = self.req.lock().unwrap().clone() else { return false };
+        if x0.len() != p.n {
+            return false;
+        }
+        let tok = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        *self.cur.lock().unwrap() = Some(tok.clone());
+        // 取った後に新しい頼みが来ていれば、すぐ打ち切る (次に待つスレッドが新しいほうを取る)
+        if self.ver.load(Ordering::Acquire) != vr {
+            tok.store(true, Ordering::Relaxed);
+        }
+        self.cnt[1].fetch_add(1, Ordering::Relaxed);
+        let t0 = Instant::now();
+        let mut x = (*x0).clone();
+        let r = crate::cancel::with_token(Some(tok.clone()), || super::polish_presolved(p, &mut x, z, deadline));
+        let secs = t0.elapsed().as_secs_f64();
+        let halted = tok.load(Ordering::Relaxed);
+        *self.cur.lock().unwrap() = None;
+        let out = match r {
+            super::WarmPolish::Replaced(zn) => Some(Some((zn, x))),
+            super::WarmPolish::Kept => Some(None),
+            super::WarmPolish::NotSolved => None,
+        };
+        match out {
+            Some(out) if !halted => {
+                self.cnt[2].fetch_add(1, Ordering::Relaxed);
+                let mut g = self.done.lock().unwrap();
+                if g.as_ref().is_none_or(|d| d.ver < vr) {
+                    *g = Some(PolishBgDone { ver: vr, x_in: x0, z_in: z, out, secs });
+                }
+            }
+            _ => {
+                self.cnt[3].fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        true
+    }
+
+    /// 返すとき: 返す解 `x` (目的値 `z`) を研磨した結果があれば、それ (取り替えたなら新しい目的値と解) を返す
+    fn take_for(&self, z: f64, x: &[f64]) -> Option<(Option<(f64, Vec<f64>)>, f64)> {
+        let g = self.done.lock().unwrap();
+        let d = g.as_ref()?;
+        (d.z_in == z && d.x_in.len() == x.len() && d.x_in.iter().zip(x).all(|(a, b)| a.to_bits() == b.to_bits())).then(|| (d.out.clone(), d.secs))
+    }
 }
 
 /// 並列の強分岐 (`ENOMOTO_MIP_PAR_SB`・`ENOMOTO_MIP_PARSB`) で別スレッドが解いた子の LP の結果。主が逐次と同じ順に当てはめる。
@@ -4784,6 +4898,91 @@ pub(super) fn par4role(c: char) -> bool {
 
 /// `ENOMOTO_MIP_PAR4ROLE` の `b` で手伝いに出す根のヒューリスティクス (名前、[`PAR4_STEPS`] のビット)
 const PAR4_B_STEPS: [(&str, u32); 3] = [("int shifting", 1), ("randomized rounding", 2), ("interior rounding", 4)];
+/// [`PAR4_STEPS`] のビット: `a` の手伝い (1 切れごとに解探しと下界側を [`Par4Shared::primal_share`] で選ぶ)
+const PAR4_ALLOC: u32 = 0x100;
+
+/// `ENOMOTO_MIP_PAR4ROLE` の `a` (7 節): 主と手伝いが分け合う配分の量。手伝いは 1 切れごとに、解探し (ダイビング 3 種・Pump を 1 つ) と
+/// 下界側 (打ち切り値つきの LP の探り [`Solver::lp_probe_cutoff`] を 1 回) のどちらをするかを、解探しの割合 π で決める:
+/// π = σ((logit f + logit g)/2 − logit m + logit h_p − logit h_b)。どれも [`super::adapt::laplace`] でならした割合で、新しい閾値はない:
+/// - f: 根の始めからの時間のうち、最後に暫定解が良くなってから (なければ始めから) の割合 (T1PRIMAL の f と同じ)
+/// - g: 暫定解と根の LP の相対ギャップ (暫定解がなければ 1)。終わりの判定の rel_gap には依らない
+/// - m: 主のカットの周の直近 1 周の下界の伸びが、始めからの伸びに占める割合 (伸びが止まるほど小さい。周がまだなければ 1/2)
+/// - h_p・h_b: 解探しの切れで暫定解を良くした率、下界側の切れで列を固定した率
+/// f・g は全部の切れの数、m は周の数、h は各側の切れの数でならす
+pub(super) struct Par4Shared {
+    t0: Instant,
+    /// 根の LP の値、直前の周の値、今の周の値 (最小化形、f64 のビット)、周の数
+    lb_first: std::sync::atomic::AtomicU64,
+    lb_prev: std::sync::atomic::AtomicU64,
+    lb_now: std::sync::atomic::AtomicU64,
+    rounds: std::sync::atomic::AtomicU64,
+    /// 主と手伝いの最良の暫定解の値 (f64 のビット) と、最後に良くなった時刻 (t0 からのミリ秒)
+    inc: std::sync::atomic::AtomicU64,
+    t_imp: std::sync::atomic::AtomicU64,
+    /// [解探しの切れ, そのうち暫定解を良くした, 下界側の切れ, そのうち固定を出した]
+    stat: [std::sync::atomic::AtomicU64; 4],
+    /// 手伝いが出した固定 (列, 下限, 上限, そのとき使った打ち切り値)。主は打ち切り値が自分の打ち切り値以上のものだけ入れる
+    fixes: std::sync::Mutex<Vec<(usize, f64, f64, f64)>>,
+}
+
+impl Par4Shared {
+    fn new(lb: f64, inc: f64) -> Self {
+        use std::sync::atomic::AtomicU64;
+        Par4Shared {
+            t0: Instant::now(),
+            lb_first: AtomicU64::new(lb.to_bits()),
+            lb_prev: AtomicU64::new(lb.to_bits()),
+            lb_now: AtomicU64::new(lb.to_bits()),
+            rounds: AtomicU64::new(0),
+            inc: AtomicU64::new(inc.to_bits()),
+            t_imp: AtomicU64::new(0),
+            stat: Default::default(),
+            fixes: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+    fn ld(a: &std::sync::atomic::AtomicU64) -> f64 {
+        f64::from_bits(a.load(std::sync::atomic::Ordering::Relaxed))
+    }
+    /// 暫定解の値 z を知らせる (良くなっていれば時刻も)
+    fn offer_inc(&self, z: f64) {
+        use std::sync::atomic::Ordering;
+        let mut cur = self.inc.load(Ordering::Relaxed);
+        while z < f64::from_bits(cur) {
+            match self.inc.compare_exchange(cur, z.to_bits(), Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => {
+                    self.t_imp.store(self.t0.elapsed().as_millis() as u64, Ordering::Relaxed);
+                    break;
+                }
+                Err(c) => cur = c,
+            }
+        }
+    }
+    /// 主のカットの周の後の下界 (最小化形)
+    fn publish_lb(&self, lb: f64) {
+        use std::sync::atomic::Ordering;
+        self.lb_prev.store(self.lb_now.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.lb_now.store(lb.to_bits(), Ordering::Relaxed);
+        self.rounds.fetch_add(1, Ordering::Relaxed);
+    }
+    /// 解探しの割合 π (と診断用の f, g, m, h_p, h_b)
+    fn primal_share(&self) -> (f64, [f64; 5]) {
+        use super::adapt::{laplace, logit, sigmoid};
+        use std::sync::atomic::Ordering;
+        let st: Vec<f64> = self.stat.iter().map(|a| a.load(Ordering::Relaxed) as f64).collect();
+        let n = st[0] + st[2];
+        let now = self.t0.elapsed().as_secs_f64();
+        let t_imp = self.t_imp.load(Ordering::Relaxed) as f64 / 1000.0;
+        let z = Self::ld(&self.inc);
+        let f = laplace(if z.is_finite() && now > 0.0 { (now - t_imp) / now } else { 1.0 }, n);
+        let (lb0, lbp, lbn) = (Self::ld(&self.lb_first), Self::ld(&self.lb_prev), Self::ld(&self.lb_now));
+        let g = laplace(if z.is_finite() { ((z - lbn) / z.abs().max(lbn.abs()).max(1.0)).clamp(0.0, 1.0) } else { 1.0 }, n);
+        let r = self.rounds.load(Ordering::Relaxed) as f64;
+        let m = laplace(if lbn > lb0 { ((lbn - lbp) / (lbn - lb0)).clamp(0.0, 1.0) } else { 0.0 }, r);
+        let hp = laplace(if st[0] > 0.0 { st[1] / st[0] } else { 0.0 }, st[0]);
+        let hb = laplace(if st[2] > 0.0 { st[3] / st[2] } else { 0.0 }, st[2]);
+        (sigmoid(0.5 * (logit(f) + logit(g)) - logit(m) + logit(hp) - logit(hb)), [f, g, m, hp, hb])
+    }
+}
 
 pub(super) fn find_thread_on() -> bool {
     env_str!("ENOMOTO_MIP_NO_FIND_THREAD").is_none()
@@ -4871,6 +5070,7 @@ impl WorkPool {
             in_role_c: std::sync::atomic::AtomicUsize::new(0),
             mu: std::sync::Mutex::new(MuStats::default()),
             proof_phase: std::sync::atomic::AtomicBool::new(false),
+            pbg: Default::default(),
             pc: std::sync::Mutex::new(pc),
             bounds: std::sync::Mutex::new((lo, up)),
             inner: std::sync::Mutex::new(PoolInner { nodes: PoolNodes::new(), busy: threads, done: false }),
@@ -6481,6 +6681,9 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         par4_helpers: Vec::new(),
         par4_delegated: 0,
         p4s_active: false,
+        par4_sh: None,
+        par4_free: 0,
+        par4_c: 0.0,
         par4_stats: [0; 6],
         shave: None,
         shave_dec: ShaveDecide::default(),
@@ -8895,6 +9098,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             if !self.params.submip {
                 super::record_incumbent(z);
+            }
+            // 試作 `ENOMOTO_MIP_POLISH_BG` ([`polish_bg`]): 暫定解の研磨を頼む (木の判断には使わない)
+            if polish_bg('i') && !self.params.submip {
+                if let Some(pool) = self.pool.as_ref() {
+                    pool.pbg.post(z, &x);
+                }
             }
             // 木を分け合う: 解そのものも共有する (ヒューリスティクス役のスレッドが近傍の中心に使う)
             if let Some(pool) = self.pool.as_ref().filter(|p| p.heur_k > 0) {
@@ -12519,19 +12728,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 根の切除平面
         // 主の根のカットのループの時間 (`ENOMOTO_MIP_BG_CUTS_WAIT` の待ちの上限に使う)
         let mut root_cut_secs = 0.0f64;
-        // 試作 `ENOMOTO_MIP_PAR4ROLE` の `a` ([`par4role`]): カットの周の間 (主と FJ のスレッドのほかは遊んでいる) に、空いたスレッドの
-        // w = σ(ln(g / rel_gap)) 倍の手伝いに解発見スレッドの並びを回させる (g は暫定解と根の LP の相対ギャップ、暫定解がなければ 1)
+        // 試作 `ENOMOTO_MIP_PAR4ROLE` の `a` ([`par4role`]、7 節): カットの周の間 (主と FJ のスレッドのほかは遊んでいる) に、空いたスレッド
+        // (スレッド数 − 主 − FJ のスレッド) の全部に手伝いを出す。手伝いは 1 切れごとに、解探しと下界側 (打ち切り値つきの LP の探り) を
+        // 共有の量 ([`Par4Shared::primal_share`]) で選ぶ。本数は絞らない (遊んでいるスレッドを使うので)。スレッド数には依らない形
         if par4role('a') && mip_threads() > 1 && !self.params.submip && self.snap.is_none() && self.params.restarts == 0 && !proof_only() && !self.fractional(&x_root0).is_empty() {
-            let lb = self.lp.objective() + self.p.offset;
-            let g = self.incumbent.as_ref().map_or(1.0, |(z, _)| ((z - lb) / z.abs().max(lb.abs()).max(1.0)).max(0.0));
-            let w = 1.0 / (1.0 + (self.params.rel_gap.max(1e-12) / g.max(1e-300)));
             let free = self.params.threads.saturating_sub(1 + self.fj_thread.is_some() as usize);
-            let k = (free as f64 * w).round() as usize;
-            if self.params.verbose {
-                eprintln!("MIP: PAR4ROLE a: gap {g:.3e}, weight {w:.3}, free threads {free}, helpers {k} ({:.2}s)", self.start.elapsed().as_secs_f64());
-            }
-            for i in 0..k {
-                self.par4_spawn('a', 0, i as u8, root_iters);
+            if free > 0 {
+                // 7.5 節: 手伝いはここでは立てない。カットの周ごとに [`Self::par4_publish`] で、カットの周の始めからの秒 t と、手伝いを立てる手間の
+                // 目安 c (求解の始めからカットの周に入るまでの秒 = 前処理と根の LP。根の LP の秒だけでは短い問題で 0.002 秒になり、すぐ全部立った) から、
+                // 空いた本数 × σ(ln(t / c)) = t / (t + c) 本 (四捨五入) まで立てる
+                let lb = self.lp.objective() + self.p.offset;
+                let sh = std::sync::Arc::new(Par4Shared::new(lb, self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z)));
+                self.par4_sh = Some(sh);
+                self.par4_free = free;
+                self.par4_c = self.start.elapsed().as_secs_f64();
+                if self.params.verbose {
+                    eprintln!("MIP: PAR4ROLE a: free threads {free}, helpers started later by t / (t + c) (c = time to the root cuts {:.3}s, root LP {:.3}s) ({:.2}s)", self.par4_c, self.root_lp_secs, self.start.elapsed().as_secs_f64());
+                }
             }
         }
         let cut_job = CUT_JOB.with(|j| j.borrow().clone()).filter(|_| self.snap.is_some());
@@ -12745,6 +12958,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 40 問 (各 2 回、threads=4): 使わない SGM 20.79・ギャップ 11.91%、使う 20.58 (−1.0%、2 回とも改善)・11.73%、heavy
         // 20.60・11.95%。根の下界は h80x6320d 5947 -> 6051、qnet1 15714 -> 15787、binkar10_1 6710.6 -> 6719.9 (heavy は
         // 停滞する問題でさらに上がる: timtab1 465655 -> 571329 だが、カットが増えて木が重くなり全体は同じ)
+        // 試作 `ENOMOTO_MIP_PAR4ROLE` の `a` (7.3 節): 手伝いはカットの周の間 (主と FJ のスレッドのほかは遊んでいる) だけ動かす。
+        // この後は背景のカット (分離のスレッド)・解発見スレッド・並列のサブ MIP が空いたスレッドを使うので、ここで止める (取り合いを避ける)。
+        // 受け取りと固定の受け渡しは今までどおり根のヒューリスティクスの終わり
+        if self.par4_sh.is_some() {
+            self.par4_poll("a", "");
+        }
         let mut find_spawned = false;
         let light_root = self.params.restarts > 0 && self.params.cutoff.is_finite() && env_str!("ENOMOTO_MIP_LIGHT_RESTART_ROOT").is_some();
         if find_thread_on() && !light_root && self.snap.is_none() && !self.params.submip && self.params.threads > if thread_budget_on() { 3 } else { 2 } && self.fj_poor() && !self.fractional(&self.lp.col_values()).is_empty() {
@@ -13035,7 +13254,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             // 試作 `ENOMOTO_MIP_PAR4ROLE` ([`par4role`]): `b` の手伝いは指定の根のヒューリスティクス (LP 解からの丸め) だけを回し、
                             // `a` の手伝いは並びの始めを手伝いごとにずらす
                             let (p4mask, p4rot) = PAR4_STEPS.with(|c| c.get());
-                            if p4mask != 0 {
+                            if p4mask & PAR4_ALLOC != 0 {
+                                self.par4_alloc_loop(&x, budget, riters, p4rot);
+                                steps.clear();
+                            } else if p4mask != 0 {
                                 steps = PAR4_B_STEPS.iter().enumerate().filter(|(_, (_, b))| p4mask & b != 0).map(|(i, (n, _))| (*n, 10 + i as u8)).collect();
                             } else {
                                 let r = p4rot as usize % steps.len();
@@ -14354,6 +14576,20 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     if self.shared.as_ref().is_none_or(|s| !(s.best() < z)) {
                         if self.params.verbose {
                             eprintln!("MIP: GAP1 u: LP probing proved the incumbent {z:.10e} optimal ({:.2}s)", self.start.elapsed().as_secs_f64());
+                        }
+                        return self.finish(MipStatus::Optimal, z);
+                    }
+                }
+            }
+        }
+        // 試作 `ENOMOTO_MIP_PAR4ROLE` の `a` (7 節): 手伝いの下界側 (打ち切り値つきの LP の探り) の固定を入れる。矛盾すれば暫定解が最適
+        if self.par4_sh.is_some() && self.snap.is_none() && !self.params.submip {
+            self.par4_apply_fixes();
+            if self.dom.infeasible {
+                if let Some(z) = self.incumbent.as_ref().map(|(z, _)| *z) {
+                    if self.shared.as_ref().is_none_or(|s| !(s.best() < z)) {
+                        if self.params.verbose {
+                            eprintln!("MIP: PAR4ROLE a: the helpers' fixings proved the incumbent {z:.10e} optimal ({:.2}s)", self.start.elapsed().as_secs_f64());
                         }
                         return self.finish(MipStatus::Optimal, z);
                     }
@@ -29112,11 +29348,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let out = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (o2, s2) = (out.clone(), stop.clone());
+        let shv = if role == 'a' { self.par4_sh.clone() } else { None };
         let h = std::thread::Builder::new()
             .stack_size(64 << 20)
             .spawn(move || {
                 DIVE_ONLY.with(|d| d.set((5, dive_budget, root_iters)));
                 PAR4_STEPS.with(|c| c.set((mask, rot)));
+                PAR4_SH.with(|c| *c.borrow_mut() = shv);
                 FIND_OUT.with(|o| *o.borrow_mut() = Some(o2));
                 let halt = submip_halt().then(|| s2.clone());
                 FIND_STOP.with(|o| *o.borrow_mut() = Some(s2));
@@ -29133,6 +29371,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
 
     /// 試作 `ENOMOTO_MIP_PAR4ROLE`: 手伝いの見つけた解を受け取る。`stop` の役の手伝いには止めの合図を出し、`wait` の役の手伝いは終わるまで待つ
     fn par4_poll(&mut self, stop: &str, wait: &str) {
+        if let (Some(sh), Some((z, _))) = (self.par4_sh.as_ref(), self.incumbent.as_ref()) {
+            sh.offer_inc(*z);
+        }
         if self.par4_helpers.is_empty() {
             return;
         }
@@ -29167,6 +29408,147 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
         }
         self.par4_helpers = keep;
+    }
+
+    /// `PAR4ROLE` の `a` の手伝いの本体 (根の写しの求解の中、[`PAR4_ALLOC`]): 期限か止めの合図まで、1 切れごとに解探しか下界側を選んで回す。
+    /// 選び方: 解探しの切れの累計が全体の π 倍以下なら解探し (π は [`Par4Shared::primal_share`]、乱数は使わない)。
+    /// 解探しはダイビング 3 種と Pump を手伝いごとにずらした順に 1 つ、下界側は打ち切り値つきの LP の探り
+    /// ([`Self::lp_probe_cutoff`]、時間・反復の上限は GAP1 の `u` と同じ) を 1 回。探る列がなくなったら下界側はやめる
+    fn par4_alloc_loop(&mut self, x: &[f64], budget: u64, riters: u64, rot: u8) {
+        use std::sync::atomic::Ordering;
+        let Some(sh) = PAR4_SH.with(|c| c.borrow().clone()) else { return };
+        let p = self.p;
+        let (lo0, up0) = (self.dom.lo.clone(), self.dom.up.clone());
+        let mut di = rot as usize;
+        let mut bound_ok = true;
+        let _ = x;
+        while !self.time_up() {
+            if let Some((z, _)) = self.incumbent.as_ref() {
+                sh.offer_inc(*z);
+            }
+            let (pi, q) = sh.primal_share();
+            let pi = if bound_ok { pi } else { 1.0 };
+            let (pd, bd) = (sh.stat[0].load(Ordering::Relaxed) as f64, sh.stat[2].load(Ordering::Relaxed) as f64);
+            let primal = pd <= pi * (pd + bd);
+            let t = Instant::now();
+            if primal {
+                let z0 = self.incumbent.as_ref().map(|(z, _)| *z);
+                let name = ["fractional diving", "vector length diving", "coefficient diving", "feasibility pump"][di % 4];
+                self.heur_label = name;
+                let _ = match di % 4 {
+                    0 => self.fractional_dive(budget),
+                    1 => self.dive(super::heuristics::DiveKind::VectorLength, budget, f64::INFINITY),
+                    2 => self.dive(super::heuristics::DiveKind::Coefficient, budget, f64::INFINITY),
+                    _ => self.feasibility_pump(riters),
+                };
+                self.heur_label = "";
+                di += 1;
+                let z1 = self.incumbent.as_ref().map(|(z, _)| *z);
+                let imp = z1.is_some_and(|z| z0.is_none_or(|z0| z < z0) && z < Par4Shared::ld(&sh.inc));
+                sh.stat[0].fetch_add(1, Ordering::Relaxed);
+                if let Some(z) = z1 {
+                    if imp {
+                        sh.stat[1].fetch_add(1, Ordering::Relaxed);
+                        if let (Some(o), Some((_, xs))) = (FIND_OUT.with(|o| o.borrow().clone()), self.incumbent.as_ref()) {
+                            o.lock().unwrap().push(xs.clone());
+                        }
+                    }
+                    sh.offer_inc(z);
+                }
+                if env_str!("ENOMOTO_MIP_PAR4ROLE_LOG").is_some() {
+                    eprintln!("MIP: PAR4ROLE a helper {rot}: {name}: improved {imp} ({:.2}s), pi {pi:.3} [f g m hp hb] {q:.3?}", t.elapsed().as_secs_f64());
+                }
+            } else {
+                let tmax = tunable!("ENOMOTO_T_MIP_GAP1_PROBE_TIME_FRAC", 0.1, f64) * if self.params.frac_tl().is_finite() { self.params.frac_tl() } else { 300.0 };
+                let itlim = (tunable!("ENOMOTO_T_MIP_GAP1_PROBE_ITERMULT", 2.0, f64) * (self.root_lp_iters as f64 / 10.0).max(100.0)) as u64;
+                let cut = self.prune_limit();
+                let [probed, _, fixed] = self.lp_probe_cutoff(tmax, f64::INFINITY, itlim, "PAR4ROLE a");
+                sh.stat[2].fetch_add(1, Ordering::Relaxed);
+                if probed == 0 {
+                    bound_ok = false;
+                }
+                if fixed > 0 && !self.dom.infeasible {
+                    sh.stat[3].fetch_add(1, Ordering::Relaxed);
+                    let mut fx = sh.fixes.lock().unwrap();
+                    for j in 0..p.n {
+                        if p.is_int[j] && (self.dom.lo[j] > lo0[j] || self.dom.up[j] < up0[j]) {
+                            fx.push((j, self.dom.lo[j], self.dom.up[j], cut));
+                        }
+                    }
+                }
+                if env_str!("ENOMOTO_MIP_PAR4ROLE_LOG").is_some() {
+                    eprintln!("MIP: PAR4ROLE a helper {rot}: LP probing: {probed} probed, {fixed} fixed ({:.2}s), pi {pi:.3} [f g m hp hb] {q:.3?}", t.elapsed().as_secs_f64());
+                }
+                if self.dom.infeasible {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// `PAR4ROLE` の `a`: 主の根のカットの周の後の下界 (最小化形、定数項込み) と暫定解を手伝いに知らせる
+    pub(super) fn par4_publish(&mut self, lb: f64) {
+        let Some(sh) = self.par4_sh.clone() else { return };
+        sh.publish_lb(lb);
+        if let Some((z, _)) = self.incumbent.as_ref() {
+            sh.offer_inc(*z);
+        }
+        // 7.5 節: 手伝いを、空いた本数 × t / (t + c) 本まで立てる (t はカットの周の始めからの秒、c は根の LP の秒)
+        let spawned = self.par4_helpers.iter().filter(|h| h.0 == 'a').count();
+        if spawned < self.par4_free {
+            let t = sh.t0.elapsed().as_secs_f64();
+            let c = self.par4_c.max(self.root_lp_secs).max(1e-6);
+            let target = ((self.par4_free as f64) * t / (t + c)).round() as usize;
+            if target > spawned && self.params.verbose {
+                eprintln!("MIP: PAR4ROLE a: t {t:.3}s, c {c:.3}s, helpers {spawned} -> {target} ({:.2}s)", self.start.elapsed().as_secs_f64());
+            }
+            for i in spawned..target.min(self.par4_free) {
+                self.par4_spawn('a', PAR4_ALLOC, i as u8, self.root_lp_iters);
+            }
+        }
+    }
+
+    /// `PAR4ROLE` の `a`: 手伝いが出した固定を入れる (根のヒューリスティクスの後、再スタートの判定の前)。固定は手伝いの打ち切り値で出したので、
+    /// その打ち切り値が主の今の打ち切り値以上のものだけ入れる (取り除くのは主にとっても要らない解だけ)。[入れた固定の数, 見送った数] を返す
+    fn par4_apply_fixes(&mut self) -> [usize; 2] {
+        let Some(sh) = self.par4_sh.take() else { return [0; 2] };
+        let fx = std::mem::take(&mut *sh.fixes.lock().unwrap());
+        let p = self.p;
+        let lim = self.prune_limit();
+        let (mut n, mut skip) = (0usize, 0usize);
+        for (j, lo, up, cut) in fx {
+            if !(cut >= lim) {
+                skip += 1;
+                continue;
+            }
+            if lo > self.dom.lo[j] {
+                self.dom.tighten_global(p, j, false, lo);
+                n += 1;
+            }
+            if up < self.dom.up[j] {
+                self.dom.tighten_global(p, j, true, up);
+                n += 1;
+            }
+        }
+        if n > 0 {
+            if !self.dom.propagate(p) {
+                self.dom.infeasible = true;
+            } else {
+                self.sync_lp();
+                let st = self.lp.solve(&self.limits(u64::MAX));
+                if matches!(st, LpStatus::Infeasible | LpStatus::ObjectiveBound) && !self.lpinf_untrusted(st) {
+                    self.dom.infeasible = true;
+                }
+            }
+        }
+        if self.params.verbose {
+            let st: Vec<u64> = sh.stat.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
+            eprintln!(
+                "MIP: PAR4ROLE a: helper slices primal {} (improved {}), bound {} (fixed {}); {n} bound changes applied, {skip} skipped (cutoff), LP {:.10e}, infeasible {} ({:.2}s)",
+                st[0], st[1], st[2], st[3], self.lp.objective() + p.offset, self.dom.infeasible, self.start.elapsed().as_secs_f64()
+            );
+        }
+        [n, skip]
     }
 
     fn make_snapshot(&mut self, s: &Portfolio, plunge: &mut Option<OpenNode>, with_nodes: bool) -> std::sync::Arc<TreeSnapshot> {
@@ -29500,6 +29882,13 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if let Some((z, x)) = &self.incumbent {
             *pool.best_x.lock().unwrap() = Some((*z, std::sync::Arc::new(x.clone())));
             pool.has_x.store(true, std::sync::atomic::Ordering::Release);
+        }
+        // 試作 `ENOMOTO_MIP_POLISH_BG` ([`polish_bg`]): 研磨する問題 (主の B&B の問題) を置き、今の暫定解の研磨を頼む
+        if polish_bg('i') && !self.params.submip {
+            let _ = pool.pbg.p.set(std::sync::Arc::new(self.p.clone()));
+            if let Some((z, x)) = &self.incumbent {
+                pool.pbg.post(*z, x);
+            }
         }
         if pool.heur_k > 0 && !self.root_mu_obs.is_empty() {
             let mut g = pool.mu.lock().unwrap();
@@ -31115,6 +31504,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if self.time_up() {
                 break Err(());
             }
+            // 試作 `ENOMOTO_MIP_POLISH_BG` の `i` ([`polish_bg`]): ノードを待っている従のスレッドは、取られていない研磨の頼みがあれば研磨する。
+            // 研磨の間は待っている数 (`idle`、渡すかどうかの目安) から外し、ほかのスレッドがここへノードを渡さないようにする
+            // (`busy` は変えないので、探索の終わりの判定は待たない。終われば主が打ち切る)
+            if polish_bg('i') && self.snap.is_some() && !self.pool_busy && !pool.stop.load(Ordering::Relaxed) {
+                pool.idle.fetch_sub(1, Ordering::Relaxed);
+                let ran = pool.pbg.run(self.deadline);
+                pool.idle.fetch_add(1, Ordering::Relaxed);
+                if ran {
+                    continue;
+                }
+            }
             waited = true;
             let t_sleep = Instant::now();
             std::thread::sleep(Duration::from_micros(200));
@@ -31139,6 +31539,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         pool.stop.store(true, Ordering::Relaxed);
         pool.halt.store(true, Ordering::Relaxed);
+        // 試作 `ENOMOTO_MIP_POLISH_BG`: 裏の研磨を打ち切る (返すときに使えるのは済んだ研磨だけ)
+        pool.pbg.cancel();
         let mut lb = f64::INFINITY;
         // 従が終わったときの解 (従の問題は主の問題の写しなので、主の解としてそのまま使える)
         let mut ended: Vec<(f64, Option<Vec<f64>>)> = Vec::new();
@@ -31541,7 +31943,37 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // (木の主のスレッドは 1 にしてある)
                     let prev = (polish_final('j') && self.params.threads > 1).then(|| crate::simplex::mip_lp::set_cold_race_threads(self.params.threads));
                     // 試作 `ENOMOTO_MIP_POLISH_PRESOLVE` ([`super::polish_presolve_mode`]): LP の前処理 + 単体法で先に解く。解けなければ温めた単体法へ
-                    let pre = super::polish_presolve_mode().filter(|&m| m == 'a' || !matches!(status, MipStatus::Optimal)).map(|_| super::polish_presolved(&self.p, &mut x, z, dl_pre));
+                    // 試作 `ENOMOTO_MIP_POLISH_BG` ([`polish_bg`]): 返す解を裏で研磨し終えていれば、その結果を使う (最後の研磨を飛ばす)。
+                    // 前処理の研磨と同じく、最適で終わらないときだけ (最適の判定は温めた研磨の W を使うので変えない)
+                    let bg = (polish_bg('i') && !matches!(status, MipStatus::Optimal)).then(|| self.pool.as_ref().and_then(|pl| pl.pbg.take_for(z, &x).map(|r| (pl.clone(), r)))).flatten();
+                    if polish_bg('i') && !matches!(status, MipStatus::Optimal) {
+                        if let Some(pl) = self.pool.as_ref() {
+                            pl.pbg.cnt[if bg.is_some() { 4 } else { 5 }].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('v')) {
+                                let c: Vec<u64> = pl.pbg.cnt.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
+                                eprintln!("MIP: POLISH_BG: posted {} started {} solved {} halted/unsolved {} used at the end {} (not used {})", c[0], c[1], c[2], c[3], c[4], c[5]);
+                            }
+                        }
+                    }
+                    let pre = match bg {
+                        Some((_, (out, secs))) => {
+                            if env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('v')) {
+                                eprintln!("MIP: POLISH_BG: final polish taken from the background polish ({secs:.3}s there): {:?}", out.as_ref().map(|(zn, _)| zn - z));
+                            }
+                            Some(match out {
+                                Some((zn, xn)) => {
+                                    x = xn;
+                                    super::POLISH_TOL_LEAK.with(|c| c.set((0.0, 0.0)));
+                                    super::WarmPolish::Replaced(zn)
+                                }
+                                None => {
+                                    super::POLISH_TOL_LEAK.with(|c| c.set((0.0, 0.0)));
+                                    super::WarmPolish::Kept
+                                }
+                            })
+                        }
+                        None => super::polish_presolve_mode().filter(|&m| m == 'a' || !matches!(status, MipStatus::Optimal)).map(|_| super::polish_presolved(&self.p, &mut x, z, dl_pre)),
+                    };
                     let r = match pre {
                         Some(r @ (super::WarmPolish::Replaced(_) | super::WarmPolish::Kept)) => r,
                         _ => super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), dl),
@@ -32442,6 +32874,18 @@ fn sb_objprop() -> bool {
 
 /// 試作 `ENOMOTO_MIP_OVERRUN240` (analysis/overrun240_20261127、既定では使わない): 時間の上限を越える分を減らす。値の文字で部品を選ぶ。
 /// `p` 時間切れで終わるとき、最後の研磨にも求解の期限を渡す
+/// 試作 `ENOMOTO_MIP_POLISH_BG` ([`PolishBg`]、既定では使わない。analysis/overrun240_20261127 の 9 節): 2 スレッド以上の木で、暫定解の研磨を
+/// 裏で回し、返すときの最後の研磨の待ちを消す。値の文字で部品を選ぶ。
+/// `i` = 共有の待ち行列でノードを待っている従のスレッドが研磨を取る (働いているスレッドからは取らない)
+fn polish_bg(c: char) -> bool {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| match env_str!("ENOMOTO_MIP_POLISH_BG") {
+        Some(v) if v != "0" && v != "off" => v.to_string(),
+        _ => String::new(),
+    })
+    .contains(c)
+}
+
 fn overrun240(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     V.get_or_init(|| match env_str!("ENOMOTO_MIP_OVERRUN240") {
