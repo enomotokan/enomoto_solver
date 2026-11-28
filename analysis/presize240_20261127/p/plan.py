@@ -1,11 +1,12 @@
-"""分担表: python plan.py [分担の数 (既定 8)] [出力 (既定 shards.json)] → shards.json (P = MIPLIB の 58 問 × 種 1〜3 × cfg.py の全設定、60 秒)。
+"""分担表: python plan.py [分担の数 (既定 8)] [出力 (既定 shards.json)] [計画の名前 (既定 PLAN)] → shards.json (P = MIPLIB の 58 問 × 種 1〜3 × cfg.py の全設定、60 秒)。
 同じ (問題, 種) の設定 (既定 2 つと試作 4) は同じ分担で続けて解き、順は組ごとに回して入れ替える。
 見積り (1 回、秒): analysis/final_20261118 の P の def (4 スレッド)・def_t1 の同じ (問題, 種) の時間 (解けなければ 60)、試作も同じとみる、+ 待ち 8 秒。"""
 import json, glob, sys
 from pathlib import Path
 D = Path(__file__).resolve().parent
 sys.path.insert(0, str(D)); sys.path.insert(0, str(D.parents[1] / "cbcimpl_20261029"))
-from cfg import CFGS, PLAN  # noqa: E402
+import cfg  # noqa: E402
+PLAN = getattr(cfg, sys.argv[3]) if len(sys.argv) > 3 else cfg.PLAN  # 3 つ目の引数で cfg.py の計画の名前 (例 PLAN3) を選ぶ
 from probs import PROBS  # noqa: E402
 NS = int(sys.argv[1]) if len(sys.argv) > 1 else 8
 TL = 60
