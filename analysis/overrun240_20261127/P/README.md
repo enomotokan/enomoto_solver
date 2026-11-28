@@ -7,7 +7,7 @@
 - 見るもの: 木の探索に害が出ないか。比べるのは、同じスレッドの数の既定。
 - 大きさ: P = MIPLIB の 58 問 × 種 1〜3 × {既定, i} × {2, 4 スレッド}、60 秒。計 696 回。
 - 分担 (shards.json、plan.py): 分担 0 = 2 スレッド (def_t2・i_t2)、分担 1 = 4 スレッド (def_t4・i_t4)。各 348 回、見積りは各 2.8 時間。
-- 版: (組んで push した後に書く)
+- 版: f7c088a80 (試作のコミットは da3d183b7)。`<版>` はこれ。回す前に、短い動作の確かめ (下の「回す前の確かめ」) をする。
 
 ## 回し方 (分担 K)
 
@@ -37,6 +37,17 @@ cp /home/user/es_pbg/analysis/overrun240_20261127/P/res_sK.jsonl analysis/overru
 git add analysis/overrun240_20261127/P/res_sK.jsonl && git commit -m "overrun240 P: 分担 K の途中の結果"
 git fetch origin ccr-1beed81b-ex0uhq && git merge --no-edit FETCH_HEAD && git push -u origin ccr-1beed81b-ex0uhq
 ```
+
+## 回す前の確かめ (組んだ後に 1 回、約 1 分)
+
+組んだ機械で試作が動くかを見る (GGo5 の機械は別の計測中で、まだ組めていないため)。
+
+```bash
+ENOMOTO_MIP_POLISH_BG=i ENOMOTO_MIP_POLISH_STATS=v ENOMOTO_MIP_THREADS=2 python scripts/run_miplib_benchmark.py --worker-ours .miplib_cache/neos-5049753-cuanza.mps --time-limit 40 --threads 2 2>&1 | grep -E "POLISH_BG|^\{"
+```
+
+- 期待: `MIP: POLISH_BG: posted … started … solved …` の行と、結果の JSON。
+- 落ちる (panic・crash)、または JSON が出ないときは、P を回さずに GGo5 に知らせる。
 
 ## 集計
 
