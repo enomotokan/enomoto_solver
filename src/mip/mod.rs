@@ -3006,7 +3006,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             let early = FEAS_FJ_SOL.with(|s| s.borrow_mut().take()).filter(|x| x.len() == prob.n && prob.is_feasible(x, 1e-6));
             let early_sol = early.is_some();
             let prob = if early_sol { prob } else if env_str!("ENOMOTO_MIP_NO_CLIQUE_EXTEND").is_none() && (!params.submip || env_str!("ENOMOTO_MIP_CLIQUE_EXTEND_SUBMIP").is_some() || submip_highs('p')) { extend_clique_rows(prob, params.verbose) } else { prob };
-            // 試作 `ENOMOTO_MIP_ROWCLEAN` (既定オフ、analysis/presize240_20261127 の 7 節): 列の境界だけで両辺が満たされる行 (全部の列が固定された行を含む) を落とす
+            // `ENOMOTO_MIP_ROWCLEAN` (2026-11-28 に既定化、`=0`・`off` で切る。analysis/presize240_20261127 の 7・8 節): 列の境界だけで両辺が満たされる行 (全部の列が固定された行を含む) を落とす
             // サブ MIP では使わない (presize240 の 8 節: noswot はサブ MIP で行を落とすと RINS などの道筋が変わり、種 2・3 で 15 -> 30 秒)
             let prob = if rowclean_on() && !early_sol && !params.submip { drop_redundant_rows(prob, params.verbose) } else { prob };
             // 診断用: クリーク行の拡張の後の問題 (`ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED2=ファイル`)
@@ -4924,9 +4924,9 @@ fn g5clq_rss(tag: &str) {
     }
 }
 
-/// 試作 `ENOMOTO_MIP_ROWCLEAN` (既定オフ、analysis/presize240_20261127 の 7 節) を使うか
+/// `ENOMOTO_MIP_ROWCLEAN` (2026-11-28 に既定化、`=0`・`off` で切る。analysis/presize240_20261127 の 7・8 節) を使うか
 pub(crate) fn rowclean_on() -> bool {
-    env_str!("ENOMOTO_MIP_ROWCLEAN").is_some_and(|v| v != "0" && v != "off")
+    env_def!("ENOMOTO_MIP_ROWCLEAN", "1").is_some()
 }
 
 /// 試作 `ENOMOTO_MIP_ROWCLEAN`: 前処理の後の最後のプロービング・列挙の固定 (ここでは前処理をかけ直さない) で、列の境界だけで
@@ -9866,9 +9866,10 @@ fn enum_adapt_on() -> bool {
     enum_adapt_val().is_some()
 }
 
-/// `ENOMOTO_MIP_ENUM_ADAPT` の値 (付けていなければ既定の `1st`、`0`・`off` なら `None`)
+/// `ENOMOTO_MIP_ENUM_ADAPT` の値 (付けていなければ既定の `1stz`、`0`・`off` なら `None`)
 fn enum_adapt_val() -> Option<&'static str> {
-    env_def!("ENOMOTO_MIP_ENUM_ADAPT", "1st")
+    // 2026-11-28 に既定を `1st` から `1stz` に (analysis/presize240_20261127 の 8 節)。`=1st` で前の既定、`=0`・`off` で切る
+    env_def!("ENOMOTO_MIP_ENUM_ADAPT", "1stz")
 }
 
 /// 列挙の前処理の形 (`ENOMOTO_MIP_ENUM_PRESOLVE` の値。[`enum_adapt_on`] なら `all`)。`None` は使わない
@@ -11038,7 +11039,7 @@ fn diag_costshift(prob: &MipProblem, base: usize) {
 }
 
 fn dominated_binary_fixings(prob: &MipProblem) -> Vec<(usize, f64)> {
-    // 試作 `ENOMOTO_MIP_PREGD` の `p` ([`identical_col_fixings`]): 同じ列で費用の違う列を先に固定し、固定した問題で 0-1 列の支配を調べる
+    // `ENOMOTO_MIP_PREGD` の `p` (既定で使う) ([`identical_col_fixings`]): 同じ列で費用の違う列を先に固定し、固定した問題で 0-1 列の支配を調べる
     if pregd('p') {
         let ident = identical_col_fixings(prob);
         if !ident.is_empty() {
@@ -11055,9 +11056,11 @@ fn dominated_binary_fixings(prob: &MipProblem) -> Vec<(usize, f64)> {
     dominated_binary_fixings_with(prob, env_def!("ENOMOTO_MIP_DOMCOL_PRED", "1").is_some())
 }
 
-/// 試作 `ENOMOTO_MIP_PREGD` (既定では使わない。analysis/pregd_20261128) の形の文字 `c` が入っているか
+/// `ENOMOTO_MIP_PREGD` (analysis/pregd_20261128) の形の文字 `c` が入っているか。既定は `pg` (2026-11-28 に既定にした。P で 1 スレッド 0.988・
+/// 4 スレッド 0.989、nw04 0.45〜0.53、seymour1 335 -> 167 秒、supportcase7 349 -> 235 秒)。`0`・`off` で使わない (前の形)。値を与えると既定を置き換える
+/// (`d` は試作で既定オフ。`pg` と合わせるには `pgd`)
 fn pregd(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_PREGD").is_some_and(|v| v.contains(c))
+    env_def!("ENOMOTO_MIP_PREGD", "pg").is_some_and(|v| v.contains(c))
 }
 
 /// `ENOMOTO_MIP_PREGD` の `p` (analysis/pregd_20261128): 係数が全く同じ列 (同じ型) の組で、費用の安い列 x_j が高い列 x_k を支配する
@@ -11121,7 +11124,7 @@ fn identical_col_fixings(prob: &MipProblem) -> Vec<(usize, f64)> {
 fn dominated_binary_fixings_with(prob: &MipProblem, pred: bool) -> Vec<(usize, f64)> {
     let n = prob.n;
     let binary: Vec<bool> = (0..n).map(|j| prob.is_int[j] && prob.col_lo[j] == 0.0 && prob.col_up[j] == 1.0).collect();
-    // 試作 `ENOMOTO_MIP_PREGD` の `g` (analysis/pregd_20261128): 0-1 列に限らず、両側に有限の境界を持つ列 (一般の整数・連続) も調べる。
+    // `ENOMOTO_MIP_PREGD` の `g` (既定で使う) (analysis/pregd_20261128): 0-1 列に限らず、両側に有限の境界を持つ列 (一般の整数・連続) も調べる。
     // 文字は y = x − l (s = +1) か y = u − x (s = −1) で、幅は w = u − l。支配の補題 (y_j が y_k を支配すれば、y_j = w_j か y_k = 0 の
     // 最適解がある: y_k を下げた分を y_j に移す) は、移す量が y_j の型に合う限り型によらない。整数の y_j が連続の y_k を支配することは
     // 使わない (HiGHS の dominatedColumns と同じ)。衝突グラフ (候補 (a)) は 0-1 列だけ。
