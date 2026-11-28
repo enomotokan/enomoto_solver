@@ -2908,6 +2908,10 @@ pub(super) struct PolishBg {
     p: std::sync::OnceLock<std::sync::Arc<MipProblem>>,
     /// 頼み (版, 目的値, 解)
     req: std::sync::Mutex<Option<(u64, f64, std::sync::Arc<Vec<f64>>)>>,
+    /// 最新の頼みを置いた時刻 (`w` の重みの age に使う)
+    posted_at: std::sync::Mutex<Option<Instant>>,
+    /// 研磨の秒の見積り (f64 のビット。済んだ研磨の秒、まだなければ主の根の LP の秒)
+    est: std::sync::atomic::AtomicU64,
     /// 最新の頼みの版と、取られた最新の版
     ver: std::sync::atomic::AtomicU64,
     taken: std::sync::atomic::AtomicU64,
@@ -2915,8 +2919,8 @@ pub(super) struct PolishBg {
     cur: std::sync::Mutex<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>,
     /// 結果 (版, 元の解, 元の目的値, 取り替えたなら新しい目的値と解 (取り替えなければ None)、研磨の秒)
     done: std::sync::Mutex<Option<PolishBgDone>>,
-    /// 数え: [頼んだ, 始めた, 解けた, 打ち切られた・解けなかった, 返すときに使った, 返すときに使えなかった]
-    pub(super) cnt: [std::sync::atomic::AtomicU64; 6],
+    /// 数え: [頼んだ, 始めた, 解けた, 打ち切られた・解けなかった, 返すときに使った, 返すときに使えなかった, 働いているスレッドが取った (`w`)]
+    pub(super) cnt: [std::sync::atomic::AtomicU64; 7],
 }
 
 pub(super) struct PolishBgDone {
@@ -2938,6 +2942,7 @@ impl PolishBg {
         let v = self.ver.fetch_add(1, Ordering::AcqRel) + 1;
         *g = Some((v, z, std::sync::Arc::new(x.to_vec())));
         drop(g);
+        *self.posted_at.lock().unwrap() = Some(Instant::now());
         self.cnt[0].fetch_add(1, Ordering::Relaxed);
         self.cancel();
     }
@@ -2971,7 +2976,15 @@ impl PolishBg {
         self.cnt[1].fetch_add(1, Ordering::Relaxed);
         let t0 = Instant::now();
         let mut x = (*x0).clone();
-        let r = crate::cancel::with_token(Some(tok.clone()), || super::polish_presolved(p, &mut x, z, deadline));
+        let r = crate::cancel::with_token(Some(tok.clone()), || {
+            let r = super::polish_presolved(p, &mut x, z, deadline);
+            // `POLISH_PRESOLVE=d` (最後の研磨と同じ選び方): 前処理で縮まず解かなかったときは、温めた研磨と同じ単体法で解く (裏には B&B の基底がないので一から)
+            if matches!(r, super::WarmPolish::NotSolved) && super::polish_presolve_mode() == Some('d') && !tok.load(Ordering::Relaxed) {
+                super::polish_in_problem_warm(p, &mut x, z, None, deadline)
+            } else {
+                r
+            }
+        });
         let secs = t0.elapsed().as_secs_f64();
         let halted = tok.load(Ordering::Relaxed);
         *self.cur.lock().unwrap() = None;
@@ -2983,6 +2996,7 @@ impl PolishBg {
         match out {
             Some(out) if !halted => {
                 self.cnt[2].fetch_add(1, Ordering::Relaxed);
+                self.est.store(secs.to_bits(), Ordering::Relaxed);
                 let mut g = self.done.lock().unwrap();
                 if g.as_ref().is_none_or(|d| d.ver < vr) {
                     *g = Some(PolishBgDone { ver: vr, x_in: x0, z_in: z, out, secs });
@@ -2993,6 +3007,55 @@ impl PolishBg {
             }
         }
         true
+    }
+
+    /// `POLISH_BG` の `w` ([`polish_bg`]): 働いている従のスレッドが、ノードの合間に研磨を取るか決めて、取るなら研磨する。研磨したら true。
+    /// 取っていない頼みがあるときだけ、研磨の見積りの秒 est ごとに 1 回、重み
+    /// w = σ(ln(age / est)) · σ(ln(est · (T − 1) / rem))
+    /// の確率で取る。age は頼みを置いてからの秒 (暫定解が研磨されないままの時間)、rem は求解の期限までの秒、T はスレッドの数。
+    /// 1 つ目は「暫定解が研磨 1 回分より長く変わっていない」、2 つ目は「研磨が残り時間に対して重い (働いている T − 1 本のうち 1 本を回す)」。
+    /// 期限がなければ取らない (最後の研磨を急ぐ理由がない)。新しい定数は置かない
+    fn maybe_run_busy(&self, deadline: Option<Instant>, threads: usize) -> bool {
+        use std::sync::atomic::Ordering;
+        thread_local! {
+            static LAST: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+            static RNG: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        }
+        let Some(dl) = deadline else { return false };
+        if self.ver.load(Ordering::Acquire) <= self.taken.load(Ordering::Acquire) {
+            return false;
+        }
+        let now = Instant::now();
+        let est = f64::from_bits(self.est.load(Ordering::Relaxed)).max(1e-3);
+        if LAST.with(|l| l.get()).is_some_and(|t| now.duration_since(t).as_secs_f64() < est) {
+            return false;
+        }
+        LAST.with(|l| l.set(Some(now)));
+        let Some(at) = *self.posted_at.lock().unwrap() else { return false };
+        let age = now.duration_since(at).as_secs_f64();
+        let rem = dl.saturating_duration_since(now).as_secs_f64().max(1e-3);
+        let (u1, u2) = (age / est, est * threads.saturating_sub(1) as f64 / rem);
+        let w = u1 / (1.0 + u1) * (u2 / (1.0 + u2));
+        // 一様乱数 (xorshift、スレッドごと)
+        let r = RNG.with(|c| {
+            let mut v = c.get();
+            if v == 0 {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                std::thread::current().id().hash(&mut h);
+                v = (0x9E37_79B9_7F4A_7C15 ^ h.finish()) | 1;
+            }
+            v ^= v << 13;
+            v ^= v >> 7;
+            v ^= v << 17;
+            c.set(v);
+            (v >> 11) as f64 / (1u64 << 53) as f64
+        });
+        if r >= w {
+            return false;
+        }
+        self.cnt[6].fetch_add(1, Ordering::Relaxed);
+        self.run(deadline)
     }
 
     /// 返すとき: 返す解 `x` (目的値 `z`) を研磨した結果があれば、それ (取り替えたなら新しい目的値と解) を返す
@@ -14993,6 +15056,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 }
                 if env_str!("ENOMOTO_MIP_TREE_NO_BALANCE").is_none() && self.nodes % tunable!("ENOMOTO_T_MIP_TREE_BALANCE_EVERY", 32u64, u64) == 0 {
                     self.pool_balance();
+                }
+                // 試作 `ENOMOTO_MIP_POLISH_BG` の `w` ([`PolishBg::maybe_run_busy`]): 働いている従のスレッドも、重みで暫定解の研磨を取る
+                if polish_bg('w') && self.snap.is_some() {
+                    if let Some(pool) = self.pool.clone().filter(|pl| !pl.stop.load(std::sync::atomic::Ordering::Relaxed)) {
+                        pool.pbg.maybe_run_busy(self.deadline, pool.threads);
+                    }
                 }
                 if pool3_best_secs() > 0.0 {
                     self.pool3_tick();
@@ -29900,6 +29969,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 試作 `ENOMOTO_MIP_POLISH_BG` ([`polish_bg`]): 研磨する問題 (主の B&B の問題) を置き、今の暫定解の研磨を頼む
         if polish_bg('i') && !self.params.submip {
             let _ = pool.pbg.p.set(std::sync::Arc::new(self.p.clone()));
+            pool.pbg.est.store(self.root_lp_secs.to_bits(), std::sync::atomic::Ordering::Relaxed);
             if let Some((z, x)) = &self.incumbent {
                 pool.pbg.post(*z, x);
             }
@@ -31965,7 +32035,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             pl.pbg.cnt[if bg.is_some() { 4 } else { 5 }].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             if env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('v')) {
                                 let c: Vec<u64> = pl.pbg.cnt.iter().map(|a| a.load(std::sync::atomic::Ordering::Relaxed)).collect();
-                                eprintln!("MIP: POLISH_BG: posted {} started {} solved {} halted/unsolved {} used at the end {} (not used {})", c[0], c[1], c[2], c[3], c[4], c[5]);
+                                eprintln!("MIP: POLISH_BG: posted {} started {} solved {} halted/unsolved {} used at the end {} (not used {}), taken by busy threads {}", c[0], c[1], c[2], c[3], c[4], c[5], c[6]);
                             }
                         }
                     }
@@ -31985,6 +32055,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                     super::WarmPolish::Kept
                                 }
                             })
+                        }
+                        // 試作 `POLISH_PRESOLVE=r` ([`super::polish_race`]): 2 スレッド以上 (従はもう止まっている) なら前処理つきと温めた研磨を同時に
+                        None if super::polish_presolve_race() && self.params.threads > 1 && !matches!(status, MipStatus::Optimal) => {
+                            Some(super::polish_race(&self.p, &mut x, z, &b, dl_pre, dl))
                         }
                         None => super::polish_presolve_mode().filter(|&m| m == 'a' || !matches!(status, MipStatus::Optimal)).map(|_| super::polish_presolved(&self.p, &mut x, z, dl_pre)),
                     };
@@ -32890,10 +32964,12 @@ fn sb_objprop() -> bool {
 /// `p` 時間切れで終わるとき、最後の研磨にも求解の期限を渡す
 /// 試作 `ENOMOTO_MIP_POLISH_BG` ([`PolishBg`]、既定では使わない。analysis/overrun240_20261127 の 9 節): 2 スレッド以上の木で、暫定解の研磨を
 /// 裏で回し、返すときの最後の研磨の待ちを消す。値の文字で部品を選ぶ。
-/// `i` = 共有の待ち行列でノードを待っている従のスレッドが研磨を取る (働いているスレッドからは取らない)
+/// `i` = 共有の待ち行列でノードを待っている従のスレッドが研磨を取る (働いているスレッドからは取らない)。
+/// `w` (`i` を含む、2 段目、利用者の承認 2026-11-28) = 加えて、働いている従のスレッドもノードの合間に重みで取る ([`PolishBg::maybe_run_busy`])
 fn polish_bg(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     V.get_or_init(|| match env_str!("ENOMOTO_MIP_POLISH_BG") {
+        Some(v) if v.contains('w') => format!("{v}i"),
         Some(v) if v != "0" && v != "off" => v.to_string(),
         _ => String::new(),
     })
