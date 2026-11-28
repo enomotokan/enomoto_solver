@@ -3006,7 +3006,7 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             let early = FEAS_FJ_SOL.with(|s| s.borrow_mut().take()).filter(|x| x.len() == prob.n && prob.is_feasible(x, 1e-6));
             let early_sol = early.is_some();
             let prob = if early_sol { prob } else if env_str!("ENOMOTO_MIP_NO_CLIQUE_EXTEND").is_none() && (!params.submip || env_str!("ENOMOTO_MIP_CLIQUE_EXTEND_SUBMIP").is_some() || submip_highs('p')) { extend_clique_rows(prob, params.verbose) } else { prob };
-            // 試作 `ENOMOTO_MIP_ROWCLEAN` (既定オフ、analysis/presize240_20261127 の 7 節): 列の境界だけで両辺が満たされる行 (全部の列が固定された行を含む) を落とす
+            // `ENOMOTO_MIP_ROWCLEAN` (2026-11-28 に既定化、`=0`・`off` で切る。analysis/presize240_20261127 の 7・8 節): 列の境界だけで両辺が満たされる行 (全部の列が固定された行を含む) を落とす
             // サブ MIP では使わない (presize240 の 8 節: noswot はサブ MIP で行を落とすと RINS などの道筋が変わり、種 2・3 で 15 -> 30 秒)
             let prob = if rowclean_on() && !early_sol && !params.submip { drop_redundant_rows(prob, params.verbose) } else { prob };
             // 診断用: クリーク行の拡張の後の問題 (`ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED2=ファイル`)
@@ -4924,9 +4924,9 @@ fn g5clq_rss(tag: &str) {
     }
 }
 
-/// 試作 `ENOMOTO_MIP_ROWCLEAN` (既定オフ、analysis/presize240_20261127 の 7 節) を使うか
+/// `ENOMOTO_MIP_ROWCLEAN` (2026-11-28 に既定化、`=0`・`off` で切る。analysis/presize240_20261127 の 7・8 節) を使うか
 pub(crate) fn rowclean_on() -> bool {
-    env_str!("ENOMOTO_MIP_ROWCLEAN").is_some_and(|v| v != "0" && v != "off")
+    env_def!("ENOMOTO_MIP_ROWCLEAN", "1").is_some()
 }
 
 /// 試作 `ENOMOTO_MIP_ROWCLEAN`: 前処理の後の最後のプロービング・列挙の固定 (ここでは前処理をかけ直さない) で、列の境界だけで
@@ -9866,9 +9866,10 @@ fn enum_adapt_on() -> bool {
     enum_adapt_val().is_some()
 }
 
-/// `ENOMOTO_MIP_ENUM_ADAPT` の値 (付けていなければ既定の `1st`、`0`・`off` なら `None`)
+/// `ENOMOTO_MIP_ENUM_ADAPT` の値 (付けていなければ既定の `1stz`、`0`・`off` なら `None`)
 fn enum_adapt_val() -> Option<&'static str> {
-    env_def!("ENOMOTO_MIP_ENUM_ADAPT", "1st")
+    // 2026-11-28 に既定を `1st` から `1stz` に (analysis/presize240_20261127 の 8 節)。`=1st` で前の既定、`=0`・`off` で切る
+    env_def!("ENOMOTO_MIP_ENUM_ADAPT", "1stz")
 }
 
 /// 列挙の前処理の形 (`ENOMOTO_MIP_ENUM_PRESOLVE` の値。[`enum_adapt_on`] なら `all`)。`None` は使わない
