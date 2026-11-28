@@ -4,7 +4,12 @@ python psumm_ws.py > psumm_ws.txt"""
 import json, math, random
 from pathlib import Path
 D = Path(__file__).resolve().parent
-rows = [json.loads(l) for k in (1, 2, 3) if (D / f"pws_s{k}.jsonl").exists() for l in (D / f"pws_s{k}.jsonl").read_text().splitlines()]
+import sys
+V = sys.argv[1] if len(sys.argv) > 1 else "ws"  # python psumm_ws.py d > psumm_d.txt (6.4 節)
+fn = (lambda k: f"pws_s{k}.jsonl") if V == "ws" else (lambda k: f"pws_{V}_s{k}.jsonl")
+rows = [json.loads(l) for k in (1, 2, 3) if (D / fn(k)).exists() for l in (D / fn(k)).read_text().splitlines()]
+for r in rows:
+    if r["cfg"] == V: r["cfg"] = "ws"  # 以下は ws の名で比べる
 by = {}
 for r in rows: by.setdefault((r["problem"], r["seed"]), {})[r["cfg"]] = r
 def t(r): return r["result"].get("time", 60.0) if r["result"].get("status") == "optimal" else 60.0
