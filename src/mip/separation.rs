@@ -4122,6 +4122,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             if job.is_none() && !self.params.submip && (tunable!("ENOMOTO_T_MIP_CLIQUE_FB_MARGINAL", 0usize, usize) > 0 || clique_cuts_mode() == Some("sigmoid_a")) {
                 CLQFB_HIST.with(|h| h.borrow_mut().push(obj));
             }
+            // `ENOMOTO_MIP_PAR4ROLE` の `a`: 主の周の下界を手伝いに知らせる (下界の伸びの止まり方 m を配分に使う)
+            if job.is_none() && !self.params.submip {
+                self.par4_publish(obj + p.offset);
+            }
             if self.params.verbose {
                 let cut_nnz: usize = (p.m..self.lp.num_rows()).map(|i| self.lp.row_ref(i).len()).sum();
                 let ncut_rows = self.lp.num_rows() - p.m;
