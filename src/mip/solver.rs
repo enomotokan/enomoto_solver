@@ -4339,6 +4339,8 @@ pub(crate) fn heur_adapt() -> bool {
 /// 試作 `ENOMOTO_MIP_HEUR_ADAPT` の値の文字 (`=1m` など、[`heur_adapt`] が真のときだけ意味を持つ):
 /// - `m`: FP の第 3 段 (`fp_stage3`) を、外側の根から出したサブ MIP の中では回さない (analysis/comboharm_20261124/neos-1582420.md)
 /// - `k`: f_t ([`Solver::adapt_tree_f`]) の経過・残りを壁時計でなく手間の秒で数える (analysis/comboharm_20261124/README.md 10 節)
+/// - `r`: 根の LP の反復の寄せ (前処理の LP の反復の側へ f_g だけ) を根のヒューリスティクスの予算にだけ当て、`Solver::root_lp_iters`
+///   (GAP1 u のプロービング・DFSBB・LNS・強分枝などの物差し) には漏らさない (analysis/combo3_20261126 8.3 節)
 pub(crate) fn heur_adapt_flag(c: char) -> bool {
     heur_adapt() && env_str!("ENOMOTO_MIP_HEUR_ADAPT").is_some_and(|v| v.contains(c))
 }
@@ -4762,8 +4764,10 @@ pub(super) struct ShaveDecide {
     n: u64,
 }
 
-/// 試作 `ENOMOTO_MIP_PAR4ROLE` (既定では使わない、analysis/par4role_20261127 の 5 節): 4 スレッドの根で遊んでいるスレッドを使う。2 スレッド以上の外側の求解だけで働く
-/// (1 スレッドの道筋は変えない)。
+/// `ENOMOTO_MIP_PAR4ROLE` (analysis/par4role_20261127 の 5・6 節): 4 スレッドの根で遊んでいるスレッドを使う。2 スレッド以上の外側の求解だけで働く
+/// (1 スレッドの道筋は変えない)。**2026-11-28 に `d` を既定にした (利用者の判断、方針「中立なら入れる」)**: 未設定は `d`、`0`・`off` で使わない (従来の形)。
+/// 値を渡すとその文字だけになる (`d` と一緒に使うなら `ad` のように書く)。根拠: P の 4T (58 問 × 種 1〜3、60 秒) で 1.010 [0.988, 1.040]・解けた数 141 / 141・
+/// 食い違い 0、supportcase7・CMS750_4 (4T・600 秒・種 1〜3) で 0.980・0.977 (6.4・6.5 節)。`a`・`b`・`s`・`w` は既定では使わない。
 /// - `a` (根の手伝い): 根の LP の後、カットの周の前に、空いたスレッド (スレッド数 − 主 − FJ のスレッド) の w = σ(ln(g / rel_gap)) 倍 (四捨五入) の手伝いを出す。
 ///   g は暫定解と根の LP の相対ギャップ (暫定解がなければ 1)、rel_gap は終わりの判定の相対ギャップ。手伝いは根の写しで解発見スレッドの並び
 ///   (局所探索・ダイビング 3 種・Feasibility Pump) を、手伝いごとに始めをずらして回す。主が根のヒューリスティクスを終えたら止める
@@ -4775,8 +4779,7 @@ pub(super) struct ShaveDecide {
 ///   待っているサブ MIP が全部終わる (か一時停止する) と、回しているものも [`Solver::time_up`] で止める (待ちより長く根を延ばさない)
 /// - `d` (6.4 節、`s` の直し): `s` から局所探索を外し、ダイビング 3 種と Pump だけを回す (局所探索は `time_up` を見ず、P で `s` の害の元だった)
 pub(super) fn par4role(c: char) -> bool {
-    static V: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_str!("ENOMOTO_MIP_PAR4ROLE").map(|v| v.to_string()).filter(|v| v != "0")).as_ref().is_some_and(|v| v.contains(c))
+    env_def!("ENOMOTO_MIP_PAR4ROLE", "d").is_some_and(|v| v.contains(c))
 }
 
 /// `ENOMOTO_MIP_PAR4ROLE` の `b` で手伝いに出す根のヒューリスティクス (名前、[`PAR4_STEPS`] のビット)
@@ -12410,11 +12413,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
         } else {
             root_iters
         };
+        // 試作 `ENOMOTO_MIP_HEUR_ADAPT` の `r` (analysis/combo3_20261126 8.3 節): 上の寄せは根のヒューリスティクスの予算のためのものだが、
+        // `self.root_lp_iters` は GAP1 u の LP プロービングの子の反復の上限・DFSBB の手間・LNS の下限・強分枝の単位などの物差しにも使われ、
+        // 寄せがそこへ漏れていた (dano3_3 の 1 スレッドで GAP1 u の子の反復の上限が 200 → 1702 に上がり、根が 67 → 115 秒)。
+        // `r` では寄せた値を下の局所の `root_iters` (根のヒューリスティクスの予算) にだけ使い、`self.root_lp_iters` は寄せない
+        let heur_root_iters = self.root_lp_iters;
+        if heur_adapt_flag('r') && !(probe_kind != "none" && env_str!("ENOMOTO_MIP_P2RIT").is_some()) {
+            self.root_lp_iters = root_iters;
+        }
         // 試作 `ENOMOTO_MIP_P2RIT=a` (既定では使わない。analysis/presym_20261123): 根のヒューリスティクスの予算 (Feasibility Pump の
         // `1000 + 5 × 根の LP の反復`、ダイビングの `2 × 根の LP の反復 + 1000` など) も、上の物差し (前処理の LP の最初の LP の反復) で決める。
         // `P2RIT` (値なし) は `self.root_lp_iters` だけを変え、この局所の `root_iters` は温め直した根の LP の反復のままだった
         // (CMS750_4 の 1 スレッド: 根の LP が前処理の LP の基底から 1 反復で終わり、FP の LP が予算約 1000 反復で 2 回目に打ち切られていた)
-        let root_iters = if env_str!("ENOMOTO_MIP_P2RIT").is_some_and(|v| v.contains('a')) || heur_adapt() { self.root_lp_iters } else { root_iters };
+        let root_iters = if env_str!("ENOMOTO_MIP_P2RIT").is_some_and(|v| v.contains('a')) || heur_adapt() { heur_root_iters } else { root_iters };
         self.root_lp_secs = t_root_lp.elapsed().as_secs_f64();
         if rootrestart2('e') || rootrestart2('m') {
             self.rr2_root_done();
