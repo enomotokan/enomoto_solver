@@ -5111,6 +5111,29 @@ pub(crate) fn rootrestart2(c: char) -> bool {
     rr2_letters(env_str!("ENOMOTO_MIP_ROOTRESTART2"), c)
 }
 
+/// 試作 `ENOMOTO_MIP_RSTLOOSE=文字` (既定では使わない。analysis/rootrestart_20261126/README.md の 10 節): 根の再スタートの閾値をなるべく緩めに
+/// そろえ、再スタートで失うものを減らす。値の読み方は [`rr2_letters`] と同じ (`none`・`0`・`off` はオフ、`1` は `t` だけ)。
+/// - `t`: 再スタートの固定の割合の閾値を、場面によらず既存の最も緩い値 (根の最後の 1 回目の `ENOMOTO_T_MIP_RESTART_FIRST_FAC`、0.01) にそろえる
+///   ([`rst_fac`])。対象は根の最後の 2 回目以降 (`RESTART_FAC` 0.025)、早めの再スタート (`EARLY_RESTART_FRAC` 0.025)、
+///   木の中 (`TREE_RESTART_FRAC` 0.05・`TREE_RESTART_INC2_FRAC` 0.1)。分母 (全部の整数列か、根の始めに自由な整数列か) は今のまま
+/// - `p`: 根の再スタートでも、LP にないカットプールのカットを新しい求解のカットプールに渡す (`ENOMOTO_MIP_RESTART_ROOT_CUTS` の `p` と同じ道)
+/// - `c`: 根の再スタートでも、擬似費用 (観測が 1 つでもあれば) を新しい求解に渡す (木の中の再スタートの `ENOMOTO_MIP_TREEEFF` の `p` と同じ道)
+/// - `i`: プロービングの含意 (`conflict_edges`、クリーク表の辺) を新しい問題に渡す (新しいプロービングはそこから足していく)
+/// `c`・`i` を渡すと再スタートの後の固定列の落とし (`RESTART_DROP_FIXED`) は使われない ([`super::restart_drop_fixed`])。
+pub(crate) fn rstloose(c: char) -> bool {
+    let v = env_str!("ENOMOTO_MIP_RSTLOOSE");
+    rr2_letters(v, c) || (c == 't' && v.map(str::trim) == Some("1"))
+}
+
+/// [`rstloose`] の `t`: 再スタートの固定の割合の閾値 `f` を、`t` のときは既存の最も緩い値 (`ENOMOTO_T_MIP_RESTART_FIRST_FAC`、0.01) にする
+fn rst_fac(f: f64) -> f64 {
+    if rstloose('t') {
+        tunable!("ENOMOTO_T_MIP_RESTART_FIRST_FAC", 0.01, f64)
+    } else {
+        f
+    }
+}
+
 /// [`rootrestart2`] の値の読み方: `none`・`0`・`off` (と空) は全部オフ、それ以外は文字の集合として読む
 /// (以前は「値に文字が含まれるか」だけだったので、`none`・`def` が文字 `e` を含んでしまっていた)。
 fn rr2_letters(v: Option<&str>, c: char) -> bool {
@@ -5130,6 +5153,13 @@ mod rr2_letters_tests {
         }
         assert!(rr2_letters(Some("am"), 'a') && rr2_letters(Some("am"), 'm') && !rr2_letters(Some("am"), 'e'));
         assert!(rr2_letters(Some("eam"), 'e'));
+    }
+
+    #[test]
+    fn rstloose_one_means_t() {
+        // `1` は `t` だけ (rstloose の読み方)。環境変数は読まずに読み方の式だけ確かめる
+        let f = |v: Option<&str>, c: char| rr2_letters(v, c) || (c == 't' && v.map(str::trim) == Some("1"));
+        assert!(f(Some("1"), 't') && !f(Some("1"), 'p') && !f(Some("none"), 't') && f(Some("tp"), 'p'));
     }
 }
 
@@ -13172,7 +13202,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                             // 早めの再スタート (既定で使う。`ENOMOTO_MIP_NO_EARLY_RESTART` で使わない): このヒューリスティクスで暫定解が良くなり、根の被約費用による固定で
                             // 新たに固定された整数列が `ENOMOTO_T_MIP_EARLY_RESTART_FRAC` (0.025) 以上なら、残りの根のヒューリスティクスを飛ばして再スタートへ進む
                             if super::early_restart_on() && self.incumbent.as_ref().map(|(z, _)| *z) != z_before
-                                && self.proto_restart_ok(tunable!("ENOMOTO_T_MIP_EARLY_RESTART_FRAC", 0.025, f64))
+                                && self.proto_restart_ok(rst_fac(tunable!("ENOMOTO_T_MIP_EARLY_RESTART_FRAC", 0.025, f64)))
                             {
                                 self.early_restart = true;
                         self.er_at.get_or_insert_with(std::time::Instant::now);
@@ -13505,7 +13535,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     && super::early_restart_on()
                     && !self.early_restart
                     && self.incumbent.as_ref().map(|(z, _)| *z) != z_join0
-                    && self.proto_restart_ok(tunable!("ENOMOTO_T_MIP_EARLY_RESTART_FRAC", 0.025, f64))
+                    && self.proto_restart_ok(rst_fac(tunable!("ENOMOTO_T_MIP_EARLY_RESTART_FRAC", 0.025, f64)))
                 {
                     self.early_restart = true;
                         self.er_at.get_or_insert_with(std::time::Instant::now);
@@ -14524,7 +14554,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     Some(d) => d.saturating_duration_since(Instant::now()).as_secs_f64() >= tunable!("ENOMOTO_T_MIP_TREE_RESTART_MIN_LEFT", 0.1, f64) * self.params.frac_tl(),
                     None => true,
                 };
-                let frac = if inc2 { tunable!("ENOMOTO_T_MIP_TREE_RESTART_INC2_FRAC", 0.1, f64) } else { tunable!("ENOMOTO_T_MIP_TREE_RESTART_FRAC", 0.05, f64) };
+                let frac = rst_fac(if inc2 { tunable!("ENOMOTO_T_MIP_TREE_RESTART_INC2_FRAC", 0.1, f64) } else { tunable!("ENOMOTO_T_MIP_TREE_RESTART_FRAC", 0.05, f64) });
                 if inc2 && self.params.verbose {
                     let pr = self.proto_restart_ok(frac);
                     let gd = pr && self.tree_restart_guard_ok(plunge.as_ref(), "inc2diag");
@@ -26567,7 +26597,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             return false;
         }
         let newly = self.newly_fixed_ints() + extra;
-        let fac = if self.params.restarts == 0 { tunable!("ENOMOTO_T_MIP_RESTART_FIRST_FAC", 0.01, f64) } else { tunable!("ENOMOTO_T_MIP_RESTART_FAC", 0.025, f64) };
+        let fac = if self.params.restarts == 0 { tunable!("ENOMOTO_T_MIP_RESTART_FIRST_FAC", 0.01, f64) } else { rst_fac(tunable!("ENOMOTO_T_MIP_RESTART_FAC", 0.025, f64)) };
         let denom = self.restart_denom();
         newly > 0 && newly as f64 >= fac * denom as f64
     }
@@ -26625,7 +26655,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let nint = self.p.nint;
         let free = nint.saturating_sub(self.root_fixed0);
         let newly = self.newly_fixed_ints();
-        let fac = if self.params.restarts == 0 { tunable!("ENOMOTO_T_MIP_RESTART_FIRST_FAC", 0.01, f64) } else { tunable!("ENOMOTO_T_MIP_RESTART_FAC", 0.025, f64) };
+        let fac = if self.params.restarts == 0 { tunable!("ENOMOTO_T_MIP_RESTART_FIRST_FAC", 0.01, f64) } else { rst_fac(tunable!("ENOMOTO_T_MIP_RESTART_FAC", 0.025, f64)) };
         // 試作 `ENOMOTO_MIP_RSTROB` ([`rstrob_band`]): 固定の数が「根の始めに自由な整数列の frac」の帯の中なら帯の向きで決める
         // (全部の整数列の割合の条件は満たすときだけ)
         if newly as f64 >= fac * self.proto_restart_denom() as f64 {
@@ -26775,7 +26805,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let free = nint.saturating_sub(self.root_fixed0);
         let newly = self.newly_fixed_ints() + would;
         let frac = tunable!("ENOMOTO_T_MIP_LOSE6_3_CUTRESTART_FRAC", 0.1, f64);
-        let fac = if self.params.restarts == 0 { tunable!("ENOMOTO_T_MIP_RESTART_FIRST_FAC", 0.01, f64) } else { tunable!("ENOMOTO_T_MIP_RESTART_FAC", 0.025, f64) };
+        let fac = if self.params.restarts == 0 { tunable!("ENOMOTO_T_MIP_RESTART_FIRST_FAC", 0.01, f64) } else { rst_fac(tunable!("ENOMOTO_T_MIP_RESTART_FAC", 0.025, f64)) };
         (would > 0 && newly as f64 >= frac * free as f64 && newly as f64 >= fac * self.proto_restart_denom() as f64).then_some(would)
     }
 
@@ -27297,7 +27327,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // 初回は固定が 1 本でもあれば、2 回目以降は 2.5% 以上だが、その割合 (`percentageInactiveIntegers`) は前処理の後の模型の (自由な)
         // 整数列に対するもので、クリーク表の代入も数える。こちらは分母に根の始めに固定済みの列も入るので、同じ割合でも HiGHS の
         // 数え方より多くの固定が要る (physiciansched6-2 は整数列 109346 本のうち根の始めに自由なのは 4421 本。analysis/restart_thr_20261031.md の 1 節)
-        let fac = if self.params.restarts == 0 { tunable!("ENOMOTO_T_MIP_RESTART_FIRST_FAC", 0.01, f64) } else { tunable!("ENOMOTO_T_MIP_RESTART_FAC", 0.025, f64) };
+        let fac = if self.params.restarts == 0 { tunable!("ENOMOTO_T_MIP_RESTART_FIRST_FAC", 0.01, f64) } else { rst_fac(tunable!("ENOMOTO_T_MIP_RESTART_FAC", 0.025, f64)) };
         // `ENOMOTO_MIP_RESTART_FRAC_FREE` (試作): 割合の分母を、この根の始めに固定されていなかった整数列の数にする (HiGHS の
         // `percentageInactiveIntegers` は再スタート後の模型の整数列に対する割合)。再スタートの後の問題は前に固定した列を
         // 固定した列として持ったままなので、分母が全体 (h80x6320d では 6320 本) だと、自由な整数列 (約 1000 本) の 16% 近くを
@@ -27605,7 +27635,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         let mut newp = MipProblem::from_rows(glo, gup, p.cost.clone(), p.offset, p.sense_sign, p.is_int.clone(), rows, row_lo, row_up);
         // `ENOMOTO_MIP_PRBWORK` (試作、[`super::prbwork_on`]): 再スタートの後のプロービングを回さないとき (最後のプロービングが成果 0 のまま
         // 上限で打ち切られたとき) は、この問題の含意を渡す (再スタートの問題はこの問題を狭めたものなので、含意はそのまま成り立つ)
-        if super::prbwork_skip_restart(self.params.submip) {
+        // 試作 `ENOMOTO_MIP_RSTLOOSE` の `i` ([`rstloose`]): プロービングを回すときも含意を渡す (プロービングはそこから足していく)
+        if super::prbwork_skip_restart(self.params.submip) || (rstloose('i') && !self.params.submip) {
             newp.conflict_edges = p.conflict_edges.clone();
         }
         // 診断用 (`ENOMOTO_MIP_DEBUG_DUMP_RESTART=接頭辞`): 再スタートで渡す問題を `接頭辞_r回数.mps` に書く
@@ -27664,7 +27695,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
         // `ENOMOTO_MIP_RESTART_ROOT_CUTS` の `p` (試作): カットを問題の行にする経路でも、カットプールを新しい求解のプールに渡す
         // (固定された列は代入して右辺に移す。項が無くなったものは捨てる)
         let tree_carry = self.force_restart && self.nodes > 1 && treeeff('p');
-        if cuts_as_rows && (restart_root_cuts('p') || tree_carry) && !self.cut_pool.is_empty() {
+        if cuts_as_rows && (restart_root_cuts('p') || tree_carry || (rstloose('p') && !self.params.submip)) && !self.cut_pool.is_empty() {
             let pc: Vec<(Vec<(usize, f64)>, f64)> = self
                 .cut_pool
                 .iter()
@@ -27711,7 +27742,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 木の中の再スタートで、今の pseudocost を再スタート後の求解の初めの pseudocost にする
         // (前処理の後の列へ写すのは [`super::solve_problem`] の中、受け取りは [`Self::run`])
-        if tree_carry {
+        // 試作 `ENOMOTO_MIP_RSTLOOSE` の `c` ([`rstloose`]): 根の再スタートでも、観測が 1 つでもあれば渡す
+        let pc_obs = rstloose('c') && !self.params.submip && {
+            let (_, _, _, su, sd) = self.pc.observation_counts();
+            su + sd > 0
+        };
+        if tree_carry || pc_obs {
             super::RESTART_PC.with(|s| *s.borrow_mut() = Some(Box::new(self.pc.clone())));
         }
         super::RESTART_HCM.with(|f| f.set(self.hcm_auto && super::restart_hcm_keep()));
@@ -31416,7 +31452,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // 試作 `ENOMOTO_MIP_OVERRUN240` の `p` (analysis/overrun240_20261127): 時間切れで終わるときは、最後の研磨にも求解の期限を渡す
                     // (期限の後に研磨の LP を 1 回解いて上限を 10〜41 秒越えていた: cuanza・neos-873061・thor50dday・dano3_5・snp-02-004-104)。
                     // 解けなければ、ほかの形と同じく見積りを足した値で返す
-                    let over_p = overrun240('p') && self.time_up();
+                    // 「時間切れ」は求解の期限を過ぎたこと (`time_up` は背景の証明・手間の上限などの内部の止めも含むので使わない)
+                    let past_deadline = self.deadline.is_some_and(|d| Instant::now() >= d);
+                    let over_p = overrun240('p') && past_deadline;
                     let dl = if over_p {
                         self.deadline
                     } else if warm == 3 && polish_final('g') {
@@ -31430,7 +31468,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     // `j`: 求解の終わりでは従のスレッドは止まっている ([`Self::join_workers`] の後) ので、研磨の LP の同時実行にスレッド数を渡す
                     // (木の主のスレッドは 1 にしてある)
                     let prev = (polish_final('j') && self.params.threads > 1).then(|| crate::simplex::mip_lp::set_cold_race_threads(self.params.threads));
-                    let r = super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), dl);
+                    // 試作 `ENOMOTO_MIP_POLISH_PRESOLVE` ([`super::polish_presolve_mode`]): LP の前処理 + 単体法で先に解く。解けなければ温めた単体法へ
+                    let pre = super::polish_presolve_mode().filter(|&m| m == 'a' || !matches!(status, MipStatus::Optimal)).map(|_| super::polish_presolved(&self.p, &mut x, z, dl));
+                    let r = match pre {
+                        Some(r @ (super::WarmPolish::Replaced(_) | super::WarmPolish::Kept)) => r,
+                        _ => super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), dl),
+                    };
                     if let Some(k) = prev {
                         crate::simplex::mip_lp::set_cold_race_threads(k);
                     }
@@ -31471,8 +31514,12 @@ impl<'a, L: MipLp> Solver<'a, L> {
                                 verified => {
                                     let t = Instant::now();
                                     let b = self.lp.basis();
-                                    let dl2 = if overrun240('p') && self.time_up() { self.deadline } else { None };
-                                    let r2 = super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), dl2);
+                                    let dl2 = if overrun240('p') && self.deadline.is_some_and(|d| Instant::now() >= d) { self.deadline } else { None };
+                                    let pre2 = super::polish_presolve_mode().filter(|&m| m == 'a' || !matches!(status, MipStatus::Optimal)).map(|_| super::polish_presolved(&self.p, &mut x, z, dl2));
+                                    let r2 = match pre2 {
+                                        Some(r @ (super::WarmPolish::Replaced(_) | super::WarmPolish::Kept)) => r,
+                                        _ => super::polish_in_problem_warm(&self.p, &mut x, z, Some(&b), dl2),
+                                    };
                                     super::WARM_POLISH[9].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                     super::WARM_POLISH[10].fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
                                     match (r2, verified) {
