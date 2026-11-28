@@ -28,6 +28,10 @@ markshare_4_0 (248404 → 240417) のノード数が変わった (目的値は�
 前の基準と全部一致する (analysis/lpgap_20261126 9.10 節)。
 2026-11-27 (4 回目): `ENOMOTO_MIP_PRR_TIGHT=o` の既定化では 6 問とも基準と一致した (道筋が変わらない) ので、`ref_default.json` は書き直していない
 (analysis/rootbound_20261126 6 節)。
+2026-11-28: `ENOMOTO_MIP_DUALEQ=1` の既定化でも 6 問とも基準と一致した (6 問の前処理で等式にする行がない) ので、`ref_default.json` は書き直していない
+(analysis/dualeq2_20261127 6 節)。
+2026-11-28 (2 回目): `ENOMOTO_MIP_RSTLOOSE=tpci` の既定化で mik-250-20-75-4 のノード数が変わった (3937 → 3287、目的値は同じ。2 回解いて同じ) ので、
+`ref_default.json` を書き直した。`ENOMOTO_MIP_RSTLOOSE=0` を引数で渡すと前の基準と全部一致する (analysis/rootrestart_20261126 10 節)。
 `--save` で今の結果を `ref_default.json` に書く (既定の道筋を変えたときだけ。理由をここに書き足す)。"""
 import json, os, subprocess, sys
 from pathlib import Path

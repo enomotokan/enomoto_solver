@@ -120,7 +120,7 @@ TIMEDEP (analysis/timedep_20261114.md) で手間の上限を問題の大きさ�
 ## 課題 PRESOLVE2: 前処理で HiGHS ほど縮まない問題 (2026-11-11 に着手、analysis/presolve2_20261111.md)
 
 - **状態: 規則ごとの差は特定した。新しい試作 `ENOMOTO_MIP_DUALEQ=1` (双対の議論で行を等式にし、縮んだときだけ使う) は 58 問 × 種 4〜6 で
-  +0.1% [−3.4%, +3.2%]・解けた +1・害なしで、次の束 (cand) の候補。既存の `SPARSIFY_LATE`・`HO3_ENUM` は 58 問の害・時間の費用で不採用。**
+  +0.1% [−3.4%, +3.2%]・解けた +1・害なしで、2026-11-28 に既定にした (analysis/dualeq2_20261127。`=0` で切)。既存の `SPARSIFY_LATE`・`HO3_ENUM` は 58 問の害・時間の費用で不採用。**
 - 差の正体 (事実): kasai = Sparsify、rococoC10 = 整数列の Aggregator (`TREE2_INTAGG`、害は既知)、net12 = Enumeration (`HO3_ENUM`)、
   neos859080 = 行の等式化 (`DUALEQ`)、mzzv11・42z・puriri = Probing (含意を使う伝播の繰り返し + かけ直し。試作を全部入れても mzzv11 7463 行対 5723)。
 - 次の手 (推測): (1) `SPARSIFY_LATE` を「疎化で行が消える (1 列の行になる) ときだけ」に絞れば kasai の効き目を残して air03・nubu・nw04 の害を避けられるかもしれない。

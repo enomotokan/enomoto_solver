@@ -1155,8 +1155,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     par4_helpers: Vec<(char, std::thread::JoinHandle<MipResult>, std::sync::Arc<std::sync::atomic::AtomicBool>, std::sync::Arc<std::sync::Mutex<Vec<Vec<f64>>>>)>,
     /// `PAR4ROLE` の `b` で手伝いに出した根のヒューリスティクス ([`heur_bit`] のビット。主はこれを飛ばす)
     par4_delegated: u64,
-    /// `PAR4ROLE` の数え: [`a` の手伝いの数, `b` の手伝いの数, 受け取った解の数, そのうち暫定解になった数]
-    par4_stats: [u64; 4],
+    /// `PAR4ROLE` の `s`: 並列のサブ MIP を待つ間に主がヒューリスティクスを回している (待っているサブ MIP が全部終わったら [`Self::time_up`] で止める)
+    p4s_active: bool,
+    /// `PAR4ROLE` の数え: [`a` の手伝いの数, `b` の手伝いの数, 受け取った解の数, そのうち暫定解になった数, `s` で回した数, そのうち解を見つけた数]
+    par4_stats: [u64; 6],
     /// 試作 `ENOMOTO_MIP_OBJSHAVE` の下界の専任スレッド ([`Solver::spawn_objshave`])
     shave: Option<ObjShave>,
     /// 試作 `ENOMOTO_MIP_OBJSHAVE=d` の判定の状態 (主だけ、[`Solver::objshave_decide`])
@@ -4767,6 +4769,11 @@ pub(super) struct ShaveDecide {
 ///   (局所探索・ダイビング 3 種・Feasibility Pump) を、手伝いごとに始めをずらして回す。主が根のヒューリスティクスを終えたら止める
 /// - `b` (根のヒューリスティクスの並列): 主が順に回す根のヒューリスティクスのうち、LP 解からの重い丸め ([`PAR4_B_STEPS`]: int shifting・
 ///   randomized rounding・interior rounding) を、1 つずつ手伝いのスレッドに出し、主は飛ばして先へ進む。結果は根のヒューリスティクスの終わりで待って受け取る
+/// - `w` (6 節): 背景のカットの決定的な待ち ([`BgDeterm`]) の上限 (安全網) を、σ(ln(b / i)) = b / (b + i) 倍にする
+///   (b = 待つ間に動いているスレッド、i = スレッド数 − b)
+/// - `s` (6 節): 外側の根で並列のサブ MIP を全部待つ間 ([`Solver::join_submips`])、眠る代わりに主が解発見スレッドの並びを 1 つずつ回す。
+///   待っているサブ MIP が全部終わる (か一時停止する) と、回しているものも [`Solver::time_up`] で止める (待ちより長く根を延ばさない)
+/// - `d` (6.4 節、`s` の直し): `s` から局所探索を外し、ダイビング 3 種と Pump だけを回す (局所探索は `time_up` を見ず、P で `s` の害の元だった)
 pub(super) fn par4role(c: char) -> bool {
     static V: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     V.get_or_init(|| env_str!("ENOMOTO_MIP_PAR4ROLE").map(|v| v.to_string()).filter(|v| v != "0")).as_ref().is_some_and(|v| v.contains(c))
@@ -5112,7 +5119,7 @@ pub(crate) fn rootrestart2(c: char) -> bool {
 }
 
 /// 試作 `ENOMOTO_MIP_RSTLOOSE=文字` (既定では使わない。analysis/rootrestart_20261126/README.md の 10 節): 根の再スタートの閾値をなるべく緩めに
-/// そろえ、再スタートで失うものを減らす。値の読み方は [`rr2_letters`] と同じ (`none`・`0`・`off` はオフ、`1` は `t` だけ)。
+/// そろえ、再スタートで失うものを減らす。**既定は `tpci`** (未設定のとき)。値の読み方は [`rr2_letters`] と同じ (`none`・`0`・`off` はオフ、`1` は `t` だけ)。
 /// - `t`: 再スタートの固定の割合の閾値を、場面によらず既存の最も緩い値 (根の最後の 1 回目の `ENOMOTO_T_MIP_RESTART_FIRST_FAC`、0.01) にそろえる
 ///   ([`rst_fac`])。対象は根の最後の 2 回目以降 (`RESTART_FAC` 0.025)、早めの再スタート (`EARLY_RESTART_FRAC` 0.025)、
 ///   木の中 (`TREE_RESTART_FRAC` 0.05・`TREE_RESTART_INC2_FRAC` 0.1)。分母 (全部の整数列か、根の始めに自由な整数列か) は今のまま
@@ -5121,7 +5128,8 @@ pub(crate) fn rootrestart2(c: char) -> bool {
 /// - `i`: プロービングの含意 (`conflict_edges`、クリーク表の辺) を新しい問題に渡す (新しいプロービングはそこから足していく)
 /// `c`・`i` を渡すと再スタートの後の固定列の落とし (`RESTART_DROP_FIXED`) は使われない ([`super::restart_drop_fixed`])。
 pub(crate) fn rstloose(c: char) -> bool {
-    let v = env_str!("ENOMOTO_MIP_RSTLOOSE");
+    // 既定は tpci (利用者の承認、README 10 節)。`0`・`off` (と `none`) で従来の形に戻る
+    let v = env_def!("ENOMOTO_MIP_RSTLOOSE", "tpci");
     rr2_letters(v, c) || (c == 't' && v.map(str::trim) == Some("1"))
 }
 
@@ -6469,7 +6477,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         find_stop: None,
         par4_helpers: Vec::new(),
         par4_delegated: 0,
-        par4_stats: [0; 4],
+        p4s_active: false,
+        par4_stats: [0; 6],
         shave: None,
         shave_dec: ShaveDecide::default(),
         rens_succ: (0.0, 0),
@@ -7987,6 +7996,7 @@ impl<'a, L: MipLp> Solver<'a, L> {
             || self.sublb_reached()
             || memcap_level() >= 3
             || (self.snap.is_some() && FIND_STOP.with(|f| f.borrow().as_ref().is_some_and(|s| s.load(std::sync::atomic::Ordering::Relaxed))))
+            || (self.p4s_active && self.pending_submips.iter().all(|it| it.0.is_finished() || it.7.as_ref().is_some_and(|l| l.paused())))
             || self.pool.as_ref().is_some_and(|p| p.stop.load(std::sync::atomic::Ordering::Relaxed))
             || ROLE_POOL.with(|r| r.borrow().as_ref().is_some_and(|p| p.stop.load(std::sync::atomic::Ordering::Relaxed) || p.fin.load(std::sync::atomic::Ordering::Relaxed)))
             || self.shared.as_ref().is_some_and(|s| {
@@ -12693,7 +12703,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 試作 `ENOMOTO_MIP_T1PRIMAL` ([`super::t1primal`]): 1 スレッドで FJ + Local-MIP の組を補助のスレッドに持たせ、時間の取り分を
         // 当たった率・改善の止まった時間の割合・ギャップのシグモイドで決めて、根の終わりと木のノードで少しずつ回す
-        if super::t1primal::enabled() && mip_threads() == 1 && !self.params.submip && self.snap.is_none() && self.params.restarts == 0 && !proof_only() && self.fj_thread.is_none() && !self.root_gap_closed() {
+        // (再スタートの後も入れる。再スタートの solver は時刻を 0 から数え、解はその solver の問題の空間で試すので、取り分・貯えは
+        // 始めからやり直しになる。再スタートの前だけだと、30n20b8 は早い解 353 のあと木の再スタートで止まり、302 に届かなかった。
+        // analysis/t1primal_20261126 8 節)
+        if super::t1primal::enabled() && mip_threads() == 1 && !self.params.submip && self.snap.is_none() && !proof_only() && self.fj_thread.is_none() && !self.root_gap_closed() {
             self.t1primal_start();
             self.t1primal_tick(true);
         }
@@ -13766,6 +13779,17 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 // 試作 `ENOMOTO_MIP_ROOTSTOP` の `w`: 再スタートが見込まれる根では裏のカットを待たない (その時点の結果は取り込む)
                 if super::rootstop::on('w') && self.rootstop_skip_wait() {
                     cap = 0.0;
+                }
+                // 試作 `ENOMOTO_MIP_PAR4ROLE` の `w` ([`par4role`]): 待つ間に動いているスレッド (裏のカット 1 本と、解発見スレッド・PAR4ROLE の手伝い) を b、
+                // 遊ぶスレッド (主を含む) を i = スレッド数 − b として、待ちの上限を σ(ln(b / i)) = b / (b + i) 倍にする (遊ぶ本数が多いほど短く待つ)
+                if par4role('w') && !self.params.submip && self.snap.is_none() && self.params.threads > 1 {
+                    let busy = 1 + self.find_thread.is_some() as usize + self.par4_helpers.len();
+                    let idle = self.params.threads.saturating_sub(busy).max(1);
+                    let f = busy as f64 / (busy + idle) as f64;
+                    if self.params.verbose {
+                        eprintln!("MIP: PAR4ROLE w: background cut wait cap {cap:.2}s x {f:.3} (busy {busy}, idle {idle})");
+                    }
+                    cap *= f;
                 }
                 let cutoff = if env_def!("ENOMOTO_MIP_BG_CUTS_PROOF_STOP", "1").is_some() { self.prune_limit() } else { self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z) };
                 let z = self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z);
@@ -28066,6 +28090,11 @@ impl<'a, L: MipLp> Solver<'a, L> {
             // unitcal_7 では根の被約費用のサブ MIP が 47〜60 秒・500 ノード何も見つけず、主は 0.003% の解を持ったまま 40〜75 秒待っていた
             let sw_k = if keep == 0 && !self.params.submip && self.snap.is_none() && self.nodes <= 1 { tunable!("ENOMOTO_T_MIP_SUBWAIT", 0.0, f64) } else { 0.0 };
             let sw_cap = (sw_k * subcap_root_secs()).max(tunable!("ENOMOTO_T_MIP_SUBWAIT_MIN", 1.0, f64));
+            // 試作 `ENOMOTO_MIP_PAR4ROLE` の `s` ([`par4role`]): 外側の根で並列のサブ MIP を全部待つ間、眠る代わりに主が解発見スレッドの並び
+            // (局所探索・ダイビング 3 種・Feasibility Pump) を 1 つずつ回す (1 周したら今までどおり待つ)。見つけた解は次の回でサブ MIP に打ち切り値として渡る
+            let p4s = (par4role('s') || par4role('d')) && keep == 0 && !self.params.submip && self.snap.is_none() && self.nodes <= 1 && mip_threads() > 1 && !proof_only();
+            // `d` (`s` の直し、6.4 節): 局所探索は自分の時間の枠で走り `time_up` を見ない (待ちより長く根を延ばした) ので外し、ダイビング 3 種と Pump だけを回す
+            let mut p4s_k = if par4role('s') { 0usize } else { 1 };
             while self.pending_submips.len() > keep {
                 if sw_k > 0.0 && sw_cap.is_finite() {
                     for it in &self.pending_submips {
@@ -28174,6 +28203,37 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     Some(k) => {
                         let item = self.pending_submips.remove(k).unwrap();
                         self.take_submip(item);
+                    }
+                    None if p4s && p4s_k < 5 && !self.time_up() => {
+                        const STEPS: [&str; 5] = ["local search", "fractional diving", "vector length diving", "coefficient diving", "feasibility pump"];
+                        let name = STEPS[p4s_k];
+                        p4s_k += 1;
+                        let budget = 2 * self.root_lp_iters + 1000;
+                        let t = Instant::now();
+                        let z0 = self.incumbent.as_ref().map(|(z, _)| *z);
+                        self.heur_label = name;
+                        self.p4s_active = true;
+                        let found = match p4s_k - 1 {
+                            0 => env_str!("ENOMOTO_MIP_NO_LOCAL_SEARCH").is_none() && self.local_search_heur(),
+                            1 => self.fractional_dive(budget),
+                            2 => self.dive(super::heuristics::DiveKind::VectorLength, budget, f64::INFINITY),
+                            3 => self.dive(super::heuristics::DiveKind::Coefficient, budget, f64::INFINITY),
+                            _ => self.feasibility_pump(self.root_lp_iters),
+                        };
+                        self.p4s_active = false;
+                        self.heur_label = "";
+                        self.par4_stats[4] += 1;
+                        self.par4_stats[5] += found as u64;
+                        if self.params.verbose {
+                            eprintln!(
+                                "MIP: PAR4ROLE s: {name} while waiting for {} parallel sub-MIPs: {} ({:.2}s), incumbent {z0:?} -> {:?} ({:.2}s)",
+                                self.pending_submips.len(),
+                                if found { "found" } else { "none" },
+                                t.elapsed().as_secs_f64(),
+                                self.incumbent.as_ref().map(|(z, _)| *z),
+                                self.start.elapsed().as_secs_f64()
+                            );
+                        }
                     }
                     None => std::thread::sleep(std::time::Duration::from_millis(1)),
                 }
@@ -31859,10 +31919,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     self.relps_stats[0], self.relps_stats[1], self.relps_stats[2], self.relps_stats[3]
                 );
             }
-            if par4role('a') || par4role('b') {
+            if par4role('a') || par4role('b') || par4role('s') || par4role('d') {
                 eprintln!(
-                    "MIP: PAR4ROLE: helpers a {} b {}, helper solutions {}, accepted as incumbent {}",
-                    self.par4_stats[0], self.par4_stats[1], self.par4_stats[2], self.par4_stats[3]
+                    "MIP: PAR4ROLE: helpers a {} b {}, helper solutions {}, accepted as incumbent {}, s heuristics while waiting {} found {}",
+                    self.par4_stats[0], self.par4_stats[1], self.par4_stats[2], self.par4_stats[3], self.par4_stats[4], self.par4_stats[5]
                 );
             }
             if sbdegen_on() {
