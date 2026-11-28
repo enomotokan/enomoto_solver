@@ -12703,7 +12703,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 試作 `ENOMOTO_MIP_T1PRIMAL` ([`super::t1primal`]): 1 スレッドで FJ + Local-MIP の組を補助のスレッドに持たせ、時間の取り分を
         // 当たった率・改善の止まった時間の割合・ギャップのシグモイドで決めて、根の終わりと木のノードで少しずつ回す
-        if super::t1primal::enabled() && mip_threads() == 1 && !self.params.submip && self.snap.is_none() && self.params.restarts == 0 && !proof_only() && self.fj_thread.is_none() && !self.root_gap_closed() {
+        // (再スタートの後も入れる。再スタートの solver は時刻を 0 から数え、解はその solver の問題の空間で試すので、取り分・貯えは
+        // 始めからやり直しになる。再スタートの前だけだと、30n20b8 は早い解 353 のあと木の再スタートで止まり、302 に届かなかった。
+        // analysis/t1primal_20261126 8 節)
+        if super::t1primal::enabled() && mip_threads() == 1 && !self.params.submip && self.snap.is_none() && !proof_only() && self.fj_thread.is_none() && !self.root_gap_closed() {
             self.t1primal_start();
             self.t1primal_tick(true);
         }
