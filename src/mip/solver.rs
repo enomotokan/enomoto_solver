@@ -1159,6 +1159,10 @@ pub(super) struct Solver<'a, L: MipLp> {
     par4_delegated: u64,
     /// `PAR4ROLE` の `a` (7 節): 手伝いと分け合う配分の量
     par4_sh: Option<std::sync::Arc<Par4Shared>>,
+    /// `PAR4ROLE` の `a`: 手伝いに使える空いたスレッドの数 (7.5 節。手伝いはカットの周ごとに少しずつ立てる)
+    par4_free: usize,
+    /// `PAR4ROLE` の `a`: 手伝いを立てる手間の目安 c (求解の始めからカットの周に入るまでの秒)
+    par4_c: f64,
     /// `PAR4ROLE` の `s`: 並列のサブ MIP を待つ間に主がヒューリスティクスを回している (待っているサブ MIP が全部終わったら [`Self::time_up`] で止める)
     p4s_active: bool,
     /// `PAR4ROLE` の数え: [`a` の手伝いの数, `b` の手伝いの数, 受け取った解の数, そのうち暫定解になった数, `s` で回した数, そのうち解を見つけた数]
@@ -6678,6 +6682,8 @@ fn solve_with<L: MipLp>(p: &MipProblem, params: MipParams, snap: Option<std::syn
         par4_delegated: 0,
         p4s_active: false,
         par4_sh: None,
+        par4_free: 0,
+        par4_c: 0.0,
         par4_stats: [0; 6],
         shave: None,
         shave_dec: ShaveDecide::default(),
@@ -12728,14 +12734,16 @@ impl<'a, L: MipLp> Solver<'a, L> {
         if par4role('a') && mip_threads() > 1 && !self.params.submip && self.snap.is_none() && self.params.restarts == 0 && !proof_only() && !self.fractional(&x_root0).is_empty() {
             let free = self.params.threads.saturating_sub(1 + self.fj_thread.is_some() as usize);
             if free > 0 {
+                // 7.5 節: 手伝いはここでは立てない。カットの周ごとに [`Self::par4_publish`] で、カットの周の始めからの秒 t と、手伝いを立てる手間の
+                // 目安 c (求解の始めからカットの周に入るまでの秒 = 前処理と根の LP。根の LP の秒だけでは短い問題で 0.002 秒になり、すぐ全部立った) から、
+                // 空いた本数 × σ(ln(t / c)) = t / (t + c) 本 (四捨五入) まで立てる
                 let lb = self.lp.objective() + self.p.offset;
                 let sh = std::sync::Arc::new(Par4Shared::new(lb, self.incumbent.as_ref().map_or(f64::INFINITY, |(z, _)| *z)));
                 self.par4_sh = Some(sh);
+                self.par4_free = free;
+                self.par4_c = self.start.elapsed().as_secs_f64();
                 if self.params.verbose {
-                    eprintln!("MIP: PAR4ROLE a: free threads {free}, helpers {free} ({:.2}s)", self.start.elapsed().as_secs_f64());
-                }
-                for i in 0..free {
-                    self.par4_spawn('a', PAR4_ALLOC, i as u8, root_iters);
+                    eprintln!("MIP: PAR4ROLE a: free threads {free}, helpers started later by t / (t + c) (c = time to the root cuts {:.3}s, root LP {:.3}s) ({:.2}s)", self.par4_c, self.root_lp_secs, self.start.elapsed().as_secs_f64());
                 }
             }
         }
@@ -29479,11 +29487,23 @@ impl<'a, L: MipLp> Solver<'a, L> {
     }
 
     /// `PAR4ROLE` の `a`: 主の根のカットの周の後の下界 (最小化形、定数項込み) と暫定解を手伝いに知らせる
-    pub(super) fn par4_publish(&self, lb: f64) {
-        if let Some(sh) = self.par4_sh.as_ref() {
-            sh.publish_lb(lb);
-            if let Some((z, _)) = self.incumbent.as_ref() {
-                sh.offer_inc(*z);
+    pub(super) fn par4_publish(&mut self, lb: f64) {
+        let Some(sh) = self.par4_sh.clone() else { return };
+        sh.publish_lb(lb);
+        if let Some((z, _)) = self.incumbent.as_ref() {
+            sh.offer_inc(*z);
+        }
+        // 7.5 節: 手伝いを、空いた本数 × t / (t + c) 本まで立てる (t はカットの周の始めからの秒、c は根の LP の秒)
+        let spawned = self.par4_helpers.iter().filter(|h| h.0 == 'a').count();
+        if spawned < self.par4_free {
+            let t = sh.t0.elapsed().as_secs_f64();
+            let c = self.par4_c.max(self.root_lp_secs).max(1e-6);
+            let target = ((self.par4_free as f64) * t / (t + c)).round() as usize;
+            if target > spawned && self.params.verbose {
+                eprintln!("MIP: PAR4ROLE a: t {t:.3}s, c {c:.3}s, helpers {spawned} -> {target} ({:.2}s)", self.start.elapsed().as_secs_f64());
+            }
+            for i in spawned..target.min(self.par4_free) {
+                self.par4_spawn('a', PAR4_ALLOC, i as u8, self.root_lp_iters);
             }
         }
     }
