@@ -1,10 +1,11 @@
-"""既定 (logs/<問題>_t4.*) と試作 (logs/<問題>_t4_<値>.*) を並べる: python compare.py <値> > compare_<値>.txt
+"""既定 (logs/<問題>_t4.*) と試作 (logs/<問題>_t4_<値>.*) を並べる: python compare.py <値> [<基準のタグ>] > compare_<値>.txt
 (.gz は先に解いておく: gunzip -k logs/*.gz)。全体の秒、根の秒と本数、木の秒と本数、根の遊び (スレッド秒)、PAR4ROLE の数え。
 区間の分け方は phases.py と同じ (根 = 最後の「TRSTAT: tree start」まで)"""
 import json, math, re, sys
 from pathlib import Path
 D = Path(__file__).resolve().parent; L = D / "logs"
 V = sys.argv[1]
+B = sys.argv[2] if len(sys.argv) > 2 else ""  # 基準のタグ (例 0 = 同じビルドの既定)。空なら logs/<問題>_t4.* (3 節の回)
 def phases(name, th):
     rows = [json.loads(l) for l in open(L / f"{name}.cpu.jsonl")]
     log = (L / f"{name}.log").read_text(errors="replace")
@@ -27,7 +28,7 @@ def stat(log):
 print(f"{'問題':20} {'既定 秒':>8} {V + ' 秒':>8} {'比':>5} | {'根 秒 既定→' + V:>16} {'本数':>9} | {'木 秒':>13} {'本数':>9} | {'根の遊び':>13} | PAR4ROLE (a b 解 採用)")
 lr = []; idle = [0.0, 0.0]
 for p in P:
-    a, b = f"{p}_t4", f"{p}_t4_{V}"
+    a, b = (f"{p}_t4_{B}" if B else f"{p}_t4"), f"{p}_t4_{V}"
     if not (L / f"{b}.log").exists(): continue
     ra, rb = phases(a, 4), phases(b, 4)
     la, lb = (L / f"{a}.log").read_text(errors="replace"), (L / f"{b}.log").read_text(errors="replace")
