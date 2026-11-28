@@ -38,12 +38,12 @@ git add analysis/overrun240_20261127/P/res_sK.jsonl && git commit -m "overrun240
 git fetch origin ccr-1beed81b-ex0uhq && git merge --no-edit FETCH_HEAD && git push -u origin ccr-1beed81b-ex0uhq
 ```
 
-## 回す前の確かめ (組んだ後に 1 回、約 1 分)
+## 回す前の確かめ (組んだ後に 1 回、約 1 分。cuanza は根で時間が尽きて木に入らないので、木に入る neos5 を使う)
 
 組んだ機械で試作が動くかを見る (GGo5 の機械は別の計測中で、まだ組めていないため)。
 
 ```bash
-ENOMOTO_MIP_POLISH_BG=i ENOMOTO_MIP_POLISH_STATS=v ENOMOTO_MIP_THREADS=2 python scripts/run_miplib_benchmark.py --worker-ours .miplib_cache/neos-5049753-cuanza.mps --time-limit 40 --threads 2 2>&1 | grep -E "POLISH_BG|^\{"
+ENOMOTO_MIP_POLISH_BG=i ENOMOTO_MIP_POLISH_STATS=v ENOMOTO_MIP_THREADS=2 python scripts/run_miplib_benchmark.py --worker-ours .miplib_cache/neos5.mps --time-limit 40 --threads 2 2>&1 | grep -E "POLISH_BG|^\{"
 ```
 
 - 期待: `MIP: POLISH_BG: posted … started … solved …` の行と、結果の JSON。
