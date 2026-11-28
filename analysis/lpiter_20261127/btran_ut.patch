@@ -1,0 +1,151 @@
+diff --git a/src/simplex/lu.rs b/src/simplex/lu.rs
+index 33f5f1367..1645ce774 100644
+--- a/src/simplex/lu.rs
++++ b/src/simplex/lu.rs
+@@ -4012,6 +4012,14 @@ fn btran_tin() -> f64 {
+     *V.get_or_init(|| if env_str!("ENOMOTO_LU_BTRAN_TINY").is_some_and(|v| v != "0") { 1e-14 } else { 0.0 })
+ }
+ 
++/// 試作 `ENOMOTO_LU_BTRAN_UT` (既定オフ、analysis/lpiter_20261127 10 節): BTRAN の `U^T` の全走査 (`u_transpose_sweep*`) で、散布した行ごとに
++/// 不可分加算していた tick を関数の中で足し合わせて最後に 1 回だけ加える (合計・結果は同じ。超疎の経路 `u_transpose_sweep_heap` と同じ形)
++#[inline]
++fn btran_ut_fast() -> bool {
++    static V: OnceLock<bool> = OnceLock::new();
++    *V.get_or_init(|| env_str!("ENOMOTO_LU_BTRAN_UT").is_some_and(|v| v != "0"))
++}
++
+ /// 試作 `ENOMOTO_LU_BTRAN_OUT` (既定オフ、analysis/lpiter_20261127 9 節): BTRAN の全走査経路の `O(m)` の走査 (出力の並べ替えと非ゼロの記録
+ /// ([`permute_btran_out_capture`])、`L^T` 段の前の非ゼロの数え上げ) を分岐の少ない形にする。結果はビット一致
+ #[inline]
+@@ -5257,6 +5265,9 @@ impl FtLu {
+         }
+         // CLOCK トリガ用: 全スロット走査の `m` と、散布した各行の長さを tick に加える。
+         self.add_tick_m(self.base.m as u64);
++        // 試作 `ENOMOTO_LU_BTRAN_UT`: 散布した行の長さの tick を関数の中で足し合わせ、最後に 1 回だけ加える (合計は同じ)
++        let ut = btran_ut_fast();
++        let mut tk = 0u64;
+         // シングルトンが先 (そのスロットに書く eta は無いので値は掃引前に確定)。
+         for (p, pivot) in self.u_transpose_order() {
+             let zp = z[p];
+@@ -5266,7 +5277,11 @@ impl FtLu {
+             let zp = zp / pivot;
+             z[p] = zp;
+             let orow = self.row_owners.row(p);
+-            self.add_tick(orow.len() as u64);
++            if ut {
++                tk += orow.len() as u64;
++            } else {
++                self.add_tick(orow.len() as u64);
++            }
+             for (&q, &v) in orow.idx.iter().zip(orow.val) {
+                 z[q as usize] -= v * zp;
+             }
+@@ -5277,6 +5292,9 @@ impl FtLu {
+                 }
+             }
+         }
++        if ut {
++            self.add_tick(tk);
++        }
+     }
+ 
+     /// 全 `U` eta の `(スロット, ピボット)` を `U^T` 順 (シングルトン → `u_seq` の作成順) で返す。
+@@ -5298,6 +5316,9 @@ impl FtLu {
+         // まだ記録を続けているか
+         let mut ok = true;
+         self.add_tick_m(self.base.m as u64);
++        // 試作 `ENOMOTO_LU_BTRAN_UT`: 散布した行の長さの tick を関数の中で足し合わせ、最後に 1 回だけ加える (合計は同じ)
++        let ut = btran_ut_fast();
++        let mut tk = 0u64;
+         for (p, pivot) in self.u_transpose_order() {
+             let zp = z[p];
+             if zp == 0.0 || bt_drop(&mut z[p]) {
+@@ -5306,7 +5327,11 @@ impl FtLu {
+             let zp = zp / pivot;
+             z[p] = zp;
+             let orow = self.row_owners.row(p);
+-            self.add_tick(orow.len() as u64);
++            if ut {
++                tk += orow.len() as u64;
++            } else {
++                self.add_tick(orow.len() as u64);
++            }
+             if ok && touch.len() + orow.len() <= cap {
+                 for (&q, &v) in orow.idx.iter().zip(orow.val) {
+                     let q = q as usize;
+@@ -5337,6 +5362,9 @@ impl FtLu {
+                 }
+             }
+         }
++        if ut {
++            self.add_tick(tk);
++        }
+         ok
+     }
+ 
+@@ -5353,6 +5381,9 @@ impl FtLu {
+     #[inline(never)]
+     fn u_transpose_sweep_live(&self, z: &mut [f64]) {
+         self.add_tick_m(self.base.m as u64);
++        // 試作 `ENOMOTO_LU_BTRAN_UT`: 散布した行の長さの tick を関数の中で足し合わせ、最後に 1 回だけ加える (合計は同じ)
++        let ut = btran_ut_fast();
++        let mut tk = 0u64;
+         for (p, pivot) in self.u_transpose_order_live() {
+             let zp = z[p];
+             if zp == 0.0 || bt_drop(&mut z[p]) {
+@@ -5361,7 +5392,11 @@ impl FtLu {
+             let zp = zp / pivot;
+             z[p] = zp;
+             let orow = self.row_owners.row(p);
+-            self.add_tick(orow.len() as u64);
++            if ut {
++                tk += orow.len() as u64;
++            } else {
++                self.add_tick(orow.len() as u64);
++            }
+             for (&q, &v) in orow.idx.iter().zip(orow.val) {
+                 z[q as usize] -= v * zp;
+             }
+@@ -5372,6 +5407,9 @@ impl FtLu {
+                 }
+             }
+         }
++        if ut {
++            self.add_tick(tk);
++        }
+     }
+ 
+     /// 死んだヘッダがあるときの [`Self::u_transpose_sweep_track`] (演算・順序・tick は同じ)。
+@@ -5380,6 +5418,9 @@ impl FtLu {
+         let cap = self.base.m;
+         let mut ok = true;
+         self.add_tick_m(self.base.m as u64);
++        // 試作 `ENOMOTO_LU_BTRAN_UT`: 散布した行の長さの tick を関数の中で足し合わせ、最後に 1 回だけ加える (合計は同じ)
++        let ut = btran_ut_fast();
++        let mut tk = 0u64;
+         for (p, pivot) in self.u_transpose_order_live() {
+             let zp = z[p];
+             if zp == 0.0 || bt_drop(&mut z[p]) {
+@@ -5388,7 +5429,11 @@ impl FtLu {
+             let zp = zp / pivot;
+             z[p] = zp;
+             let orow = self.row_owners.row(p);
+-            self.add_tick(orow.len() as u64);
++            if ut {
++                tk += orow.len() as u64;
++            } else {
++                self.add_tick(orow.len() as u64);
++            }
+             if ok && touch.len() + orow.len() <= cap {
+                 for (&q, &v) in orow.idx.iter().zip(orow.val) {
+                     let q = q as usize;
+@@ -5419,6 +5464,9 @@ impl FtLu {
+                 }
+             }
+         }
++        if ut {
++            self.add_tick(tk);
++        }
+         ok
+     }
+ 

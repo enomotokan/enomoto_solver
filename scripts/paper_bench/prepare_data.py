@@ -32,8 +32,8 @@ sys.path.insert(0, str(REPO / "scripts"))
 
 from netlib_fetch import ensure_emps, ensure_mps, ensure_problem_list, fetch  # noqa: E402
 
-INFEAS_URL = "https://www.netlib.org/lp/infeas/"
-KENNINGTON_URL = "https://www.netlib.org/lp/data/kennington/"
+INFEAS_URL = "https://netlib.org/lp/infeas/"
+KENNINGTON_URL = "https://netlib.org/lp/data/kennington/"
 
 # netlib.org/lp/infeas/ の実行不能問題 (29 問)。
 INFEAS_PROBLEMS = [
