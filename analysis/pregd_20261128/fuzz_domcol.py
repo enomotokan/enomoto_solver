@@ -5,7 +5,9 @@
 import random, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+_argv = sys.argv; sys.argv = [_argv[0], "0"]  # 取り込むと台本の本体が走るので、問題数 0 で取り込む
 from mip_fuzz_vs_highs import highs, ours  # noqa: E402
+sys.argv = _argv
 inf = float("inf")
 def gen(seed):
     g = random.Random(seed); nb = g.randint(2, 8); m = g.randint(2, 8)
