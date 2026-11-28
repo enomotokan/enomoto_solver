@@ -456,7 +456,17 @@ bnatt400 で 1 割強。HiGHS (7.6) との差はまだ 2 倍あり、残りは `
 
 ### 10.6 正しさの確かめ
 
-(全部入り `rtibou` の fuzz を回している最中。終わりしだい書く。)
+全部入りの設定 (`rtibou` = `RETA_TICK=1`・`LU_TINY_HS=1i`・`BTRAN_TINY=1`・`BTRAN_OUT=1`・`BTRAN_UT=1`) で回した。
+`BTRAN_OUT` と `BTRAN_UT` は結果がビット一致なので、既定と組み合わせた形もこれで覆える。
+記録は `fuzz_rtibou.out` (`FUZZ_VENV=/usr bash analysis/comboharm_20261124/fuzz.sh rtibou ...` と `scripts/lp_fuzz_vs_highs.py`)。
+
+| 確かめ | 結果 |
+|---|---|
+| MIP の fuzz 7 本 (fuzz_tiny 400×2・fuzz_highs 300・fuzz_objint 1000×2・fuzz_slack 1000×2) | すべて不一致 0 |
+| cargo test (全部入りの環境変数) | 428 成功・0 失敗 |
+| LP の fuzz (`lp_fuzz_vs_highs.py 2000`、simplex・auto) | 2000 問ずつ不一致 0 |
+| LP の fuzz (既定、simplex) | 2000 問で不一致 0 |
+| check_default (既定、`BTRAN_UT` のビルド) | 全部一致 |
 
 ### 10.7 既定の候補の判断
 
