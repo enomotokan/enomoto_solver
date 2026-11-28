@@ -10287,7 +10287,17 @@ pub(crate) fn fix_tiny_width_columns(rows: &[Vec<(usize, f64)>], row_lo: &mut [f
         }
     }
     let mut used = vec![0.0f64; rows.len()];
-    let budget = |i: usize, row_lo: &[f64], row_up: &[f64]| if row_lo[i] == row_up[i] { 1e-9 * (1.0 + row_up[i].abs()) } else { tol };
+    // 等式の行の予算は、候補の列を固定して右辺へ移した後の右辺 `b − Σ a_ij v_j` でも測り、小さい方を使う。元の右辺だけで測ると、
+    // 固定した列の項を移した後の行 (右辺が小さい) で前処理の伝播の許容誤差 `1e-9 (1 + max(Σ|項|, |b|))` を破れが越え、
+    // 実行可能な問題を実行不能と判定していた (analysis/pregd_20261128 の fuzz_domcol の種 1399: `3 x3 + 3 x4 + 2 x6 = 5.973`
+    // の x6 を 2.5e-9 ずらして固定し、右辺 3 の行の破れ 5e-9 が許容誤差 4e-9 を越えた)
+    let mut moved = vec![0.0f64; rows.len()];
+    for (c, &(_, v, _)) in cand.iter().enumerate() {
+        for &(i, a) in &cols[c] {
+            moved[i] += a * v;
+        }
+    }
+    let budget = |i: usize, row_lo: &[f64], row_up: &[f64]| if row_lo[i] == row_up[i] { 1e-9 * (1.0 + row_up[i].abs().min((row_up[i] - moved[i]).abs())) } else { tol };
     let mut fixed = 0;
     for (c, &(j, v, s)) in cand.iter().enumerate() {
         if cols[c].iter().any(|&(i, a)| used[i] + a.abs() * s > budget(i, row_lo, row_up)) {
