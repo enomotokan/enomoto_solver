@@ -3021,10 +3021,15 @@ impl PolishBg {
             static LAST: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
             static RNG: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
         }
-        let Some(dl) = deadline else { return false };
         if self.ver.load(Ordering::Acquire) <= self.taken.load(Ordering::Acquire) {
             return false;
         }
+        // `a`: いつも取る (w = 1)
+        if polish_bg('a') {
+            self.cnt[6].fetch_add(1, Ordering::Relaxed);
+            return self.run(deadline);
+        }
+        let Some(dl) = deadline else { return false };
         let now = Instant::now();
         let est = f64::from_bits(self.est.load(Ordering::Relaxed)).max(1e-3);
         if LAST.with(|l| l.get()).is_some_and(|t| now.duration_since(t).as_secs_f64() < est) {
@@ -32967,10 +32972,12 @@ fn sb_objprop() -> bool {
 /// 試作 `ENOMOTO_MIP_POLISH_BG` ([`PolishBg`]、既定では使わない。analysis/overrun240_20261127 の 9 節): 2 スレッド以上の木で、暫定解の研磨を
 /// 裏で回し、返すときの最後の研磨の待ちを消す。値の文字で部品を選ぶ。
 /// `i` = 共有の待ち行列でノードを待っている従のスレッドが研磨を取る (働いているスレッドからは取らない)。
-/// `w` (`i` を含む、2 段目、利用者の承認 2026-11-28) = 加えて、働いている従のスレッドもノードの合間に重みで取る ([`PolishBg::maybe_run_busy`])
+/// `w` (`i` を含む、2 段目、利用者の承認 2026-11-28) = 加えて、働いている従のスレッドもノードの合間に重みで取る ([`PolishBg::maybe_run_busy`])。
+/// `a` (`w` の比べる相手、利用者の承認 2026-11-28) = 働いている従のスレッドが、取られていない頼みを見たらいつも取る (w を常に 1、期限がなくても取る)
 fn polish_bg(c: char) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     V.get_or_init(|| match env_str!("ENOMOTO_MIP_POLISH_BG") {
+        Some(v) if v.contains('a') => format!("{v}wi"),
         Some(v) if v.contains('w') => format!("{v}i"),
         Some(v) if v != "0" && v != "off" => v.to_string(),
         _ => String::new(),
