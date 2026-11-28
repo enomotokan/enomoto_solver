@@ -9,6 +9,10 @@ sys.path.insert(0, str(WT / "scripts"))
 import run_miplib_benchmark as rb  # noqa: E402
 PROBS = ["neos-5114902-kasavu", "neos-5049753-cuanza", "neos-873061", "thor50dday", "dano3_5", "snp-02-004-104"]
 CFGS = {"def": {}, "p": {"ENOMOTO_MIP_OVERRUN240": "p"}}
+# 最終候補 (7 節): 先端 (7d43fcdac 以降) を merge したビルドで回す
+CFGS["pp1"] = {"ENOMOTO_MIP_POLISH_PRESOLVE": "1", "ENOMOTO_MIP_OVERRUN240": "p"}
+# 直し (A) (8 節): /home/user/es_ovr のビルドを PYTHONPATH=/home/user/es_ovr/python で使って回す。研磨の秒を見るため POLISH_STATS=v の行を取っておく
+CFGS["ppA"] = {"ENOMOTO_MIP_POLISH_PRESOLVE": "1", "ENOMOTO_MIP_OVERRUN240": "p", "ENOMOTO_MIP_POLISH_STATS": "v"}
 OUT = D / "res_v.jsonl"
 done = set()
 if OUT.exists():
@@ -30,9 +34,11 @@ for tl in (120, 600):
                                         cwd=WT, env=env, capture_output=True, text=True, timeout=tl + 300)
                     res = [l for l in pr.stdout.splitlines() if l.startswith("{")]
                     result = json.loads(res[-1]) if res else {"status": "crash"}
+                    pol = [l for l in pr.stderr.splitlines() if "POLISH" in l][-6:]
                 except subprocess.TimeoutExpired:
                     result = {"status": "killed"}
-                row = {"problem": p, "cfg": c, "threads": th, "tl": tl, "wall": round(time.time() - t0, 1), "result": result}
+                    pol = []
+                row = {"problem": p, "cfg": c, "threads": th, "tl": tl, "wall": round(time.time() - t0, 1), "result": result, **({"polish": pol} if pol else {})}
                 with open(OUT, "a") as f:
                     f.write(json.dumps(row) + "\n")
                 print(p, c, th, tl, result.get("status"), result.get("time"), result.get("objective"), row["wall"], flush=True)
