@@ -4764,8 +4764,10 @@ pub(super) struct ShaveDecide {
     n: u64,
 }
 
-/// 試作 `ENOMOTO_MIP_PAR4ROLE` (既定では使わない、analysis/par4role_20261127 の 5 節): 4 スレッドの根で遊んでいるスレッドを使う。2 スレッド以上の外側の求解だけで働く
-/// (1 スレッドの道筋は変えない)。
+/// `ENOMOTO_MIP_PAR4ROLE` (analysis/par4role_20261127 の 5・6 節): 4 スレッドの根で遊んでいるスレッドを使う。2 スレッド以上の外側の求解だけで働く
+/// (1 スレッドの道筋は変えない)。**2026-11-28 に `d` を既定にした (利用者の判断、方針「中立なら入れる」)**: 未設定は `d`、`0`・`off` で使わない (従来の形)。
+/// 値を渡すとその文字だけになる (`d` と一緒に使うなら `ad` のように書く)。根拠: P の 4T (58 問 × 種 1〜3、60 秒) で 1.010 [0.988, 1.040]・解けた数 141 / 141・
+/// 食い違い 0、supportcase7・CMS750_4 (4T・600 秒・種 1〜3) で 0.980・0.977 (6.4・6.5 節)。`a`・`b`・`s`・`w` は既定では使わない。
 /// - `a` (根の手伝い): 根の LP の後、カットの周の前に、空いたスレッド (スレッド数 − 主 − FJ のスレッド) の w = σ(ln(g / rel_gap)) 倍 (四捨五入) の手伝いを出す。
 ///   g は暫定解と根の LP の相対ギャップ (暫定解がなければ 1)、rel_gap は終わりの判定の相対ギャップ。手伝いは根の写しで解発見スレッドの並び
 ///   (局所探索・ダイビング 3 種・Feasibility Pump) を、手伝いごとに始めをずらして回す。主が根のヒューリスティクスを終えたら止める
@@ -4777,8 +4779,7 @@ pub(super) struct ShaveDecide {
 ///   待っているサブ MIP が全部終わる (か一時停止する) と、回しているものも [`Solver::time_up`] で止める (待ちより長く根を延ばさない)
 /// - `d` (6.4 節、`s` の直し): `s` から局所探索を外し、ダイビング 3 種と Pump だけを回す (局所探索は `time_up` を見ず、P で `s` の害の元だった)
 pub(super) fn par4role(c: char) -> bool {
-    static V: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    V.get_or_init(|| env_str!("ENOMOTO_MIP_PAR4ROLE").map(|v| v.to_string()).filter(|v| v != "0")).as_ref().is_some_and(|v| v.contains(c))
+    env_def!("ENOMOTO_MIP_PAR4ROLE", "d").is_some_and(|v| v.contains(c))
 }
 
 /// `ENOMOTO_MIP_PAR4ROLE` の `b` で手伝いに出す根のヒューリスティクス (名前、[`PAR4_STEPS`] のビット)
