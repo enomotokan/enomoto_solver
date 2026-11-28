@@ -2893,6 +2893,8 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             let early = FEAS_FJ_SOL.with(|s| s.borrow_mut().take()).filter(|x| x.len() == prob.n && prob.is_feasible(x, 1e-6));
             let early_sol = early.is_some();
             let prob = if early_sol { prob } else if env_str!("ENOMOTO_MIP_NO_CLIQUE_EXTEND").is_none() && (!params.submip || env_str!("ENOMOTO_MIP_CLIQUE_EXTEND_SUBMIP").is_some() || submip_highs('p')) { extend_clique_rows(prob, params.verbose) } else { prob };
+            // 試作 `ENOMOTO_MIP_ROWCLEAN` (既定オフ、analysis/presize240_20261127 の 7 節): 列の境界だけで両辺が満たされる行 (全部の列が固定された行を含む) を落とす
+            let prob = if rowclean_on() && !early_sol { drop_redundant_rows(prob, params.verbose) } else { prob };
             // 診断用: クリーク行の拡張の後の問題 (`ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED2=ファイル`)
             if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED2").filter(|_| !params.submip && params.restarts == 0) {
                 dump_mps(&prob, &f);
@@ -4808,6 +4810,53 @@ fn g5clq_rss(tag: &str) {
     }
 }
 
+/// 試作 `ENOMOTO_MIP_ROWCLEAN` (既定オフ、analysis/presize240_20261127 の 7 節) を使うか
+pub(crate) fn rowclean_on() -> bool {
+    env_str!("ENOMOTO_MIP_ROWCLEAN").is_some_and(|v| v != "0" && v != "off")
+}
+
+/// 試作 `ENOMOTO_MIP_ROWCLEAN`: 前処理の後の最後のプロービング・列挙の固定 (ここでは前処理をかけ直さない) で、列の境界だけで
+/// 両辺が満たされるようになった行 (全部の列が固定された行を含む) を落とす。ex9 は最後のプロービングが 1250 列を固定し、
+/// 自由な列 196 本に対して 13727 行が根の LP に残っていた (HiGHS・SCIP は前処理で空)。行の活動の最小が下限以上、最大が上限以下
+/// (許容 1e-9 (1 + |端|)) の行だけを落とすので、どの点の実行可能性も変わらず、後処理は要らない (列の境界はそのまま)。
+/// 全部の列が固定されて破れている行は残す (実行不能の判定は LP に任せる)。落とした行の数が 0 なら問題をそのまま返す
+fn drop_redundant_rows(prob: MipProblem, verbose: bool) -> MipProblem {
+    let t0 = std::time::Instant::now();
+    let tol = |b: f64| 1e-9 * (1.0 + b.abs());
+    let keep: Vec<bool> = (0..prob.m)
+        .map(|i| {
+            let (mut lo, mut up) = (0.0f64, 0.0f64);
+            for &(j, a) in &prob.rows[i] {
+                let (l, u) = (prob.col_lo[j], prob.col_up[j]);
+                let (x, y) = if a > 0.0 { (a * l, a * u) } else { (a * u, a * l) };
+                lo += if x.is_nan() { f64::NEG_INFINITY } else { x };
+                up += if y.is_nan() { f64::INFINITY } else { y };
+            }
+            let ok_lo = prob.row_lo[i] == f64::NEG_INFINITY || (lo.is_finite() && lo >= prob.row_lo[i] - tol(prob.row_lo[i]));
+            let ok_up = prob.row_up[i] == f64::INFINITY || (up.is_finite() && up <= prob.row_up[i] + tol(prob.row_up[i]));
+            !(ok_lo && ok_up)
+        })
+        .collect();
+    let dropped = keep.iter().filter(|&&k| !k).count();
+    if verbose {
+        eprintln!("MIP: ROWCLEAN: dropped {dropped} of {} rows implied by the column bounds ({:.3}s)", prob.m, t0.elapsed().as_secs_f64());
+    }
+    if dropped == 0 {
+        return prob;
+    }
+    let MipProblem { col_lo, col_up, cost, offset, sense_sign, is_int, rows, row_lo, row_up, conflict_edges, implied_bounds, .. } = prob;
+    let mut it = keep.iter();
+    let rows: Vec<_> = rows.into_iter().filter(|_| *it.next().unwrap()).collect();
+    let mut it = keep.iter();
+    let row_lo: Vec<_> = row_lo.into_iter().filter(|_| *it.next().unwrap()).collect();
+    let mut it = keep.iter();
+    let row_up: Vec<_> = row_up.into_iter().filter(|_| *it.next().unwrap()).collect();
+    let mut q = MipProblem::from_rows(col_lo, col_up, cost, offset, sense_sign, is_int, rows, row_lo, row_up);
+    q.conflict_edges = conflict_edges;
+    q.implied_bounds = implied_bounds;
+    q
+}
+
 fn extend_clique_rows(prob: MipProblem, verbose: bool) -> MipProblem {
     let _pt = pretime::guard("clqext");
     g5clq_rss("start");
@@ -6495,7 +6544,7 @@ fn represolve_after_probe(prob: MipProblem, mut postsolve: Vec<crate::presolve::
     }
     // `ENOMOTO_MIP_ENUM_ADAPT` ([`enum_adapt_on`]): 締め付けでのかけ直し (と 0.0008 の打ち切り) を使うかを、直前の列挙の繰り返し全体の得と時間から
     // シグモイドで決める ([`enum_adapt_continue`])。使わないときは既定のかけ直しの規則 (固定の本数・行の減り方) に戻す
-    if tight && enum_adapt_on() && prr_active(submip) {
+    if tight && enum_adapt_on() && !enum_adapt_z() && prr_active(submip) {
         let (g, secs, el) = ENUM_LOOP_LAST.with(|c| c.get());
         tight = enum_adapt_continue(g, prob.n, secs, el, verbose, "presolve again");
     }
@@ -6505,7 +6554,7 @@ fn represolve_after_probe(prob: MipProblem, mut postsolve: Vec<crate::presolve::
     }
     if tight {
         let (gf, gt, _) = PROBE_GAIN.with(|f| f.get());
-        if gf + gt == 0 || (!enum_adapt_on() && ((gf + gt) as f64) < 0.0008 * prob.n as f64) {
+        if gf + gt == 0 || ((!enum_adapt_on() || enum_adapt_z()) && ((gf + gt) as f64) < 0.0008 * prob.n as f64) {
             if verbose {
                 eprintln!("MIP: presolve again after probing: PRR_TIGHT: stopped (probing fixed {gf}, tightened {gt} of {} columns)", prob.n);
             }
@@ -9725,10 +9774,12 @@ fn enum_adapt_continue(gain: usize, n: usize, secs: f64, el: f64, verbose: bool,
     }
     let g = gain as f64 / n.max(1) as f64;
     let c = if el.is_finite() && el > 0.0 { secs / el } else { 0.0 };
-    let s = if c > 0.0 { (g / c).log10() } else { f64::INFINITY };
+    // `z` ([`enum_adapt_z`]): `secs` は時間でなく手間 (列挙した行の列の延べ本数 [`ENUM_Z_WORK`])。s = log10(固定 / 手間) で、
+    // 得があれば続け、次の列挙で行の f の割合を列挙する (f は縮みの効率で連続に決まる)
+    let s = if enum_adapt_z() { (gain as f64 / secs.max(1.0)).log10() } else if c > 0.0 { (g / c).log10() } else { f64::INFINITY };
     let (a, b) = (tunable!("ENOMOTO_T_MIP_ENUM_ADAPT_A", 8.0, f64), tunable!("ENOMOTO_T_MIP_ENUM_ADAPT_B", -0.09, f64));
     let f = if s.is_finite() { 1.0 / (1.0 + (-(a * (s - b)).clamp(-50.0, 50.0)).exp()) } else { 1.0 };
-    let go = c <= f;
+    let go = enum_adapt_z() || c <= f;
     ENUM_ADAPT_ROWS.with(|r| r.set((go && !enum_adapt_log()).then_some(f)));
     if verbose {
         eprintln!("MIP: ENUM_ADAPT: {what}: gain {gain} of {n} columns in {secs:.2}s ({el:.2}s elapsed): g {g:.4} c {c:.4} s {s:.3} f {f:.4} -> {}", if go { "continue" } else { "stop" });
@@ -9757,7 +9808,16 @@ fn enum_adapt_midstop(gain: usize, n: usize, secs: f64, el: f64) -> bool {
 }
 
 fn enum_adapt_mid_on() -> bool {
-    enum_adapt_on() && env_str!("ENOMOTO_MIP_ENUM_ADAPT").is_some_and(|v| v.contains('s'))
+    enum_adapt_on() && env_str!("ENOMOTO_MIP_ENUM_ADAPT").is_some_and(|v| v.contains('s') || v.contains('z'))
+}
+
+/// 試作 `ENOMOTO_MIP_ENUM_ADAPT` の `z` (analysis/presize240_20261127 の 7 節): [`enum_adapt_continue`]・[`enum_adapt_midstop`] の得を、
+/// 列挙が固定した列 (縮み) だけにする (締め付け・同値な組・繰り返しのプロービングの同値な組は数えない。neos8 はプロービングの同値な組が得に数えられ、
+/// 何も固定しない繰り返しを続けて 4.6 → 8.9 秒になっていた: analysis/protoscreen_20261124 の 9.3 節)。この求解の最初の列挙は
+/// 行の数の上限と空振りの規則つき (`ENOMOTO_MIP_ENUM_PRESOLVE=1` と同じ) で回し、全部の行 (`all`) に広げるのは、その得と時間の
+/// シグモイドが続けると決めた後だけ。列挙の途中の止め (`s`) も入る。シグモイドの係数は `ENUM_ADAPT` のまま (新しい閾値は作らない)
+fn enum_adapt_z() -> bool {
+    enum_adapt_on() && env_str!("ENOMOTO_MIP_ENUM_ADAPT").is_some_and(|v| v.contains('z'))
 }
 
 fn enum_where() -> &'static str {
@@ -9789,6 +9849,8 @@ thread_local! {
     /// [`enum_adapt_on`]: この求解で最後に回した列挙の (得 = 固定・締め付け・同値な組, 秒, 始めの経過時間の秒)。次の列挙を回すかの判定に使う
     /// (再スタートの後の前処理にも引き継ぐ)
     static ENUM_STEP_LAST: std::cell::Cell<Option<(usize, f64, f64)>> = const { std::cell::Cell::new(None) };
+    /// `ENUM_ADAPT` の `z` ([`enum_adapt_z`]): 列挙の手間 (列挙した行の、固定されていない列の延べ本数) の累計
+    static ENUM_Z_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// `ENOMOTO_MIP_ENUM_WHERE=loop` ([`enum_where`]): [`probe`] (中でプロービングと列挙) を、新しい固定・締め付け・同値な組・衝突の組が出なくなるまで繰り返す。
@@ -9806,6 +9868,7 @@ fn enum_probe_loop(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option
         it += 1;
         ENUM_GAIN.with(|g| g.set((0, 0, 0, 0)));
         let (tr, el) = (std::time::Instant::now(), enum_elapsed());
+        let w0 = ENUM_Z_WORK.with(|w| w.get());
         let r = probe(prob, verbose, submip);
         if r == Some(false) {
             break Some(false);
@@ -9829,13 +9892,15 @@ fn enum_probe_loop(prob: &mut MipProblem, verbose: bool, submip: bool) -> Option
         }
         // 次の周の材料になる成果: 固定・締め付け (列挙とプロービング。定義域が変わると次のプロービング・列挙が新しく見つけうる) と列挙の同値な組。
         // プロービングの同値な組は、1 周目は既定でも見つかるので数えず、2 周目からは数える
-        let gain = gf + gt + ef + et + ee + if it == 1 { 0 } else { new_eq };
+        // `z` ([`enum_adapt_z`]): 得は列挙の固定と、2 周目からのプロービングの固定だけ (縮み)
+        let gain = if enum_adapt_z() { ef + if it == 1 { 0 } else { gf } } else { gf + gt + ef + et + ee + if it == 1 { 0 } else { new_eq } };
         tot_gain += gain;
         if gf + gt + new_eq + ge == 0 || presolve_stop() {
             break if any { Some(true) } else { None };
         }
         // `ENOMOTO_MIP_ENUM_ADAPT`: 次の周を回すかをこの周の成果と時間で決める
-        if enum_adapt_on() && !enum_adapt_continue(gain, prob.n, tr.elapsed().as_secs_f64(), el, verbose, &format!("loop round {it}")) {
+        let cost = if enum_adapt_z() { (ENUM_Z_WORK.with(|w| w.get()) - w0) as f64 } else { tr.elapsed().as_secs_f64() };
+        if enum_adapt_on() && !enum_adapt_continue(gain, prob.n, cost, el, verbose, &format!("loop round {it}")) {
             break if any { Some(true) } else { None };
         }
     };
@@ -9880,6 +9945,7 @@ fn enum_presolve_step(prob: &MipProblem, dom: &mut domain::Domain, bin0: &[bool]
     let mut new_edges: Vec<(u32, u32)> = Vec::new();
     // 列挙の前の境界 ([`enumerate_rows`] は見つけた締め付けをその場で `dom` に入れるので、下で入れ直すときに「締まった」と数えるため)
     let (pre_lo, pre_up) = (dom.lo.clone(), dom.up.clone());
+    let w0 = ENUM_Z_WORK.with(|w| w.get());
     let res = enumerate_rows(prob, d2.as_mut().unwrap_or(dom), bin0, if want_equiv { Some(&mut *equiv) } else { None }, Some(&mut new_edges));
     let have: std::collections::HashSet<(u32, u32)> = edges.iter().map(|&(a, b)| (a.min(b), a.max(b))).collect();
     new_edges.sort_unstable();
@@ -9914,7 +9980,8 @@ fn enum_presolve_step(prob: &MipProblem, dom: &mut domain::Domain, bin0: &[bool]
     }
     let ne = equiv.len() - e0;
     if enum_adapt_on() {
-        ENUM_STEP_LAST.with(|c| c.set(Some((fixed + tightened + ne, te.elapsed().as_secs_f64(), el_step))));
+        let (g, cost) = if enum_adapt_z() { (fixed, (ENUM_Z_WORK.with(|w| w.get()) - w0) as f64) } else { (fixed + tightened + ne, te.elapsed().as_secs_f64()) };
+        ENUM_STEP_LAST.with(|c| c.set(Some((g, cost, el_step))));
     }
     ENUM_GAIN.with(|g| {
         let (a, b, c, d) = g.get();
@@ -9935,13 +10002,14 @@ fn enumerate_rows(prob: &MipProblem, dom: &mut domain::Domain, bin0: &[bool], mu
     // `ENOMOTO_MIP_ENUM_PRESOLVE=all` (試作、analysis/cutgap_20261123 の 2 節): 行の数の上限と空振りでやめる規則を外し、候補の行を全部列挙する
     // (止めるのは前処理の時間の止め [`presolve_stop`] だけ)。net12 は上限つきでは 30 行で空振り 6 回に当たって何も見つけず、全部 (953 行・0.05 秒) で
     // 根の LP が 68.4 → 128.3 (HiGHS の Enumeration 前処理と同じ)
-    let all = enum_presolve_mode().is_some_and(|v| v.starts_with("all"));
+    // `z` ([`enum_adapt_z`]): この求解の最初の列挙は上限つき
+    let all = enum_presolve_mode().is_some_and(|v| v.starts_with("all")) && !(enum_adapt_z() && ENUM_STEP_LAST.with(|c| c.get()).is_none());
     let max_rows = if all { usize::MAX } else { tunable!("ENOMOTO_T_MIP_ENUM_ROWS", 400usize, usize) };
     let max_fails = if all { usize::MAX } else { tunable!("ENOMOTO_T_MIP_ENUM_FAILS", 6usize, usize) };
     // 試作 `ENOMOTO_MIP_ENUM_ADAPT` の `s` ([`enum_adapt_midstop`]): 列挙の途中の得 (固定・締め付け・同値な組。衝突の組は数えない) と時間。
     // 時計は候補の行を並べ、重なりの多い行を外す所 (行の数の 2 乗の手間。neos-950242 は 28968 行で約 4 秒) から数える
     let mid = enum_adapt_mid_on();
-    let (te0, el0, mut gain_mid) = (std::time::Instant::now(), enum_elapsed(), 0usize);
+    let (te0, el0, mut gain_mid, mut zwork) = (std::time::Instant::now(), enum_elapsed(), 0usize, 0usize);
     let row_vars = |dom: &domain::Domain, i: usize| -> Option<Vec<usize>> {
         let mut v = Vec::new();
         for &(j, _) in &prob.rows[i] {
@@ -10064,7 +10132,12 @@ fn enumerate_rows(prob: &MipProblem, dom: &mut domain::Domain, bin0: &[bool], mu
         if done % 16 == 0 && presolve_stop() {
             break;
         }
-        if mid && done > 0 && done % 16 == 0 && enum_adapt_midstop(gain_mid, prob.n, te0.elapsed().as_secs_f64(), el0) {
+        // `z`: 途中の止めは、ここまでの縮みの効率 (固定 / 手間) のシグモイドが中立の点 (1/2) を下回ったら
+        let zstop = || {
+            let (a, b) = (tunable!("ENOMOTO_T_MIP_ENUM_ADAPT_A", 8.0, f64), tunable!("ENOMOTO_T_MIP_ENUM_ADAPT_B", -0.09, f64));
+            gain_mid == 0 || 1.0 / (1.0 + (-(a * ((gain_mid as f64 / zwork.max(1) as f64).log10() - b)).clamp(-50.0, 50.0)).exp()) < 0.5
+        };
+        if mid && done > 0 && done % 16 == 0 && if enum_adapt_z() { zstop() } else { enum_adapt_midstop(gain_mid, prob.n, te0.elapsed().as_secs_f64(), el0) } {
             if env_str!("ENOMOTO_MIP_LOG").is_some() {
                 eprintln!("MIP: ENUM_ADAPT s: stopped the enumeration after {done} of {} rows: gain {gain_mid} in {:.2}s ({el0:.2}s elapsed at the start)", keep.len(), te0.elapsed().as_secs_f64());
             }
@@ -10072,6 +10145,8 @@ fn enumerate_rows(prob: &MipProblem, dom: &mut domain::Domain, bin0: &[bool], mu
         }
         let Some(vars) = row_vars(dom, *i) else { continue };
         done += 1;
+        ENUM_Z_WORK.with(|w| w.set(w.get() + vars.len()));
+        zwork += vars.len();
         let pos0 = dom.stack_len();
         let mut sols: Vec<u32> = Vec::new();
         let mut wc: Option<std::collections::HashMap<(usize, bool), f64>> = None;
@@ -10099,7 +10174,7 @@ fn enumerate_rows(prob: &MipProblem, dom: &mut domain::Domain, bin0: &[bool], mu
             return None;
         }
         found += tight.len();
-        gain_mid += tight.len();
+        gain_mid += if enum_adapt_z() { tight.iter().filter(|&&(k, _, _)| dom.lo[k] == dom.up[k]).count() } else { tight.len() };
         out.extend(tight);
         if let Some(eq) = equiv.as_deref_mut() {
             for a in 0..vars.len() {
@@ -10112,7 +10187,7 @@ fn enumerate_rows(prob: &MipProblem, dom: &mut domain::Domain, bin0: &[bool], mu
                     if same || comp {
                         eq.push((vars[a], vars[b], comp));
                         found += 1;
-                        gain_mid += 1;
+                        gain_mid += (!enum_adapt_z()) as usize;
                     }
                 }
             }
