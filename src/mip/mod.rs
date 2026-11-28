@@ -2894,7 +2894,8 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             let early_sol = early.is_some();
             let prob = if early_sol { prob } else if env_str!("ENOMOTO_MIP_NO_CLIQUE_EXTEND").is_none() && (!params.submip || env_str!("ENOMOTO_MIP_CLIQUE_EXTEND_SUBMIP").is_some() || submip_highs('p')) { extend_clique_rows(prob, params.verbose) } else { prob };
             // 試作 `ENOMOTO_MIP_ROWCLEAN` (既定オフ、analysis/presize240_20261127 の 7 節): 列の境界だけで両辺が満たされる行 (全部の列が固定された行を含む) を落とす
-            let prob = if rowclean_on() && !early_sol { drop_redundant_rows(prob, params.verbose) } else { prob };
+            // サブ MIP では使わない (presize240 の 8 節: noswot はサブ MIP で行を落とすと RINS などの道筋が変わり、種 2・3 で 15 -> 30 秒)
+            let prob = if rowclean_on() && !early_sol && !params.submip { drop_redundant_rows(prob, params.verbose) } else { prob };
             // 診断用: クリーク行の拡張の後の問題 (`ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED2=ファイル`)
             if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED2").filter(|_| !params.submip && params.restarts == 0) {
                 dump_mps(&prob, &f);
