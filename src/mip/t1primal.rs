@@ -17,6 +17,11 @@
 //!     ならすと、外れが続けば logit h の下がりが f・g の上がりと打ち消し合い、取り分が下がる。
 //! - 3 版目: 要る側 (f・g) は平均して h と重みをそろえ (σ(logit h + (logit f + logit g)/2))、取り分に (n + 1)/(n + 2) を掛けて
 //!   事前を 0 寄りにする (n = 0 で取り分 0.0625、回すほど外れる)。短い問題で事前の 0.125 がそのまま効く損を減らす。
+//! - 5 版目: 取り分 s = [`role_frac`] × h × (f + g)/2 (当たる見込み × 要る度合い)。3・4 版目の σ(logit h + (logit f + logit g)/2) は、
+//!   外れが続いても要る側 (暫定解が最適で g = 1 の markshare_4_0、暫定解なしの f = g = 1) の logit が同じ log(n + 1) で上がって
+//!   打ち消し合い、取り分が 0.125 へ上がっていった (README 9 節)。積なら外れが続くと h とともに 1/(n + 2) で下がる。
+//!   再スタートの後の solver には回した回数・当たった回数を引き継ぎ ([`CARRY`])、前処理で開始解が落ちても打ち切り値を暫定解の
+//!   目的値として f・g を測る (mzzv42z は再スタートの後に「暫定解なし」と見て当たりなしで 10 回回していた)。
 //! - 主は、経過時間 × s から使った秒を引いた「貯え」が [`slice_min`] 秒 (Local-MIP の 1 切れ) 以上たまったときだけ、
 //!   根の終わりと木のノード (潜りの外) でその貯えの分だけ回す。易しい問題では貯えがたまる前に終わる。
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,7 +29,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::adapt::{laplace, logit, sigmoid};
+use super::adapt::laplace;
 use super::lp_api::MipLp;
 use super::problem::MipProblem;
 use super::solver::Solver;
@@ -42,6 +47,11 @@ fn role_frac() -> f64 {
 /// 1 回に回す最短の秒: Local-MIP の 1 切れ (`ENOMOTO_T_MIP_FJ_MIX_SLICE`、既定 0.2 秒、[`super::heuristics::fj_lmip_mix`] と同じ)。
 fn slice_min() -> f64 {
     tunable!("ENOMOTO_T_MIP_FJ_MIX_SLICE", 0.2, f64).max(0.01)
+}
+
+thread_local! {
+    /// 再スタートの前の solver の (回した回数, 当たった回数)。再スタートの後の [`Solver::t1primal_start`] が取り出す (5 版目)。
+    static CARRY: std::cell::Cell<Option<(u32, u32)>> = const { std::cell::Cell::new(None) };
 }
 
 enum Msg {
@@ -184,35 +194,47 @@ impl<'a, L: MipLp> Solver<'a, L> {
             })
             .expect("failed to spawn the T1PRIMAL thread");
         let now = self.start.elapsed().as_secs_f64();
+        // 再スタートの後は前の回数を引き継ぐ (外側の最初の求解では前の求解の残りを捨てる)
+        let (slices, hits) = if self.params.restarts > 0 { CARRY.with(|c| c.take()).unwrap_or((0, 0)) } else { CARRY.with(|c| c.set(None)); (0, 0) };
+        let has_ref = self.t1primal_ref_z().is_some();
         self.t1p = Some(Box::new(T1Primal {
             tx,
             rx,
             stop,
             handle: Some(handle),
             spent: 0.0,
-            slices: 0,
-            hits: 0,
+            slices,
+            hits,
             last_z: self.incumbent.as_ref().map(|(z, _)| *z),
-            last_imp: if self.incumbent.is_some() { now } else { 0.0 },
+            last_imp: if has_ref { now } else { 0.0 },
             fj_runs: 0,
             lm_slices: 0,
         }));
     }
 
+    /// 再スタートのとき、回した回数・当たった回数を次の solver に渡す (5 版目)。
+    pub(super) fn t1primal_carry(&self) {
+        if let Some(t) = self.t1p.as_ref() {
+            CARRY.with(|c| c.set(Some((t.slices, t.hits))));
+        }
+    }
+
+    /// f・g を測る暫定解の目的値: 暫定解、なければ打ち切り値 (再スタートの前処理で開始解が落ちた後も、前の暫定解は打ち切り値に残る)。
+    fn t1primal_ref_z(&self) -> Option<f64> {
+        self.incumbent.as_ref().map(|(z, _)| *z).or(Some(self.params.cutoff).filter(|c| c.is_finite()))
+    }
+
     /// 取り分 s (上の説明) と、その入力 (h, f, g)。
     fn t1primal_share(&self, now: f64) -> (f64, f64, f64, f64) {
         let Some(t) = self.t1p.as_ref() else { return (0.0, 0.0, 0.0, 0.0) };
-        // h・f・g は同じ回数 n (切れ端の数) でラプラスの式 (x·n+1)/(n+2) にならす。外れが続くと logit h の下がりが
-        // logit f・logit g の上がり (暫定解がすでに最適で g が 1 のまま、暫定解なしで f が 1 のまま) と打ち消し合い、取り分が下がる。
-        // 共通の関数 (super::adapt、FVbj の DIVESEL と同じ式)
+        // h・f・g は同じ回数 n (切れ端の数) でラプラスの式 (x·n+1)/(n+2) にならす (共通の関数 super::adapt)。
         let n = t.slices as f64;
         let h = (t.hits as f64 + 1.0) / (n + 2.0);
         let f = laplace(if now > 0.0 { (now - t.last_imp) / now } else { 1.0 }, n);
-        let g = laplace(self.gap_frac(), n);
-        // 「効いているか」(h) 1 つに対し「要るか」(f・g) が 2 つなので、要る側は平均して重みをそろえる (3 版目)。
-        // 2 版目の和では、h と g が打ち消し合ったあと f だけが残り、markshare_4_0 で取り分が 0.21 に残った (README 7・8 節)。
-        // 事前は 0 寄り: 回した回数 n で (n + 1)/(n + 2) を掛け、回すほど事前 (n = 0 で 1/2) を外す (3 版目)。
-        let s = role_frac() * sigmoid(logit(h) + 0.5 * (logit(f) + logit(g))) * laplace(1.0, n);
+        let g = laplace(self.t1primal_ref_z().map_or(1.0, |z| self.gap_frac_at(z)), n);
+        // 当たる見込み (h) × 要る度合い (f・g の平均)。n = 0 で 0.25 × 1/2 × 1/2 = 0.0625 (3・4 版目の初めと同じ)。
+        // logit の和では外れの証拠と要る側の証拠が同じ速さで強まって打ち消し合い、取り分が下がらなかった (5 版目、README 9 節)。
+        let s = role_frac() * h * 0.5 * (f + g);
         (s, h, f, g)
     }
 
