@@ -6632,6 +6632,23 @@ fn prr_tight_mode() -> Option<&'static str> {
     }
 }
 
+/// [`represolve_after_probe`] がかけ直さずに戻るときの結果。試作 `ENOMOTO_MIP_PREGD` の `d` (既定オフ、analysis/pregd_20261128 の 4 節) なら、
+/// そのプロービングが見つけた同値な 0-1 列の組を捨てずに代入する ([`substitute_probe_equiv`])。既定では、プロービングが境界を締めて固定が 0 本だと
+/// かけ直しの判定で早く戻り、組を代入しないまま次のプロービングで消していた (rocI-4-11 を `ENOMOTO_MIP_TREE2_INTAGG=1` で解くと最後の 90 組が残り、
+/// HiGHS の前処理をかけると 1132 -> 1055 列になる)
+fn prr_early_return(prob: MipProblem, postsolve: Vec<crate::presolve::PostsolveStep>, scaling: crate::presolve::scaling::Scaling, verbose: bool, submip: bool) -> Option<Presolved> {
+    if pregd('d') && PROBE_EQUIV.with(|e| !e.borrow().is_empty()) {
+        if verbose {
+            eprintln!("MIP: presolve again after probing: substituting {} equivalent pairs before returning (ENOMOTO_MIP_PREGD d)", PROBE_EQUIV.with(|e| e.borrow().len()));
+        }
+        return match substitute_probe_equiv(&prob, postsolve, scaling, verbose, submip) {
+            Ok(r) => Some(r),
+            Err((postsolve, scaling)) => Some(Presolved::Reduced { prob, postsolve, scaling }),
+        };
+    }
+    Some(Presolved::Reduced { prob, postsolve, scaling })
+}
+
 /// プロービングの後の前処理のかけ直し (試作、`ENOMOTO_MIP_PROBE_REPRESOLVE` で使う。既定では使わない): プロービングが
 /// 境界を締めた (固定した) とき、締めた境界で前処理をもう一度かける (`ENOMOTO_T_MIP_PROBE_REPRESOLVE_MAX` 回まで、既定 2)。
 /// プロービングは連続列の境界も締める (drayage-25-23 では時刻の列の境界) が、その境界で冗長になった行・強められる係数は
@@ -6666,7 +6683,7 @@ fn represolve_after_probe(prob: MipProblem, mut postsolve: Vec<crate::presolve::
     }
     let max = if tight { u32::MAX } else if prb_table('b') { tunable!("ENOMOTO_T_MIP_PRB_TABLE_ROUNDS", 8u32, u32) } else { tunable!("ENOMOTO_T_MIP_PROBE_REPRESOLVE_MAX", 2u32, u32) };
     if !prr_active(submip) || depth >= max {
-        return Some(Presolved::Reduced { prob, postsolve, scaling });
+        return prr_early_return(prob, postsolve, scaling, verbose, submip);
     }
     if tight {
         let (gf, gt, _) = PROBE_GAIN.with(|f| f.get());
@@ -6674,7 +6691,7 @@ fn represolve_after_probe(prob: MipProblem, mut postsolve: Vec<crate::presolve::
             if verbose {
                 eprintln!("MIP: presolve again after probing: PRR_TIGHT: stopped (probing fixed {gf}, tightened {gt} of {} columns)", prob.n);
             }
-            return Some(Presolved::Reduced { prob, postsolve, scaling });
+            return prr_early_return(prob, postsolve, scaling, verbose, submip);
         }
     }
     // プロービングが列を `ENOMOTO_T_MIP_PRR_MIN_FIXED` 本 (既定 1) より少なくしか固定しなければ (境界を締めただけなら)、かけ直さない。
@@ -6685,7 +6702,7 @@ fn represolve_after_probe(prob: MipProblem, mut postsolve: Vec<crate::presolve::
         if verbose {
             eprintln!("MIP: presolve again after probing: skipped (probing fixed {fixed} columns)");
         }
-        return Some(Presolved::Reduced { prob, postsolve, scaling });
+        return prr_early_return(prob, postsolve, scaling, verbose, submip);
     }
     if verbose {
         eprintln!("MIP: presolve again after probing (round {})", depth + 1);
