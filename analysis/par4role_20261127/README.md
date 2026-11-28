@@ -333,5 +333,5 @@ mcsched (伸びる対照) は、根が 2.4 秒で、すぐに 4 本の木に入�
 
 - `ENOMOTO_MIP_PAR4ROLE` の既定を `d` にした。`=0`・`off` で以前の形。値を渡すとその文字だけになる (`d` と一緒に使うなら `ad` などと書く)。
 - check_default: 既定でも `=0` でも 6 問とも基準と一致 (`d` は 2 スレッド以上でだけ働くので、1 スレッドの道筋は変わらない)。基準は取り直していない。
-- fuzz 7 本 (1T `fuzz_def1.out`・4T `fuzz_def4.out`、既定) と cargo test: 下に書く。
+- fuzz 7 本 (1T `fuzz_def1.out`・4T `fuzz_def4.out`、既定): どちらも誤答 0。cargo test 428 通過。
 - docs/improvement_history.md に節を足した。
