@@ -8,7 +8,8 @@
   - Rw = R + POLISH_BG=w。働いている従も重みで研磨する。
 - 120 秒: 1 スレッドは A・D、2・4・8 スレッドは A・D・R・Ri・Rw (8 スレッドは 4 コアでは割り当て過ぎ)。
 - 600 秒: 1 スレッドは A・D、4 スレッドは A・D・Rw。
-- 分担: 仕事の並びを N 個に分け、K 番目だけを回す (重い順に配る)。"""
+- 分担: 仕事の並びを N 個に分け、K 番目だけを回す (重い順に配る)。
+- `--a` (11 節): Ra = R + POLISH_BG=a (いつも取る) と、同じビルドの Rw を、Rw の組 (120 秒の 2・4・8 スレッド、600 秒の 4 スレッド) だけ回す → res_drwa[_sK].jsonl。"""
 import json, os, subprocess, sys, time
 from pathlib import Path
 D_ = Path(__file__).resolve().parent
@@ -20,18 +21,24 @@ B = {"ENOMOTO_MIP_OVERRUN240": "p", "ENOMOTO_MIP_POLISH_STATS": "v"}
 CFGS = {"A": {**B, "ENOMOTO_MIP_POLISH_PRESOLVE": "1"}, "D": {**B, "ENOMOTO_MIP_POLISH_PRESOLVE": "d"}, "R": {**B, "ENOMOTO_MIP_POLISH_PRESOLVE": "r"}}
 CFGS["Ri"] = {**CFGS["R"], "ENOMOTO_MIP_POLISH_BG": "i"}
 CFGS["Rw"] = {**CFGS["R"], "ENOMOTO_MIP_POLISH_BG": "w"}
+# 比べる相手 (利用者の承認、2026-11-28): 働いている従がいつも研磨を取る (w = 1)。Rw と同じビルドで回す (`--a` で、Rw の回と同じ組だけを回す)
+CFGS["Ra"] = {**CFGS["R"], "ENOMOTO_MIP_POLISH_BG": "a"}
 JOBS = []
 for tl, plan in ((120, {1: "A D", 2: "A D R Ri Rw", 4: "A D R Ri Rw", 8: "A D R Ri Rw"}), (600, {1: "A D", 4: "A D Rw"})):
     for p in PROBS:
         for th, cs in plan.items():
             for c in cs.split():
                 JOBS.append((p, c, th, tl))
+ONLY_A = "--a" in sys.argv
+sys.argv = [a for a in sys.argv if a != "--a"]
+if ONLY_A:
+    JOBS = [(p, "Ra", th, tl) for p, c, th, tl in JOBS if c == "Rw"] + [(p, "Rw", th, tl) for p, c, th, tl in JOBS if c == "Rw"]
 K, N = (int(sys.argv[1]), int(sys.argv[2])) if len(sys.argv) > 2 else (0, 1)
 load = [0.0] * N; mine = []
 for j in sorted(JOBS, key=lambda j: -j[3]):
     i = min(range(N), key=lambda i: load[i]); load[i] += j[3] + 20
     if i == K: mine.append(j)
-OUT = D_ / (f"res_drw_s{K}.jsonl" if N > 1 else "res_drw.jsonl")
+OUT = D_ / ((f"res_drwa_s{K}.jsonl" if N > 1 else "res_drwa.jsonl") if ONLY_A else (f"res_drw_s{K}.jsonl" if N > 1 else "res_drw.jsonl"))
 done = set()
 if OUT.exists():
     for l in OUT.read_text().splitlines():

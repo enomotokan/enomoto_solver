@@ -494,3 +494,10 @@ P の 4T (`pws.py <種> ad3` → `pws_ad3_s1〜3.jsonl`、`psumm_ws.py ad3` → 
 - `a` は 3 通りの形 (本数の重み、使い道の配分、経過時間で立てる) を試したが、どれも P の 4T で中立以上にならなかった (1.031 前後)。
 - 手伝いを立てる手間が根の長さに比べて小さい問題を前もって見分けられず、短い問題で害が残る。
 - 既定の `d` までで区切る。`a`・`b`・`s`・`w` は既定オフの試作として残す。
+
+### 7.7 直した版 (7.6 節) の `ad3` を P の 4T でもう 1 回 (利用者の判断、`ad3f`)
+
+- 版: 148b0d788 (7.6 節の直しと新しい既定 55c7060b1 を含む)。`ENOMOTO_MIP_PAR4ROLE=ad3f` (`3`・`f` は無視され、中身は `ad`) と既定 (`d`) を比べる。
+- check_default は既定でも `ad3f` でも 6 問とも一致 (新しい基準: mik-250-20-75-4 3277、markshare_4_0 265575)。
+- fuzz 7 本 (`fuzz.sh ad3f`、`ENOMOTO_MIP_PAR4ROLE=ad3f ENOMOTO_MIP_THREADS=4`、`fuzz_ad3f.out`): 誤答 0。cargo test 428 通過。
+- 分担: 種 1 は FMjE、種 2 は FinV、種 3 は HwBw (`pws.py <種> ad3f` → `pws_ad3f_s<種>.jsonl`)。
