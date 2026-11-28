@@ -114,13 +114,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Apple シリコンは LTO だけ、1 本 (v3 は無い)。PGO の計測用の版 (-Cprofile-generate) が最初の solve で
+          # Segmentation fault になる (0.2.0 の CI、2026-11-27)。原因が分かるまで PGO を外す
           - target: aarch64
-            runner: macos-15          # Apple シリコン。LTO + PGO、1 本 (v3 は無い)
+            runner: macos-15
+            pgo: "0"
           - target: x86_64
             runner: macos-15-intel    # Intel の機械で直に作る (PGO の学習を動かすため)。LTO + PGO + 2 本入り
+            pgo: "1"
     runs-on: ${{ matrix.runner }}
     env:
       PY: python
+      PGO: ${{ matrix.pgo }}
       MATURIN_ARGS: --features pyo3/abi3-py39
     steps:
       - uses: actions/checkout@v4
@@ -195,8 +200,15 @@ jobs:
     permissions:
       id-token: write
     steps:
+      # 配る物 (wheels-* と sdist) だけを集める。build-logs-* の *.log まで dist に入ると、登録が InvalidDistribution で落ちる (0.2.0 の CI)
       - uses: actions/download-artifact@v4
         with:
+          pattern: wheels-*
           merge-multiple: true
           path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+      - run: ls -l dist
       - uses: pypa/gh-action-pypi-publish@release/v1

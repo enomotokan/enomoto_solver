@@ -18,8 +18,8 @@ import sys
 import urllib.request
 from pathlib import Path
 
-NETLIB_INDEX_URL = "https://www.netlib.org/lp/data/"
-EMPS_C_URL = "https://www.netlib.org/lp/data/emps.c"
+NETLIB_INDEX_URL = "https://netlib.org/lp/data/"
+EMPS_C_URL = "https://netlib.org/lp/data/emps.c"
 
 # Netlib "problems" that aren't plain compressed-MPS files: `minos` is a
 # plain-text readme, `stocfor3`/`truss` are Fortran-source-plus-data

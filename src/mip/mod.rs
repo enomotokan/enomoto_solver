@@ -985,6 +985,71 @@ pub(super) fn polish_in_problem(p: &MipProblem, x: &mut Vec<f64>, z: f64) -> Opt
     out
 }
 
+/// 試作 `ENOMOTO_MIP_POLISH_PRESOLVE` (analysis/overrun240_20261127、既定では使わない): 最後の研磨の LP (整数を固定した `p`) を、温めた単体法の代わりに
+/// LP の前処理 + 単体法で解く ([`polish_in_problem`] と同じ解き方、[`polish_presolved`])。`1` = 最適で終わらないとき (時間切れなど。W を使う最適の判定に関わらない) だけ、`a` = いつも。
+/// 整数を固定すると多くの行が 1 列の境界になる問題 (thor50dday・neos-873061・cuanza・kasavu) で、研磨の LP が前処理で大きく縮む (README 4.3 節)。
+/// この経路は双対値を返さないので、許容の漏れの上界 W ([`POLISH_TOL_LEAK`]) は 0 にする (最適の判定が厳しい側になるだけ)
+pub(super) fn polish_presolve_mode() -> Option<char> {
+    static V: std::sync::OnceLock<Option<char>> = std::sync::OnceLock::new();
+    *V.get_or_init(|| match env_str!("ENOMOTO_MIP_POLISH_PRESOLVE") {
+        Some(v) if v.contains('a') => Some('a'),
+        Some(v) if v != "0" && v != "off" => Some('1'),
+        _ => None,
+    })
+}
+
+/// 試作 `ENOMOTO_MIP_POLISH_PRESOLVE`: 暫定解 `x` (問題 `p` の空間、目的値 `z`) の整数列を固定した `p` を LP の前処理 + 単体法で解き、
+/// 採り方は [`polish_in_problem_warm`] と同じ (違反が増えず目的値が悪くならない、または違反が真に減る)。期限 `deadline` で止める。
+/// 解けなければ `NotSolved` (呼び出し側は温めた単体法に回す)。元の空間への戻し (前処理の後始末) の誤りは、戻した解の違反を元の問題で測る
+/// 採り方の判定で捨てられる
+pub(super) fn polish_presolved(p: &MipProblem, x: &mut Vec<f64>, z: f64, deadline: Option<std::time::Instant>) -> WarmPolish {
+    if p.is_int.iter().all(|&b| b) {
+        return WarmPolish::Kept;
+    }
+    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        return WarmPolish::NotSolved;
+    }
+    let t = std::time::Instant::now();
+    let vars: Vec<VariableData> = (0..p.n)
+        .map(|j| {
+            let (lb, ub) = if p.is_int[j] { (x[j].round(), x[j].round()) } else { (p.col_lo[j], p.col_up[j]) };
+            VariableData { vtype: VarType::Continuous, lb, ub }
+        })
+        .collect();
+    let objective = min_objective(&p.cost, p.offset);
+    let cons = problem_constraints(p);
+    let tb = t.elapsed().as_secs_f64();
+    let r = crate::ticks::without_budget(|| crate::cancel::with_deadline(deadline, || solve_lp(&vars, &objective, &cons, RootSolver::Simplex, LpOptions::default())));
+    POLISH_TOL_LEAK.with(|c| c.set((0.0, 0.0)));
+    let mut out = WarmPolish::NotSolved;
+    let mut info = String::new();
+    let st_dbg = format!("{:?}", r.status);
+    if let (Status::Optimal, Some(mut xn)) = (r.status, r.x) {
+        out = WarmPolish::Kept;
+        for j in 0..p.n {
+            if p.is_int[j] {
+                xn[j] = x[j].round();
+            }
+        }
+        let zn = exact_objective(p, &xn);
+        let (vo, vn) = (max_violation(p, x), max_violation(p, &xn));
+        let scale = z.abs().max(1.0);
+        info = format!(" z {z:.10e} -> {zn:.10e} viol {vo:.3e} -> {vn:.3e}");
+        if (vn <= vo.max(1e-9) && zn <= z + 1e-9 * scale) || vn < vo {
+            *x = xn;
+            out = WarmPolish::Replaced(zn);
+        }
+    }
+    if env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('v') || v.contains('r')) {
+        eprintln!("MIP: POLISH_PRESOLVE: {st_dbg} {:.3}s (building {tb:.3}s){info} -> {}", t.elapsed().as_secs_f64(), match out {
+            WarmPolish::Replaced(_) => "replaced",
+            WarmPolish::Kept => "kept",
+            WarmPolish::NotSolved => "not solved",
+        });
+    }
+    out
+}
+
 /// `ENOMOTO_MIP_POLISH_WARM` (`ENOMOTO_MIP_POLISH_STRICT` と組で使う。analysis/nattai_20261125/。
 /// **2026-11-25 に既定にした: 値 `d`。`0`・`off` で使わない (研磨の LP を前処理つきで一から解き、期限を渡さない前の形)。**
 /// **2026-11-26 から、付けなければ [`polish_final_on`] (既定) で `e`。**
@@ -1111,6 +1176,9 @@ pub(super) fn polish_in_problem_warm_ext(p: &MipProblem, x: &mut Vec<f64>, z: f6
     let mut info = (0usize, 0usize, 0usize);
     // 診断 `ENOMOTO_MIP_POLISH_STATS` の `c`: 基底を写さずに解く (温める効き目の比べ)
     let basis = basis.filter(|_| !cold && !env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('c')));
+    // 診断 `ENOMOTO_MIP_POLISH_STATS` の `e` (analysis/overrun240_20261127): 基底を捨てて基底のない求解の入口 (`solve_cold_entry`) で解く
+    let cold = cold || env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('e'));
+    let basis = basis.filter(|_| !cold);
     if let Some(b) = basis {
         let mut b = b.clone();
         for j in 0..p.n.min(b.col.len()) {
@@ -1123,6 +1191,68 @@ pub(super) fn polish_in_problem_warm_ext(p: &MipProblem, x: &mut Vec<f64>, z: f6
         b.row.truncate(p.m);
         info.2 = b.col.iter().filter(|&&s| s == lp::VarStatus::Basic).count() + b.row.iter().filter(|&&s| s == lp::VarStatus::Basic).count();
         lp.set_basis(&b);
+        // 診断 `ENOMOTO_MIP_POLISH_STATS` の `b` (analysis/overrun240_20261127): 写した基底 (修復の後) の出発の点の主の実行不能 (数と相対の量の和)
+        if env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('b')) {
+            let tb = std::time::Instant::now();
+            let si = lp.basis_start_info(&b.col);
+            eprintln!("MIP: POLISH_STATS b: start basis primal infeasible {:?} (count, relative sum), {:.3}s", si, tb.elapsed().as_secs_f64());
+        }
+    }
+    // 診断 `ENOMOTO_MIP_POLISH_STATS` の `s`: 研磨の LP の大きさ (行・列・非零、整数を固定した列、固定されない連続列)
+    if env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('s')) {
+        let nnz: usize = p.rows.iter().map(|r| r.len()).sum();
+        let nint = p.is_int.iter().filter(|&&b| b).count();
+        let ncont_free = (0..p.n).filter(|&j| !p.is_int[j] && p.col_lo[j] < p.col_up[j]).count();
+        // 整数を固定した後の行ごとの自由な連続列の数 (0 = 定数の行、1 = 列の境界になる行。前処理で消せる行の目安)
+        let mut k0 = 0usize;
+        let mut k1 = 0usize;
+        for r in &p.rows {
+            let c = r.iter().filter(|&&(j, _)| !p.is_int[j] && p.col_lo[j] < p.col_up[j]).count();
+            if c == 0 {
+                k0 += 1;
+            } else if c == 1 {
+                k1 += 1;
+            }
+        }
+        // 前処理の見積り: 整数を固定し、自由な連続列が 1 本の行を列の境界にして外し、境界が閉じた列を固定することを繰り返して残る行の数
+        let mut fixed: Vec<bool> = (0..p.n).map(|j| p.is_int[j] || p.col_lo[j] >= p.col_up[j]).collect();
+        let (mut clo, mut cup) = (p.col_lo.clone(), p.col_up.clone());
+        let mut alive = vec![true; p.m];
+        let mut passes = 0;
+        loop {
+            passes += 1;
+            let mut changed = false;
+            for (i, r) in p.rows.iter().enumerate() {
+                if !alive[i] {
+                    continue;
+                }
+                let free: Vec<&(usize, f64)> = r.iter().filter(|&&(j, _)| !fixed[j]).collect();
+                if free.len() > 1 {
+                    continue;
+                }
+                alive[i] = false;
+                changed = true;
+                if let [&(j, a)] = free[..] {
+                    let rest: f64 = r.iter().filter(|&&(k, _)| k != j).map(|&(k, b)| b * if p.is_int[k] { x[k].round() } else { clo[k] }).sum();
+                    let (l, u) = ((p.row_lo[i] - rest) / a, (p.row_up[i] - rest) / a);
+                    let (l, u) = if a > 0.0 { (l, u) } else { (u, l) };
+                    clo[j] = clo[j].max(l);
+                    cup[j] = cup[j].min(u);
+                    if clo[j] >= cup[j] - 1e-12 {
+                        fixed[j] = true;
+                    }
+                }
+            }
+            if !changed || passes >= 20 {
+                break;
+            }
+        }
+        let left = alive.iter().filter(|&&a| a).count();
+        let cols_left = (0..p.n).filter(|&j| !fixed[j]).count();
+        eprintln!(
+            "MIP: POLISH_STATS s: rows {} cols {} nonzeros {} integer (fixed) {} continuous not fixed {}; rows with 0 free continuous columns {} with 1 {}; after singleton-row reductions ({passes} passes) rows left {left} free columns left {cols_left}",
+            p.m, p.n, nnz, nint, ncont_free, k0, k1
+        );
     }
     // 呼び出し元の手間の期限 ([`crate::ticks::push_budget`]) は外し、求解の期限 (壁時計) だけで止める。ヒューリスティクスの中で受け取った
     // 解の研磨が手間の期限で 3 反復で止まり、研磨しないまま見積り (その解を出した LP の双対値がなく、今の LP の双対値から取った小さな値) で
@@ -1154,6 +1284,16 @@ pub(super) fn polish_in_problem_warm_ext(p: &MipProblem, x: &mut Vec<f64>, z: f6
     });
     WARM_POLISH[0].fetch_add(1, Ordering::Relaxed);
     WARM_POLISH[5].fetch_add(lp.total_iterations(), Ordering::Relaxed);
+    // 診断 `ENOMOTO_MIP_POLISH_STATS` の `r` (`ENOMOTO_MIP_XOLAZY_LOG` と組): 同時実行の記録 (勝った側と時刻)。1 反復あたりの秒も出す
+    if env_str!("ENOMOTO_MIP_POLISH_STATS").is_some_and(|v| v.contains('r')) {
+        let it = lp.total_iterations();
+        let secs = t.elapsed().as_secs_f64();
+        eprintln!(
+            "MIP: POLISH_STATS r: {st:?}{how} {it} iters {secs:.3}s ({:.3} ms/iter), race {:?}",
+            1e3 * secs / it.max(1) as f64,
+            crate::simplex::mip_lp::take_race_diag().map(|d| (d.winner, d.t_win, d.t_ipm, d.t_push, d.t_xo, d.t_end))
+        );
+    }
     let mut out = WarmPolish::NotSolved;
     if st == lp::LpStatus::Optimal {
         out = WarmPolish::Kept;
@@ -2337,12 +2477,13 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
         }
         other => other,
     };
-    // `ENOMOTO_MIP_DUALEQ` (試作、既定では使わない。analysis/presolve2_20261111.md): 前処理の最後に、双対の議論で不等式行を
+    // `ENOMOTO_MIP_DUALEQ` ([`dualeq`]、2026-11-28 から既定 `1`。`=0`・`off` で使わない。analysis/presolve2_20261111.md・
+    // analysis/dualeq2_20261127): 前処理の最後に、双対の議論で不等式行を
     // 等式にし ([`dual_row_equalities`])、等式にした行があれば前処理をもう一度かける (2 項等式の消去が `y_b = 1 - y_a` などを代入する)。
     // 前処理の後の問題でかけるのは、冗長な行が消え双対の固定が済んだ後で錠を数えるため。最適解の集合を狭めるだけなので後処理は要らない
     let presolved = match presolved {
         Some(Presolved::Reduced { prob, postsolve, scaling })
-            if env_str!("ENOMOTO_MIP_DUALEQ").is_some_and(|v| v != "early") && !params.submip && params.restarts == 0 && scaling.d.iter().all(|&d| d == 1.0) =>
+            if dualeq().is_some_and(|v| v != "early") && !params.submip && params.restarts == 0 && scaling.d.iter().all(|&d| d == 1.0) =>
         {
             let free_cols = |q: &MipProblem| (0..q.n).filter(|&j| q.col_lo[j] < q.col_up[j]).count();
             let MipProblem { col_lo, col_up, cost, offset, sense_sign, is_int, rows, mut row_lo, mut row_up, cols, .. } = prob.clone();
@@ -5526,9 +5667,9 @@ fn presolve_mip_depth(p: &MipProblem, verbose: bool, submip: bool, lp_probe_secs
     let (mut col_lo, mut col_up) = (p.col_lo.clone(), p.col_up.clone());
     let (mut p_row_lo, mut p_row_up) = (p.row_lo.clone(), p.row_up.clone());
     let tiny0 = fix_tiny_width_columns(&p.rows, &mut p_row_lo, &mut p_row_up, &mut col_lo, &mut col_up, &p.is_int, submip, "pre0");
-    // `ENOMOTO_MIP_DUALEQ=early` (試作、既定では使わない。PRESOLVE2): 前処理の前に、双対の議論で不等式行を等式にする
+    // `ENOMOTO_MIP_DUALEQ=early` (試作、既定の `1` では使わない。PRESOLVE2): 前処理の前に、双対の議論で不等式行を等式にする
     // ([`dual_row_equalities`])。元の行で錠を数えるので、前処理で消える冗長な行も錠に数えてしまう (gt2)。ふつうは `=1` (前処理の最後)
-    if env_str!("ENOMOTO_MIP_DUALEQ") == Some("early") && !submip {
+    if dualeq() == Some("early") && !submip {
         let t0 = std::time::Instant::now();
         let k = dual_row_equalities(&p.rows, &mut p_row_lo, &mut p_row_up, &p.cols, &p.cost, &p.is_int, &col_lo, &col_up);
         if verbose {
@@ -6318,6 +6459,16 @@ fn substitute_probe_equiv(prob: &MipProblem, mut postsolve: Vec<crate::presolve:
     Err((postsolve, scaling))
 }
 
+/// 締め付けでの前処理のかけ直しの形 (`ENOMOTO_MIP_PRR_TIGHT` の値)。既定は `o` (締め付けだけで固定の無い周にだけ使う。
+/// analysis/rootbound_20261126 の 6 節)、`0` か `off` で使わない (従来の形)、`1` などそれ以外の値は固定のある周でも使う
+fn prr_tight_mode() -> Option<&'static str> {
+    match env_str!("ENOMOTO_MIP_PRR_TIGHT") {
+        None => Some("o"),
+        Some("0") | Some("off") => None,
+        Some(v) => Some(v),
+    }
+}
+
 /// プロービングの後の前処理のかけ直し (試作、`ENOMOTO_MIP_PROBE_REPRESOLVE` で使う。既定では使わない): プロービングが
 /// 境界を締めた (固定した) とき、締めた境界で前処理をもう一度かける (`ENOMOTO_T_MIP_PROBE_REPRESOLVE_MAX` 回まで、既定 2)。
 /// プロービングは連続列の境界も締める (drayage-25-23 では時刻の列の境界) が、その境界で冗長になった行・強められる係数は
@@ -6326,11 +6477,22 @@ fn substitute_probe_equiv(prob: &MipProblem, mut postsolve: Vec<crate::presolve:
 /// 前処理は列の番号を保ち、整数最適化では列の尺度をかけない (d = 1) ので、後処理は内側の手順の後に外側の手順を並べればよい
 fn represolve_after_probe(prob: MipProblem, mut postsolve: Vec<crate::presolve::PostsolveStep>, scaling: crate::presolve::scaling::Scaling, verbose: bool, submip: bool, depth: u32) -> Option<Presolved> {
     // 試作 `ENOMOTO_MIP_PRB_TABLE` の `b` ([`prb_table`]): かけ直しを `ENOMOTO_T_MIP_PRB_TABLE_ROUNDS` (8) 回まで、行の減り方によらず使う
-    // 試作 `ENOMOTO_MIP_PRR_TIGHT` (既定では使わない。analysis/cutgap_20261123 の 3 節): 固定が 0 本でも、プロービングが境界を締めたらかけ直し、
+    // `ENOMOTO_MIP_PRR_TIGHT` ([`prr_tight_mode`]、既定は `o`。analysis/cutgap_20261123 の 3 節): 固定が 0 本でも、プロービングが境界を締めたらかけ直し、
     // 締めた境界で前処理 (係数の強化) をかけて、またプロービングする、を繰り返す (SCIP は probing と linear の前処理を交互に回す。istanbul-no-cutoff
     // では 13 周で境界の変更 14294 本・係数の締め 47989)。回数の上限・行の減り方の判定は使わず、SCIP の前処理の打ち切り (`presolving/abortfac` 0.0008:
     // 1 周の変更が列の数のその割合より少なければやめる) と同じ形で、その周のプロービングの固定と締め付けが列の数の 0.0008 倍に届かなければやめる
-    let mut tight = (env_str!("ENOMOTO_MIP_PRR_TIGHT").is_some() || enum_adapt_on()) && !submip && !PRESOLVE_IN_SUBMIP.with(|f| f.get());
+    let mut tight = (prr_tight_mode().is_some() || enum_adapt_on()) && !submip && !PRESOLVE_IN_SUBMIP.with(|f| f.get());
+    // `ENOMOTO_MIP_PRR_TIGHT=o` (analysis/rootbound_20261126 の 6 節): 締め付けだけで固定の無い周にだけ PRR_TIGHT の規則 (回数の上限・行の減り方の
+    // 判定を使わない) を使い、固定のある周は既定の規則 (`PRR_MIN_FIXED`・`PRR_MIN_ROW_FRAC`・`PROBE_REPRESOLVE_MAX`) のままにする。
+    // `=1` は固定のある周でも行の減り方の判定を外すので、misc07・dcmulti・nw04 (締め付け 0 本) の道筋まで変わっていた。
+    // 2026-11-27 に `o` を既定にした (P で 1 スレッド 1.001・4 スレッド 1.013、istanbul-no-cutoff の根 107.7 -> 143.4)
+    if tight && !enum_adapt_on() && prr_tight_mode() == Some("o") && !submip {
+        let (gf, gt, _) = PROBE_GAIN.with(|f| f.get());
+        let fixed = PROBE_FIXED.with(|f| f.get());
+        if gt == 0 || gf > 0 || fixed >= tunable!("ENOMOTO_T_MIP_PRR_MIN_FIXED", 1usize, usize) {
+            tight = false;
+        }
+    }
     // `ENOMOTO_MIP_ENUM_ADAPT` ([`enum_adapt_on`]): 締め付けでのかけ直し (と 0.0008 の打ち切り) を使うかを、直前の列挙の繰り返し全体の得と時間から
     // シグモイドで決める ([`enum_adapt_continue`])。使わないときは既定のかけ直しの規則 (固定の本数・行の減り方) に戻す
     if tight && enum_adapt_on() && prr_active(submip) {
@@ -11916,4 +12078,10 @@ impl Drop for DebugSolScope {
             solver::DEBUG_SOL.with(|d| *d.borrow_mut() = Some(x));
         }
     }
+}
+
+/// `ENOMOTO_MIP_DUALEQ` の値 (2026-11-28 から既定 `1`: 前処理の最後に双対の議論で行を等式にし、かけ直しで縮んだときだけ使う。
+/// `=0`・`off` で使わない (前の既定)、`=early` は前処理の前にかける試作)。analysis/dualeq2_20261127
+pub(crate) fn dualeq() -> Option<&'static str> {
+    env_def!("ENOMOTO_MIP_DUALEQ", "1")
 }
