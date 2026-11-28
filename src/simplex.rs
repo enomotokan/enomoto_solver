@@ -2470,6 +2470,17 @@ pub fn solve_lp_dual_with(variables: &[VariableData], objective: &Objective, con
 }
 
 /// [`solve_lp_dual_with`] の本体: `Unbounded` をまとめる前の状態をそのまま返す。
+thread_local! {
+    /// 試作 `ENOMOTO_MIP_POLISH_PRESOLVE=d` (src/mip/mod.rs `polish_presolved`、analysis/overrun240_20261127 の 10 節): 次の 1 回の
+    /// [`solve_lp_dual_full_status`] で、前処理の後の LP が比べる大きさ (行, 列, 非零) より小さくなければ、解かずに `NotSolved` で返す。
+    /// 1 回で外す (中で呼ばれる求解には効かない)
+    pub(crate) static PRESOLVE_GATE: std::cell::Cell<Option<(usize, usize, usize)>> = const { std::cell::Cell::new(None) };
+    /// `PRESOLVE_GATE` の結果: (前処理の後の行, 列, 非零, 前処理の秒, 縮んだか)
+    pub(crate) static PRESOLVE_GATE_OUT: std::cell::Cell<Option<(usize, usize, usize, f64, bool)>> = const { std::cell::Cell::new(None) };
+    /// `POLISH_PRESOLVE=r` (src/mip/mod.rs `polish_race`): `PRESOLVE_GATE` の判定を別のスレッドへ知らせる (1 = 縮んだ、2 = 縮まない)
+    pub(crate) static PRESOLVE_GATE_SIGNAL: std::cell::RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicU8>>> = const { std::cell::RefCell::new(None) };
+}
+
 fn solve_lp_dual_full_status(variables: &[VariableData], objective: &Objective, constraints: &[ConstraintRow], opts: crate::types::LpOptions) -> SimplexResult {
     crate::phase_timing::start();
     let t0 = std::time::Instant::now();
@@ -2482,6 +2493,19 @@ fn solve_lp_dual_full_status(variables: &[VariableData], objective: &Objective, 
         }
     };
     crate::phase_timing::mark("presolve_end");
+    if let Some((m0, n0, z0)) = PRESOLVE_GATE.with(|g| g.take()) {
+        // 構造変数の列 (スラックの列を除く) の数と非零
+        let n1 = std.n_total - std.n_rows;
+        let z1: usize = (0..n1).map(|j| std.cols.col(j).len()).sum();
+        let shrunk = std.n_rows + n1 + z1 < m0 + n0 + z0;
+        PRESOLVE_GATE_OUT.with(|o| o.set(Some((std.n_rows, n1, z1, t0.elapsed().as_secs_f64(), shrunk))));
+        if let Some(sig) = PRESOLVE_GATE_SIGNAL.with(|g| g.borrow_mut().take()) {
+            sig.store(if shrunk { 1 } else { 2 }, std::sync::atomic::Ordering::Release);
+        }
+        if !shrunk {
+            return SimplexResult { status: Status::NotSolved, x: None };
+        }
+    }
     user_log!(
         "Presolve: {} rows, {} columns -> {} rows, {} columns ({:.2}s)",
         constraints.len(),
