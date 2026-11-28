@@ -11717,3 +11717,5 @@ CBC との比較 (`analysis/cbc_comparison_20261029.md`) から作った試作�
   - 最初の形 (7 節) の 1 スレッドの費用 (1.022、解けた −4) は、かけ直しの規則の抜け (neos-960392) とサブ MIP での `ROWCLEAN` (noswot・h80x6320d) で、
     直した後は旧既定にも中立 (1.001・1.000、8.3 節)。
 - check_default は 6 問とも一致 (道筋が変わらない) ので、`ref_default.json` は取り直していない。
+- 確かめ (新しい既定): fuzz 7 本 (`analysis/nrashare_20261126/fuzz.sh`) 誤答 0、cargo test 428 通過、fuzz_domcol (種 0〜5999) は既知の種 2880
+  (HiGHS 1.15.1 の前処理の誤り) だけ。

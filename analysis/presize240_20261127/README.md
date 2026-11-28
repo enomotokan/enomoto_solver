@@ -346,3 +346,11 @@
 - 型 A には大きく効く: 新しい既定 `1st` で ex9 53.4 秒・ex10 時間切れ → `1stz` + `ROWCLEAN` で 40.2・61.1 秒。
 - 最初の列挙の上限の縮め (依頼 1) は、費用が残っていないので入れていない。
 - 既定化の候補: `ENOMOTO_MIP_ENUM_ADAPT=1stz` と `ENOMOTO_MIP_ROWCLEAN=1` (どちらも今は既定オフの試作)。
+
+### 8.7 既定化 (2026-11-28、利用者の承認)
+
+- `ENOMOTO_MIP_ENUM_ADAPT` の既定を `1st` → `1stz`、`ENOMOTO_MIP_ROWCLEAN` を既定に (`env_def!`)。`ENUM_ADAPT=1st` で前の既定、`=0`・`off` で切る。
+- PREGD=pg の既定化 (6567f1126) の後の先端で、check_default は 6 問とも一致 (mik-250-20-75-4 3277・markshare_4_0 265575 などそのまま)。ref_default.json は取り直していない。
+- 新しい既定で: fuzz 7 本は誤答 0、cargo test 428 通過・0 失敗、fuzz_domcol (種 0〜5999) は既知の種 2880 (HiGHS の誤り) だけ。
+  (`fuzz.sh` は環境変数の引数を 1 つも渡さないと `$2` が無くて cargo test の前で止まるので、cargo test は別に回した。)
+- 記録は docs/improvement_history.md。
