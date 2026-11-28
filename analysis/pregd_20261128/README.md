@@ -109,3 +109,4 @@
 - `pregd` を `env_def!("ENOMOTO_MIP_PREGD", "pg")` にした。`=0` か `off` で前の形 (同じ列の固定も一般の列の支配列もしない)。値を与えると既定を置き換える
   (試作の `d` を足すには `pgd`)。
 - check_default: 6 問とも一致 (道筋が変わらない) ので、`ref_default.json` は取り直していない。
+- 確かめ (新しい既定): fuzz 7 本は誤答 0、cargo test 428 通過、`fuzz_domcol.py 6000 0` は既知の種 2880 (HiGHS の誤り) だけ。
