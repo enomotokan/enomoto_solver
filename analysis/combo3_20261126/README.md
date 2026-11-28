@@ -250,6 +250,31 @@ c2c = c3 から新しい 4 部品を全部外した形 (combo2 の C2C)。c3−X
 - kasai t1 (既定 130、c2c 159、c3 287、−nolp 221・−enumt 231・−nrap 382): 1 つの部品ではなく組み合わせ。nrakasai の調べのとおり、
   最適値の見つかる時刻で 1 ノードの重さの型が変わる問題で、道筋の運が大きい。
 
-### 8.3 dano3_3 の根の遅れの部品 (1 スレッド、c2c から 1 つずつ抜く、`s2/res_dano.jsonl`)
+### 8.3 dano3_3 の根の遅れの部品 (1 スレッド、c2c から 1 つずつ抜く、`s2/res_dano.jsonl`、版 cd10d12f7 のビルド)
 
-(回している途中)
+既定 67.1 秒、c2c 114.7 秒 (どちらもノード 1)。c2c から 1 つ抜くと、**−heur だけが 69.5 秒** で既定並みに戻り、ほかの 10 部品は 112〜117 秒のまま。
+HEUR_ADAPT の文字を変えても (`1`・`1m`・`1k`、`s2/res_dano_h*.jsonl`) 113〜114 秒で、土台の `1` そのものが効いている。
+
+ログ (`ENOMOTO_MIP_LOG=1`) で比べると、違いは根の LP プロービング (`GAP1 u`) だけ:
+- c2c: `LP probing 18 rounds, 284 LPs, 0 at the iteration limit 1702`、終わり 60.2 秒
+- c2c − heur: `20 rounds, 320 LPs, 180 at the iteration limit 200`、終わり 15.4 秒
+
+**仕組み** (cd10d12f7 の src/mip/solver.rs): HEUR_ADAPT は根の LP の反復の物差し `self.root_lp_iters` を、前処理の LP の最初の LP の反復の側へ
+f_g だけ寄せる (12154 行あたり、ヒューリスティクスの予算を温め直した根の LP の数百反復で縮めないための寄せ)。ところが同じ `root_lp_iters` を、
+GAP1 u の LP プロービングの子の反復の上限 `itlim = 2 × root_lp_iters / 10` (23549 行) も使っており、dano3_3 では上限が 200 → 1702 に上がって、
+打ち切られていた子の LP が最後まで解かれ、プロービングが約 45 秒延びた (固定は 140 → 215 本に増えるが、木は 1 ノードで変わらない)。
+`root_lp_iters` はほかにも DFSBB の手間・LNS の下限・強分枝の単位などに使われているので、同じ漏れが根の手間の遅れ (piperout-27・
+neos-1582420・app1-1 の heur の分) にも混じっている見込み (確かめていない)。
+
+直しの案 (未着手): HEUR_ADAPT の寄せを、根のヒューリスティクスの予算 (局所の `root_iters`) だけに当て、`self.root_lp_iters` は寄せない
+(新しい閾値は要らない)。
+
+### 8.4 まとめ (部品ごとの既定化の判断の材料)
+
+- 29 件のうち 9 件は道筋の揺れ (8.1 節)。残り 20 件のうち 8 件は c2c にもとからある部品の害で、新しい 4 部品とは関係がない
+  (piperout-27・dano3_3 は HEUR_ADAPT (と ENUM_ADAPT) の根の手間で仕組み。dano3_3 の仕組みは 8.3 節)。
+- 新しい 4 部品で出る遅れは、どの部品か問題で違い、1 つの部品に偏らない (nrap 4 件・nolp 4 件・enumt 2 件・share 1 件。4 スレッドは揺れも大きい)。
+  1 スレッド (種で道筋が決まる) で 1 つ外して戻るのは、nrap (atrato・pg5_34) と enumt (pg5_34) だけ。
+- 新しい 4 部品は、どれも c2c の部品を変える形 (nrap・share は NODEROWS_ADAPT、enumt は ENUM_ADAPT、nolp は SB_PROBEBD の強分枝の伝播) で、
+  単独で既定に入れても働かない。部品ごとに既定化するなら、先に土台の部品 (NODEROWS_ADAPT・ENUM_ADAPT・HEUR_ADAPT・SB_PROBEBD など) を
+  1 つずつ既定化するかを決める必要がある。そのとき、HEUR_ADAPT は 8.3 節の漏れを直してからが良い。
