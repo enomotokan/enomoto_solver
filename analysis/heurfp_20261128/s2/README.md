@@ -6,7 +6,8 @@
 - 設定: cfg.py (def_t1・def_t4・heurfp_t1・heurfp_t4)。同じ (問題, スレッド) の def と heurfp は同じ分担で続けて回す (同じ機械・同じビルド)。
 - 分担: `plan.py 6` → shards.json (6 分担、各約 19.7 時間の見積り)。
 - 割り当て: 0 は私 (VB)、1 Eugj、2 FcsJ、3 Gkoa、4 Ei45、5 JJTM。
-- 版: 下の「版」の節。PREGD=pg の既定化 (Gm3w) は、始めた時点で届いていなかったので含まない。
+- 版: **bb9540475** (enum・nra の既定化の後の先端)。PREGD=pg の既定化 (Gm3w) は、始めた時点で届いていなかったので含まない。
+  check_default は 6 問とも一致 (`check_default.out`)。heurfp の形の fuzz 7 本・cargo test は `fuzz_heurfp.out`。
 - 集計: `python analysis/heurfp_20261128/s2/summ.py > analysis/heurfp_20261128/s2/summ.txt`。採用の目安: 区間の上端 ≲ 1.05、解けた数が減らない、
   全種 1.25 倍超の遅れなし、誤答 0。600 秒を越えた回は、終わってからログつきで解き直し、研磨 (`final polish`) によるものとそれ以外に分ける。
 
@@ -17,7 +18,7 @@ cd /home/user/enomoto_solver
 git fetch origin ccr-1beed81b-ex0uhq
 git worktree add --detach /home/user/es_hf240 FETCH_HEAD
 cd /home/user/es_hf240
-git diff --stat <版> HEAD -- src python Cargo.toml Cargo.lock pyproject.toml   # 空でなければ git checkout <版> -- (同じパス)
+git diff --stat bb9540475 HEAD -- src python Cargo.toml Cargo.lock pyproject.toml   # 空でなければ git checkout bb9540475 -- (同じパス)
 ln -s /home/user/enomoto_solver/.miplib_cache .miplib_cache
 pip install -e .
 python -c "import highspy" || pip install highspy==1.15.1
