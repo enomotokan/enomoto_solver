@@ -10890,7 +10890,83 @@ fn diag_costshift(prob: &MipProblem, base: usize) {
 }
 
 fn dominated_binary_fixings(prob: &MipProblem) -> Vec<(usize, f64)> {
+    // 試作 `ENOMOTO_MIP_PREGD` の `p` ([`identical_col_fixings`]): 同じ列で費用の違う列を先に固定し、固定した問題で 0-1 列の支配を調べる
+    if pregd('p') {
+        let ident = identical_col_fixings(prob);
+        if !ident.is_empty() {
+            let mut q = prob.clone();
+            for &(j, v) in &ident {
+                q.col_lo[j] = v;
+                q.col_up[j] = v;
+            }
+            let mut out = ident;
+            out.extend(dominated_binary_fixings_with(&q, env_def!("ENOMOTO_MIP_DOMCOL_PRED", "1").is_some()));
+            return out;
+        }
+    }
     dominated_binary_fixings_with(prob, env_def!("ENOMOTO_MIP_DOMCOL_PRED", "1").is_some())
+}
+
+/// 試作 `ENOMOTO_MIP_PREGD` (既定では使わない。analysis/pregd_20261128) の形の文字 `c` が入っているか
+fn pregd(c: char) -> bool {
+    env_str!("ENOMOTO_MIP_PREGD").is_some_and(|v| v.contains(c))
+}
+
+/// `ENOMOTO_MIP_PREGD` の `p` (analysis/pregd_20261128): 係数が全く同じ列 (同じ型) の組で、費用の安い列 x_j が高い列 x_k を支配する
+/// (HiGHS の dominatedColumns の、等式の行では係数が等しくなければならない場合。nw04 は 87482 列のうち 41292 列がこれで、HiGHS は 36777 列を固定する)。
+/// x_k を下限から δ 上げた解は、x_k を下限に戻して x_j を δ 上げても行の活動は同じで、目的は (c_k − c_j) δ ≥ 0 だけ良くなる。x_j を上げられるのは
+/// (a) x_j の上限が無いとき、か (b) 両方 0-1 で同時に 1 にできない (同じ列なので、ある行で 2 本とも 1 にすると最小活動でも破れる) とき。
+/// どちらかなら x_k を下限に固定する (同じ組の固定はみな x_j に移せる: (a) は上限が無く、(b) は組の中で 1 になれるのは 1 本だけ)。
+/// x_j は固定しない。返り値は (列, 値)。
+fn identical_col_fixings(prob: &MipProblem) -> Vec<(usize, f64)> {
+    let n = prob.n;
+    let m = prob.rows.len();
+    // 行の最小・最大活動 (無限の項の数つき)
+    let (mut mn, mut mx) = (vec![0.0f64; m], vec![0.0f64; m]);
+    let (mut mn_inf, mut mx_inf) = (vec![0u32; m], vec![0u32; m]);
+    for (i, r) in prob.rows.iter().enumerate() {
+        for &(j, a) in r {
+            let (l, u) = (prob.col_lo[j], prob.col_up[j]);
+            let (lo_c, up_c) = if a > 0.0 { (a * l, a * u) } else { (a * u, a * l) };
+            if lo_c.is_finite() { mn[i] += lo_c } else { mn_inf[i] += 1 }
+            if up_c.is_finite() { mx[i] += up_c } else { mx_inf[i] += 1 }
+        }
+    }
+    let binary = |j: usize| prob.is_int[j] && prob.col_lo[j] == 0.0 && prob.col_up[j] == 1.0;
+    let mut groups: std::collections::HashMap<(bool, Vec<(usize, u64)>), Vec<usize>> = std::collections::HashMap::new();
+    for j in 0..n {
+        if prob.col_lo[j] >= prob.col_up[j] || prob.cols[j].is_empty() {
+            continue;
+        }
+        let mut key: Vec<(usize, u64)> = prob.cols[j].iter().map(|&(i, a)| (i, (a + 0.0).to_bits())).collect();
+        key.sort_unstable();
+        groups.entry((prob.is_int[j], key)).or_default().push(j);
+    }
+    let mut out = Vec::new();
+    for mut g in groups.into_values() {
+        if g.len() < 2 {
+            continue;
+        }
+        g.sort_by(|&a, &b| prob.cost[a].total_cmp(&prob.cost[b]).then(a.cmp(&b)));
+        let j = g[0];
+        // (b): 組の 0-1 列のどれか 2 本を 1 にすると破れる行があるか (組の列は 0-1 で下限 0 なので、最小活動に組の列は入っていない)
+        let conflict = g.iter().all(|&k| binary(k))
+            && prob.cols[j].iter().any(|&(i, a)| {
+                let tol = 1e-9 * (1.0 + prob.row_up[i].abs().min(1e12).max(prob.row_lo[i].abs().min(1e12)));
+                (a > 0.0 && prob.row_up[i].is_finite() && mn_inf[i] == 0 && mn[i] + 2.0 * a > prob.row_up[i] + tol)
+                    || (a < 0.0 && prob.row_lo[i].is_finite() && mx_inf[i] == 0 && mx[i] + 2.0 * a < prob.row_lo[i] - tol)
+            });
+        let up_free = prob.col_up[j] == f64::INFINITY;
+        if !conflict && !up_free {
+            continue;
+        }
+        for &k in &g[1..] {
+            if prob.col_lo[k].is_finite() {
+                out.push((k, prob.col_lo[k]));
+            }
+        }
+    }
+    out
 }
 
 /// [`dominated_binary_fixings`] の本体。`pred` は `ENOMOTO_MIP_DOMCOL_PRED` (予測の境界の (c) も使う)。
