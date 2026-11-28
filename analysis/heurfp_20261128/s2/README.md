@@ -30,3 +30,10 @@ python analysis/heurfp_20261128/s2/prog.py                     # 進み
 - 2 時間の上限で止まったら同じコマンドで回し直す。setsid・nohup は使わない。計測の途中でビルドし直さない。同じ機械でほかの計測を重ねない。
 - 結果は区切りごとに本体のチェックアウトに写して commit し、取り込んでから push する:
   `cp /home/user/es_hf240/analysis/heurfp_20261128/s2/res_sK.jsonl /home/user/enomoto_solver/analysis/heurfp_20261128/s2/` のあと、本体で add・commit・fetch・merge・push。
+
+## 組み替え (2026-11-28 17 時、親の判断)
+
+- 分担 3 (Gkoa) は 23 / 160 回で止まった (Gkoa のセッションでは、2 時間で止まった処理の再開が権限の判定で拒否された)。続きは J2UA が引き継ぐ。
+- 遅い分担 2・3 の終わりの組を手伝いに渡す: `takeover.json` = `{"2": 25, "3": 35}`。
+  - 手伝い: 分担 2 の終わりの 25 組は FinV、分担 3 の終わりの 35 組は HwBw。`run.py K --tail` で、終わりの組から逆順に `res_sK_tail.jsonl` に足す。
+  - 持ち主 (分担 2 の FcsJ、分担 3 の J2UA) は、次に回し直す前に取り込んで takeover.json を読む。渡した組は飛ばす。重なった数回は後の行を取る。
