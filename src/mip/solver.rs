@@ -7183,9 +7183,15 @@ pub(super) fn ncl_has(c: char) -> bool {
 
 /// 試作 `ENOMOTO_MIP_NODE_ROWSCOPE` (既定では使わない、analysis/nodespeed_20261123/README.md): [`Solver::rowscope_sync`]
 /// 試作 `ENOMOTO_MIP_POOL_SEL` (既定では使わない、analysis/nodespeed_20261123/README.md 5 節): [`Solver::pool_select_round`]
-/// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` (既定では使わない、analysis/nodespeed_20261123/README.md 8 節): [`Solver::nra_f`]
+/// `ENOMOTO_MIP_NODEROWS_ADAPT` (2026-11-28 に `r0k23p` で既定化、`=0`・`off` で切る。analysis/base1_20261128。もとは試作、
+/// analysis/nodespeed_20261123/README.md 8 節): [`Solver::nra_f`]
 pub(super) fn nra_on() -> bool {
-    env_str!("ENOMOTO_MIP_NODEROWS_ADAPT").is_some()
+    nra_val().is_some()
+}
+
+/// `ENOMOTO_MIP_NODEROWS_ADAPT` の値 (付けていなければ既定の `r0k23p`、`0`・`off` なら `None`)
+fn nra_val() -> Option<&'static str> {
+    env_def!("ENOMOTO_MIP_NODEROWS_ADAPT", "r0k23p")
 }
 
 /// 試作 `ENOMOTO_MIP_POOL_CLOSE=1` (既定では使わない、analysis/poolclose_20261125/README.md): 閉じる直前のノード (打ち切り値 U と
@@ -7228,15 +7234,16 @@ pub(super) fn nra_order() -> char {
 }
 
 /// 試作 `ENOMOTO_MIP_NODEROWS_ADAPT` の文字 (`r`: 選び直しの頻度を効き目 ρ 倍にする)
-/// 試作 `ENOMOTO_MIP_NRA_SHARE` (既定では使わない、analysis/nrashare_20261126): 木を分け合うとき (4 スレッドなど)、NODEROWS_ADAPT の統計
+/// `ENOMOTO_MIP_NRA_SHARE` (analysis/nrashare_20261126): 木を分け合うとき (4 スレッドなど)、NODEROWS_ADAPT の統計
 /// (閉じた葉の数 → φ・f、`p`・`g` のプールのラウンドの伸び ĝ) を全スレッドの合計で数える ([`WorkPool::nra_sh_leaves`]・`nra_sh_gain`)。
 /// 1 スレッド (プールなし) では何も変わらない
+/// (2026-11-28 に既定化、`=0`・`off` で切る。analysis/base1_20261128)
 pub(super) fn nra_share_on() -> bool {
-    env_str!("ENOMOTO_MIP_NRA_SHARE").is_some_and(|v| v != "0")
+    env_def!("ENOMOTO_MIP_NRA_SHARE", "1").is_some()
 }
 
 pub(super) fn nra_has(c: char) -> bool {
-    env_str!("ENOMOTO_MIP_NODEROWS_ADAPT").is_some_and(|v| v.contains(c))
+    nra_val().is_some_and(|v| v.contains(c))
 }
 
 /// 試作 `ENOMOTO_MIP_POOL_SEL` の文字 (`e`: 戻したカットを目的値の伸びで残すか外すか決める)
