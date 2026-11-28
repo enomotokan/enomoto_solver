@@ -11630,11 +11630,14 @@ impl<'a, L: MipLp> Solver<'a, L> {
     pub(super) fn gap_frac(&self) -> f64 {
         match &self.incumbent {
             None => 1.0,
-            Some((z, _)) => {
-                let lb = self.global_lower_bound();
-                if lb.is_finite() { ((z - lb) / z.abs().max(lb.abs()).max(1.0)).clamp(0.0, 1.0) } else { 1.0 }
-            }
+            Some((z, _)) => self.gap_frac_at(*z),
         }
+    }
+
+    /// 目的値 `z` の解があるとしたときの [`Self::gap_frac`] (T1PRIMAL は暫定解がなければ打ち切り値で測る)。
+    pub(super) fn gap_frac_at(&self, z: f64) -> f64 {
+        let lb = self.global_lower_bound();
+        if lb.is_finite() { ((z - lb) / z.abs().max(lb.abs()).max(1.0)).clamp(0.0, 1.0) } else { 1.0 }
     }
 
     pub(super) fn global_lower_bound(&self) -> f64 {
@@ -12934,8 +12937,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
         }
         // 試作 `ENOMOTO_MIP_T1PRIMAL` ([`super::t1primal`]): 1 スレッドで FJ + Local-MIP の組を補助のスレッドに持たせ、時間の取り分を
         // 当たった率・改善の止まった時間の割合・ギャップのシグモイドで決めて、根の終わりと木のノードで少しずつ回す
-        // (再スタートの後も入れる。再スタートの solver は時刻を 0 から数え、解はその solver の問題の空間で試すので、取り分・貯えは
-        // 始めからやり直しになる。再スタートの前だけだと、30n20b8 は早い解 353 のあと木の再スタートで止まり、302 に届かなかった。
+        // (再スタートの後も入れる。再スタートの solver は時刻を 0 から数え、解はその solver の問題の空間で試すので、貯えは
+        // 始めからやり直し (回した回数・当たった回数は引き継ぐ、5 版目)。再スタートの前だけだと、30n20b8 は早い解 353 のあと木の再スタートで止まり、302 に届かなかった。
         // analysis/t1primal_20261126 8 節)
         if super::t1primal::enabled() && mip_threads() == 1 && !self.params.submip && self.snap.is_none() && !proof_only() && self.fj_thread.is_none() && !self.root_gap_closed() {
             self.t1primal_start();
@@ -27995,6 +27998,10 @@ impl<'a, L: MipLp> Solver<'a, L> {
             }
             super::RESTART_CUTS.with(|s| *s.borrow_mut() = Some(carry));
             super::RESTART_CUTS_READD.with(|f| f.set(readd && super::restart_cuts_fix()));
+        }
+        // 試作 `ENOMOTO_MIP_T1PRIMAL`: 回した回数・当たった回数を再スタートの後の solver に引き継ぐ
+        if !self.params.submip {
+            self.t1primal_carry();
         }
         // 暫定解を引き継ぐ (新しい問題は列が同じ)
         if env_str!("ENOMOTO_MIP_RESTART_NO_INCUMBENT").is_none() {
