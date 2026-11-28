@@ -5118,7 +5118,7 @@ pub(crate) fn rootrestart2(c: char) -> bool {
 }
 
 /// 試作 `ENOMOTO_MIP_RSTLOOSE=文字` (既定では使わない。analysis/rootrestart_20261126/README.md の 10 節): 根の再スタートの閾値をなるべく緩めに
-/// そろえ、再スタートで失うものを減らす。値の読み方は [`rr2_letters`] と同じ (`none`・`0`・`off` はオフ、`1` は `t` だけ)。
+/// そろえ、再スタートで失うものを減らす。**既定は `tpci`** (未設定のとき)。値の読み方は [`rr2_letters`] と同じ (`none`・`0`・`off` はオフ、`1` は `t` だけ)。
 /// - `t`: 再スタートの固定の割合の閾値を、場面によらず既存の最も緩い値 (根の最後の 1 回目の `ENOMOTO_T_MIP_RESTART_FIRST_FAC`、0.01) にそろえる
 ///   ([`rst_fac`])。対象は根の最後の 2 回目以降 (`RESTART_FAC` 0.025)、早めの再スタート (`EARLY_RESTART_FRAC` 0.025)、
 ///   木の中 (`TREE_RESTART_FRAC` 0.05・`TREE_RESTART_INC2_FRAC` 0.1)。分母 (全部の整数列か、根の始めに自由な整数列か) は今のまま
@@ -5127,7 +5127,8 @@ pub(crate) fn rootrestart2(c: char) -> bool {
 /// - `i`: プロービングの含意 (`conflict_edges`、クリーク表の辺) を新しい問題に渡す (新しいプロービングはそこから足していく)
 /// `c`・`i` を渡すと再スタートの後の固定列の落とし (`RESTART_DROP_FIXED`) は使われない ([`super::restart_drop_fixed`])。
 pub(crate) fn rstloose(c: char) -> bool {
-    let v = env_str!("ENOMOTO_MIP_RSTLOOSE");
+    // 既定は tpci (利用者の承認、README 10 節)。`0`・`off` (と `none`) で従来の形に戻る
+    let v = env_def!("ENOMOTO_MIP_RSTLOOSE", "tpci");
     rr2_letters(v, c) || (c == 't' && v.map(str::trim) == Some("1"))
 }
 

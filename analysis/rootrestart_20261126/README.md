@@ -317,3 +317,9 @@
 - 小さな問題で見た型: h80x6320d は 1 スレッドで 34.2・30.5・28.3 → 32.7・36.0・38.8 秒 (種 1 以外は遅れ)、4 スレッドでは 28.4・28.0・24.2 → 26.4・26.2・23.7 秒。qnet1 は全部速い (1 スレッド 5.7・3.7・4.5 → 4.5・3.5・4.4)。p200x1188c・drayage-25-23・gt2 は既定と同じ (既定はもともと 0 ノード)。
 - fuzz (`FUZZ_VENV=/usr/local bash analysis/unify_20261126/fuzz.sh rl ENOMOTO_MIP_RSTLOOSE=tpci`、ビルド a2275f2a9): 標準 7 本と fuzz_bigact 2 本すべて bad 0・mismatches 0、cargo test 428 passed (既定と tpci の両方、`fuzz_rl.out`)。check_default は 6 問とも一致。
 - **結論**: 1 スレッドは「候補」(解けた数 +2、mzzv42z・mc11)。4 スレッドは fiber が全種で遅れて「外れ」(10teams 1.38・neos5 も遅れ)。閾値をそろえて緩める (t) だけでは 4 スレッドで要らない再スタートが増える型があり、目安を満たさない。**既定にはしない** (コードは既定オフのまま残す)。p200x1188c の型 (am で根の最後の再スタートを見送る) は t で直ること、h80x6320d の t の損は p・c・i の持ち越しで消えることは確かめた。
+
+### 10.5 既定化 (利用者の承認、2026-11-28)
+
+- 利用者が `tpci` の既定化を承認した (方針「再スタートの閾値は緩めに」「中立なら入れる」)。`rstloose` を `env_def!("ENOMOTO_MIP_RSTLOOSE", "tpci")` にした。`=0`・`off` で従来の形。
+- check_default は mik-250-20-75-4 だけノード数が 3937 → 3287 (目的値は同じ、2 回同じ) で、`ref_default.json` を書き直した。`RSTLOOSE=0` で前の基準と全部一致。
+- 既定化した木で cargo test 428 通過、fuzz 7 本 + bigact 2 本は誤答 0 (`fuzz_rldef.out`)。記録は docs/improvement_history.md。
