@@ -13981,8 +13981,8 @@ impl<'a, L: MipLp> Solver<'a, L> {
                     heur!("sub-MIP Local-MIP", self.subheur_local_mip());
                 }
                 self.rootcap_end = self.rootcap_until.take();
-                // 試作 `ENOMOTO_MIP_PAR4ROLE`: `b` の手伝いを待って受け取り、`a` の手伝いを止めて受け取る
-                self.par4_poll("a", "ab");
+                // 試作 `ENOMOTO_MIP_PAR4ROLE`: `b` の手伝いを待って受け取り、`a` の手伝いは止めて、届いている解だけ受け取る (待たない、7.6 節)
+                self.par4_poll("a", "b");
                 self.par4_delegated = 0;
                 // 試作 `ROOTPAR_PH` の `b`: 別スレッドの研磨をここで待って受け取る
                 self.rph_join_polish();
@@ -29439,7 +29439,9 @@ impl<'a, L: MipLp> Solver<'a, L> {
                 PAR4_STEPS.with(|c| c.set((mask, rot)));
                 PAR4_SH.with(|c| *c.borrow_mut() = shv);
                 FIND_OUT.with(|o| *o.borrow_mut() = Some(o2));
-                let halt = submip_halt().then(|| s2.clone());
+                // `a` の手伝いは止めの合図を LP の止めにもつなぐ (7.6 節: dano3_3 では止めの後もダイビングの重い LP を解き続け、
+                // 主が根の終わりで 60 秒待っていた)
+                let halt = (submip_halt() || role == 'a').then(|| s2.clone());
                 FIND_STOP.with(|o| *o.borrow_mut() = Some(s2));
                 BG_ROOT_BASIS.with(|b| *b.borrow_mut() = Some(basis));
                 crate::cancel::with_halt(halt, || solve_worker(snap, None, params))
