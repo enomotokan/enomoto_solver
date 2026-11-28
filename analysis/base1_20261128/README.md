@@ -20,9 +20,14 @@ analysis/combo3_20261126 8.4 節: c3 の新しい部品は、どれも c2c の�
 - **3f3054603** (先端: 7d43fcdac の DUALEQ・RSTLOOSE・PRR_TIGHT の既定化と、HEUR_ADAPT の `r` を含む)。
 - check_default (`check_default.out`) と、全部の部品を入れた形の fuzz 7 本・cargo test (`fuzz_all.out`): 3 節。
 
-## 3. 確かめ
+## 3. 確かめ (版 3f3054603)
 
-(回している途中)
+- check_default (`check_default.out`): 6 問とも基準と一致 (mik-250-20-75-4 は 3287 ノード)。HEUR_ADAPT の `r` を足しても既定の道筋は変わらない。
+- 全部の部品 (HEUR_ADAPT=1mkr・FP_STAGE3_LS=a・NODEROWS_ADAPT=r0k23p・NRA_SHARE=1・ENUM_ADAPT=1st・SB_PROBEBD=1・SB_PROP_NO_LP=1) を
+  入れた形の fuzz 7 本 (`fuzz_all.out`): 誤答 0 (fuzz_tiny 0/400・0/400、fuzz_highs 0/300、fuzz_objint 0/1000・0/1000、fuzz_slack mismatches 0 (1000・1000 回))。
+  cargo test は 428 通過・0 失敗。
+- 割り当て: 0 は私、1 EwwjY、2 FcsJ、3 GZRx、4 FVbj、5 FinV、6 GU3WAp、7 FKBv (親の許しで直接頼んだ。4・5 は最初 GcYE・GGo5 に頼んだが、
+  ほかの計測と機械が重なるので親の判断で付け替えた)。EwwjY・GZRx は今の計測 (PRESIZE240) の後、07:40 UTC ごろから。
 
 ## 4. 回し方 (分担 K)
 
