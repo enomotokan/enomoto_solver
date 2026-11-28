@@ -160,6 +160,14 @@ mcsched (伸びる対照) は、根が 2.4 秒で、すぐに 4 本の木に入�
 - 診断: 「MIP: PAR4ROLE: helpers a … b …, helper solutions …, accepted as incumbent …」(求解 1 回ごと。再スタートの後の求解は別に数える)。
 - 主の側のログ: 「MIP: PAR4ROLE a: gap …, weight …, free threads …, helpers …」「MIP: root heuristic …: delegated to a PAR4ROLE helper」。
 
+**注記 (2026-11-28、親の指摘): `a` の重みは、既定の設定では適応になっていない。**
+- w = g / (g + rel_gap) の rel_gap は、終わりの判定の相対ギャップ (`MipParams::rel_gap`)。既定は 0 (src/mip/solver.rs `MipParams::default`)。
+  コードは `rel_gap.max(1e-12)` を使うので、ギャップ g が 1e-10 を超えれば w ≈ 1 になる。つまり既定の設定では、いつも空いたスレッドを全部使う。
+  13 問のログもすべて「weight 1.000」だった。
+- この重みには実測の根拠がない。13 問では中立 (0.970、5.1 節) で、本数を変えたときの比べもしていない。
+- 配る先はもともと遊んでいるスレッドなので、本数を絞ることには意味が薄い。続けるなら、空いたスレッドを解探しと下界側 (並列の分離・プロービングなど) の
+  どちらに使うかを、既存の量 (暫定解の有無・ギャップ・改善の止まり方、下界の伸びの速さ) で配分する形が筋。これは 7 節で作る。
+
 ### 5.1 13 問の 4T (`batch2.sh ab`・`compare.py ab` → `compare_ab.txt`、ビルド 36dafcbc6、種 1)
 
 - 既定は 3 節の回 (ビルド 4a23ac9c9)。その後に取り込んだ先端の差 (e2f166597 まで) は、check_default で道筋が変わらないことを確かめた範囲。
