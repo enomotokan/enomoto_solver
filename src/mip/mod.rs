@@ -2894,7 +2894,8 @@ fn solve_problem_inner(p: &MipProblem, params: MipParams, use_presolve: bool) ->
             let early_sol = early.is_some();
             let prob = if early_sol { prob } else if env_str!("ENOMOTO_MIP_NO_CLIQUE_EXTEND").is_none() && (!params.submip || env_str!("ENOMOTO_MIP_CLIQUE_EXTEND_SUBMIP").is_some() || submip_highs('p')) { extend_clique_rows(prob, params.verbose) } else { prob };
             // 試作 `ENOMOTO_MIP_ROWCLEAN` (既定オフ、analysis/presize240_20261127 の 7 節): 列の境界だけで両辺が満たされる行 (全部の列が固定された行を含む) を落とす
-            let prob = if rowclean_on() && !early_sol { drop_redundant_rows(prob, params.verbose) } else { prob };
+            // サブ MIP では使わない (presize240 の 8 節: noswot はサブ MIP で行を落とすと RINS などの道筋が変わり、種 2・3 で 15 -> 30 秒)
+            let prob = if rowclean_on() && !early_sol && !params.submip { drop_redundant_rows(prob, params.verbose) } else { prob };
             // 診断用: クリーク行の拡張の後の問題 (`ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED2=ファイル`)
             if let Some(f) = env_str!("ENOMOTO_MIP_DEBUG_DUMP_PRESOLVED2").filter(|_| !params.submip && params.restarts == 0) {
                 dump_mps(&prob, &f);
@@ -5579,7 +5580,7 @@ struct EnumClockGuard(Option<Option<(usize, f64, f64)>>);
 
 impl EnumClockGuard {
     fn new() -> Self {
-        let on = enum_adapt_on() && env_str!("ENOMOTO_MIP_ENUM_ADAPT").is_some_and(|v| v.contains('t')) && ENUM_T0.with(|c| c.get()).is_none();
+        let on = enum_adapt_on() && enum_adapt_val().is_some_and(|v| v.contains('t')) && ENUM_T0.with(|c| c.get()).is_none();
         if !on {
             return EnumClockGuard(None);
         }
@@ -6530,12 +6531,14 @@ fn represolve_after_probe(prob: MipProblem, mut postsolve: Vec<crate::presolve::
     // 締めた境界で前処理 (係数の強化) をかけて、またプロービングする、を繰り返す (SCIP は probing と linear の前処理を交互に回す。istanbul-no-cutoff
     // では 13 周で境界の変更 14294 本・係数の締め 47989)。回数の上限・行の減り方の判定は使わず、SCIP の前処理の打ち切り (`presolving/abortfac` 0.0008:
     // 1 周の変更が列の数のその割合より少なければやめる) と同じ形で、その周のプロービングの固定と締め付けが列の数の 0.0008 倍に届かなければやめる
-    let mut tight = (prr_tight_mode().is_some() || enum_adapt_on()) && !submip && !PRESOLVE_IN_SUBMIP.with(|f| f.get());
+    // `ENUM_ADAPT` の `z` ([`enum_adapt_z`]) は、かけ直しを既定の規則 (`o` を含む) のままにする (presize240 の 8 節: neos-960392 は `o` の規則が外れて
+    // 行が 4% しか減らないかけ直しの結果を使い、木が 101 -> 161 ノードになっていた)
+    let mut tight = (prr_tight_mode().is_some() || (enum_adapt_on() && !enum_adapt_z())) && !submip && !PRESOLVE_IN_SUBMIP.with(|f| f.get());
     // `ENOMOTO_MIP_PRR_TIGHT=o` (analysis/rootbound_20261126 の 6 節): 締め付けだけで固定の無い周にだけ PRR_TIGHT の規則 (回数の上限・行の減り方の
     // 判定を使わない) を使い、固定のある周は既定の規則 (`PRR_MIN_FIXED`・`PRR_MIN_ROW_FRAC`・`PROBE_REPRESOLVE_MAX`) のままにする。
     // `=1` は固定のある周でも行の減り方の判定を外すので、misc07・dcmulti・nw04 (締め付け 0 本) の道筋まで変わっていた。
     // 2026-11-27 に `o` を既定にした (P で 1 スレッド 1.001・4 スレッド 1.013、istanbul-no-cutoff の根 107.7 -> 143.4)
-    if tight && !enum_adapt_on() && prr_tight_mode() == Some("o") && !submip {
+    if tight && (!enum_adapt_on() || enum_adapt_z()) && prr_tight_mode() == Some("o") && !submip {
         let (gf, gt, _) = PROBE_GAIN.with(|f| f.get());
         let fixed = PROBE_FIXED.with(|f| f.get());
         if gt == 0 || gf > 0 || fixed >= tunable!("ENOMOTO_T_MIP_PRR_MIN_FIXED", 1usize, usize) {
@@ -9726,11 +9729,16 @@ fn quick_probe_fixings(prob: &mut MipProblem, verbose: bool, submip: bool) -> Op
 /// `before` = プロービングの前だけ、`after` (既定) = プロービングの後だけ、`loop` = プロービングの後に回し、その回 (プロービングと列挙) で新しい固定・締め付け・
 /// 同値な組・衝突の組 (clique) が出れば、プロービングと列挙をもう一度回す、を何も出なくなるまで繰り返す ([`enum_probe_loop`]。回数の上限は置かない。
 /// 止めは前処理の時間の止め [`presolve_stop`] だけ)。`loop` では列挙で分かった衝突の組を含意の表に足す (足さないと次の回も同じ組を新しいと数える)
-/// 試作 `ENOMOTO_MIP_ENUM_ADAPT` (既定では使わない。analysis/cutgap_20261123 の 8 節): 列挙の前処理 (`ENOMOTO_MIP_ENUM_PRESOLVE=all`)・
+/// `ENOMOTO_MIP_ENUM_ADAPT` (2026-11-28 に `1st` で既定化、`=0`・`off` で切る。analysis/base1_20261128。もとは試作、analysis/cutgap_20261123 の 8 節): 列挙の前処理 (`ENOMOTO_MIP_ENUM_PRESOLVE=all`)・
 /// 列挙とプロービングの繰り返し (`ENOMOTO_MIP_ENUM_WHERE=loop`)・締め付けでの前処理のかけ直し (`ENOMOTO_MIP_PRR_TIGHT`) を全部使い、
 /// 2 周目からの繰り返しとかけ直しを続けるか、次の列挙で何割の行を列挙するかを、直前の周の成果と時間からシグモイドで決める ([`enum_adapt_continue`])
 fn enum_adapt_on() -> bool {
-    env_str!("ENOMOTO_MIP_ENUM_ADAPT").is_some_and(|v| v != "0")
+    enum_adapt_val().is_some()
+}
+
+/// `ENOMOTO_MIP_ENUM_ADAPT` の値 (付けていなければ既定の `1st`、`0`・`off` なら `None`)
+fn enum_adapt_val() -> Option<&'static str> {
+    env_def!("ENOMOTO_MIP_ENUM_ADAPT", "1st")
 }
 
 /// 列挙の前処理の形 (`ENOMOTO_MIP_ENUM_PRESOLVE` の値。[`enum_adapt_on`] なら `all`)。`None` は使わない
@@ -9743,7 +9751,7 @@ fn enum_presolve_mode() -> Option<&'static str> {
 
 /// `ENOMOTO_MIP_ENUM_ADAPT=log`: 判定を出すだけで常に続ける (繰り返しは以前の規則で止まる。係数を決めるためのデータ集め)
 fn enum_adapt_log() -> bool {
-    env_str!("ENOMOTO_MIP_ENUM_ADAPT") == Some("log")
+    enum_adapt_val() == Some("log")
 }
 
 /// 求解 (再スタートの前の最初の求解) の始めからの秒 ([`ENUM_T0`]。置かれていなければ無限大)
@@ -9808,7 +9816,7 @@ fn enum_adapt_midstop(gain: usize, n: usize, secs: f64, el: f64) -> bool {
 }
 
 fn enum_adapt_mid_on() -> bool {
-    enum_adapt_on() && env_str!("ENOMOTO_MIP_ENUM_ADAPT").is_some_and(|v| v.contains('s') || v.contains('z'))
+    enum_adapt_on() && enum_adapt_val().is_some_and(|v| v.contains('s') || v.contains('z'))
 }
 
 /// 試作 `ENOMOTO_MIP_ENUM_ADAPT` の `z` (analysis/presize240_20261127 の 7 節): [`enum_adapt_continue`]・[`enum_adapt_midstop`] の得を、
@@ -9817,7 +9825,7 @@ fn enum_adapt_mid_on() -> bool {
 /// 行の数の上限と空振りの規則つき (`ENOMOTO_MIP_ENUM_PRESOLVE=1` と同じ) で回し、全部の行 (`all`) に広げるのは、その得と時間の
 /// シグモイドが続けると決めた後だけ。列挙の途中の止め (`s`) も入る。シグモイドの係数は `ENUM_ADAPT` のまま (新しい閾値は作らない)
 fn enum_adapt_z() -> bool {
-    enum_adapt_on() && env_str!("ENOMOTO_MIP_ENUM_ADAPT").is_some_and(|v| v.contains('z'))
+    enum_adapt_on() && enum_adapt_val().is_some_and(|v| v.contains('z'))
 }
 
 fn enum_where() -> &'static str {
