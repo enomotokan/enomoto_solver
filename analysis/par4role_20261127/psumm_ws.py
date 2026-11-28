@@ -32,3 +32,12 @@ for p in probs:
     ps = [(s, (t(a) + 1) / (t(b) + 1)) for q, s, a, b in pairs if q == p]
     flag = "  全種で 1.25 倍超遅い" if len(ps) == 3 and all(x > 1.25 for _, x in ps) else ("  全種で 0.8 倍未満" if len(ps) == 3 and all(x < 0.8 for _, x in ps) else "")
     print(f"  {p}: " + ", ".join(f"種{s} {x:.2f}" for s, x in ps) + flag)
+# s が 1 つ以上回した対・回さなかった対、w が待ちを打ち切った対に分けた比 (害の出どころ)
+def grp(f):
+    v = [math.log((t(a) + 1) / (t(b) + 1)) for p, s, a, b in pairs if f(a)]
+    return (len(v), math.exp(sum(v) / len(v)) if v else float("nan"))
+print("\n分けた比 (ws / 既定、shift 1 秒 SGM):")
+print("  s が 1 つ以上回した対: %d 対 %.3f" % grp(lambda a: bool(a.get("s")) and a["s"][0] > 0))
+print("  s が回さなかった対: %d 対 %.3f" % grp(lambda a: not (a.get("s") and a["s"][0] > 0)))
+print("  w が待ちを打ち切った対: %d 対 %.3f" % grp(lambda a: bool(a.get("w_capped"))))
+print("  s が局所探索だけ回して何も見つけなかった対 (s = [1, 0]): %d 対 %.3f" % grp(lambda a: a.get("s") == [1, 0]))
