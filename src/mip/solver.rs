@@ -4339,6 +4339,8 @@ pub(crate) fn heur_adapt() -> bool {
 /// 試作 `ENOMOTO_MIP_HEUR_ADAPT` の値の文字 (`=1m` など、[`heur_adapt`] が真のときだけ意味を持つ):
 /// - `m`: FP の第 3 段 (`fp_stage3`) を、外側の根から出したサブ MIP の中では回さない (analysis/comboharm_20261124/neos-1582420.md)
 /// - `k`: f_t ([`Solver::adapt_tree_f`]) の経過・残りを壁時計でなく手間の秒で数える (analysis/comboharm_20261124/README.md 10 節)
+/// - `r`: 根の LP の反復の寄せ (前処理の LP の反復の側へ f_g だけ) を根のヒューリスティクスの予算にだけ当て、`Solver::root_lp_iters`
+///   (GAP1 u のプロービング・DFSBB・LNS・強分枝などの物差し) には漏らさない (analysis/combo3_20261126 8.3 節)
 pub(crate) fn heur_adapt_flag(c: char) -> bool {
     heur_adapt() && env_str!("ENOMOTO_MIP_HEUR_ADAPT").is_some_and(|v| v.contains(c))
 }
@@ -12411,11 +12413,19 @@ impl<'a, L: MipLp> Solver<'a, L> {
         } else {
             root_iters
         };
+        // 試作 `ENOMOTO_MIP_HEUR_ADAPT` の `r` (analysis/combo3_20261126 8.3 節): 上の寄せは根のヒューリスティクスの予算のためのものだが、
+        // `self.root_lp_iters` は GAP1 u の LP プロービングの子の反復の上限・DFSBB の手間・LNS の下限・強分枝の単位などの物差しにも使われ、
+        // 寄せがそこへ漏れていた (dano3_3 の 1 スレッドで GAP1 u の子の反復の上限が 200 → 1702 に上がり、根が 67 → 115 秒)。
+        // `r` では寄せた値を下の局所の `root_iters` (根のヒューリスティクスの予算) にだけ使い、`self.root_lp_iters` は寄せない
+        let heur_root_iters = self.root_lp_iters;
+        if heur_adapt_flag('r') && !(probe_kind != "none" && env_str!("ENOMOTO_MIP_P2RIT").is_some()) {
+            self.root_lp_iters = root_iters;
+        }
         // 試作 `ENOMOTO_MIP_P2RIT=a` (既定では使わない。analysis/presym_20261123): 根のヒューリスティクスの予算 (Feasibility Pump の
         // `1000 + 5 × 根の LP の反復`、ダイビングの `2 × 根の LP の反復 + 1000` など) も、上の物差し (前処理の LP の最初の LP の反復) で決める。
         // `P2RIT` (値なし) は `self.root_lp_iters` だけを変え、この局所の `root_iters` は温め直した根の LP の反復のままだった
         // (CMS750_4 の 1 スレッド: 根の LP が前処理の LP の基底から 1 反復で終わり、FP の LP が予算約 1000 反復で 2 回目に打ち切られていた)
-        let root_iters = if env_str!("ENOMOTO_MIP_P2RIT").is_some_and(|v| v.contains('a')) || heur_adapt() { self.root_lp_iters } else { root_iters };
+        let root_iters = if env_str!("ENOMOTO_MIP_P2RIT").is_some_and(|v| v.contains('a')) || heur_adapt() { heur_root_iters } else { root_iters };
         self.root_lp_secs = t_root_lp.elapsed().as_secs_f64();
         if rootrestart2('e') || rootrestart2('m') {
             self.rr2_root_done();

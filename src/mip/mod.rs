@@ -10973,6 +10973,14 @@ fn identical_col_fixings(prob: &MipProblem) -> Vec<(usize, f64)> {
 fn dominated_binary_fixings_with(prob: &MipProblem, pred: bool) -> Vec<(usize, f64)> {
     let n = prob.n;
     let binary: Vec<bool> = (0..n).map(|j| prob.is_int[j] && prob.col_lo[j] == 0.0 && prob.col_up[j] == 1.0).collect();
+    // 試作 `ENOMOTO_MIP_PREGD` の `g` (analysis/pregd_20261128): 0-1 列に限らず、両側に有限の境界を持つ列 (一般の整数・連続) も調べる。
+    // 文字は y = x − l (s = +1) か y = u − x (s = −1) で、幅は w = u − l。支配の補題 (y_j が y_k を支配すれば、y_j = w_j か y_k = 0 の
+    // 最適解がある: y_k を下げた分を y_j に移す) は、移す量が y_j の型に合う限り型によらない。整数の y_j が連続の y_k を支配することは
+    // 使わない (HiGHS の dominatedColumns と同じ)。衝突グラフ (候補 (a)) は 0-1 列だけ。
+    let gen = pregd('g');
+    let elig: Vec<bool> = (0..n).map(|j| binary[j] || (gen && prob.col_lo[j] < prob.col_up[j] && prob.col_lo[j].is_finite() && prob.col_up[j].is_finite())).collect();
+    // 文字 (j, s) が 0 (top = false) か w (top = true) のときの x の値
+    let x_at = |j: usize, s: f64, top: bool| if (s > 0.0) == top { prob.col_up[j] } else { prob.col_lo[j] };
     let g = clique::CliqueGraph::build_with(n, &prob.rows, &prob.row_lo, &prob.row_up, &binary, &prob.col_lo, &prob.col_up, &prob.conflict_edges);
     let max_pairs = tunable!("ENOMOTO_T_MIP_DOMCOL_MAX_PAIRS", 1_000_000usize, usize);
     let mut cols: Vec<Vec<(usize, f64)>> = prob.cols.clone();
@@ -11008,14 +11016,17 @@ fn dominated_binary_fixings_with(prob: &MipProblem, pred: bool) -> Vec<(usize, f
                 let aj = d * a;
                 let own = if aj > 0.0 { aj * prob.col_lo[j] } else { aj * prob.col_up[j] };
                 let rest = act - own;
-                // 文字 y の項: s = +1 なら aj x = al y、s = -1 なら aj x = aj - al y (定数 aj は右辺へ)
-                let bb = if s > 0.0 { b } else { b - aj };
-                (bb - rest) / al <= 1.0 + 1e-9
+                // 文字 y の項: aj x = aj x(y = 0) + al y (定数 aj x(y = 0) は右辺へ。0-1 列なら s = +1 で 0、s = -1 で aj)
+                let bb = b - aj * x_at(j, s, false);
+                (bb - rest) / al <= (prob.col_up[j] - prob.col_lo[j]) + 1e-9
             })
         })
     };
     // 文字 (j, sj) が (k, sk) を支配するか
     let dominates = |j: usize, sj: f64, k: usize, sk: f64| -> bool {
+        if prob.is_int[j] && !prob.is_int[k] {
+            return false;
+        }
         if sj * prob.cost[j] > sk * prob.cost[k] + 1e-9 * (1.0 + prob.cost[k].abs()) {
             return false;
         }
@@ -11048,13 +11059,12 @@ fn dominated_binary_fixings_with(prob: &MipProblem, pred: bool) -> Vec<(usize, f
     // 列の最悪の値でも満たされるなら y_k = 0 にできる (支配の補題で y_j = 1 か y_k = 0 の最適解があり、y_j = 1 の側でも
     // y_k を 0 に下げて行は破れず目的も悪くならない)。physiciansched6-2 には係数も費用も同じ 0-1 列が 3 本ずつの組が 13 あり、
     // HiGHS は各組の 2 本をこれで 0 に固定する (3 本の和が 1 を超えても得をしない)
-    // 列 x の値 (文字 (j, s) の値 v に当たる)
-    let xval = |s: f64, v: f64| if s > 0.0 { v } else { 1.0 - v };
+    // y_j = w_j・y_k = 0 にしたときに、y_k を下げると破れうる行がほかの列の最悪の値でも満たされるか
     let worst_case_ok = |j: usize, sj: f64, k: usize, sk: f64| -> bool {
         if sk * prob.cost[k] < -1e-9 * (1.0 + prob.cost[k].abs()) {
             return false;
         }
-        let (xj, xk) = (xval(sj, 1.0), xval(sk, 0.0));
+        let (xj, xk) = (x_at(j, sj, true), x_at(k, sk, false));
         cols[k].iter().all(|&(i, ak)| {
             // y_k を下げると (x_k の向き -sk) 行の活動は -sk * ak だけ動く
             let dk = -sk * ak;
@@ -11090,7 +11100,7 @@ fn dominated_binary_fixings_with(prob: &MipProblem, pred: bool) -> Vec<(usize, f
     let (mut pred_pairs, max_pred_pairs) = (0usize, tunable!("ENOMOTO_T_MIP_DOMCOL_PRED_MAX_PAIRS", 1_000_000usize, usize));
     let mut cand: Vec<(usize, f64, bool)> = Vec::new(); // (k, sk, 衝突しているか)
     'outer: for j in 0..n {
-        if !binary[j] {
+        if !elig[j] {
             continue;
         }
         for sj in [1.0, -1.0] {
@@ -11127,7 +11137,7 @@ fn dominated_binary_fixings_with(prob: &MipProblem, pred: bool) -> Vec<(usize, f
             }
             let up_j = pred && implied_up(j, sj);
             for (ci, &(k, sk, conf)) in cand.iter().enumerate() {
-                if k == j || !binary[k] || fixed[k] {
+                if k == j || !elig[k] || fixed[k] {
                     continue;
                 }
                 if ci < n_ab {
@@ -11144,7 +11154,7 @@ fn dominated_binary_fixings_with(prob: &MipProblem, pred: bool) -> Vec<(usize, f
                 if dominates(j, sj, k, sk) && (!pred || conf || up_j || worst_case_ok(j, sj, k, sk)) {
                     // y_k = 0: sk = +1 なら x_k = 0、sk = -1 なら x_k = 1
                     fixed[k] = true;
-                    out.push((k, if sk > 0.0 { 0.0 } else { 1.0 }));
+                    out.push((k, x_at(k, sk, false)));
                 }
             }
         }
@@ -11160,7 +11170,7 @@ fn dominated_binary_fixings_with(prob: &MipProblem, pred: bool) -> Vec<(usize, f
         let max_rev = tunable!("ENOMOTO_T_MIP_DOMCOL_REV_MAX_PAIRS", 50_000_000usize, usize);
         let mut rev_pairs = 0usize;
         'rev: for k in 0..n {
-            if !binary[k] {
+            if !elig[k] {
                 continue;
             }
             for sk in [1.0, -1.0] {
@@ -11177,7 +11187,7 @@ fn dominated_binary_fixings_with(prob: &MipProblem, pred: bool) -> Vec<(usize, f
                     .min_by_key(|&&(i, _)| prob.rows[i].len());
                 let Some(&(i0, _)) = best else { continue };
                 for &(j, _) in &prob.rows[i0] {
-                    if j == k || !binary[j] || fixed[j] {
+                    if j == k || !elig[j] || fixed[j] {
                         continue;
                     }
                     for sj in [1.0, -1.0] {
@@ -11187,7 +11197,7 @@ fn dominated_binary_fixings_with(prob: &MipProblem, pred: bool) -> Vec<(usize, f
                         }
                         if dominates(j, sj, k, sk) && (worst_case_ok(j, sj, k, sk) || implied_up(j, sj)) {
                             fixed[k] = true;
-                            out.push((k, if sk > 0.0 { 0.0 } else { 1.0 }));
+                            out.push((k, x_at(k, sk, false)));
                             continue 'rev;
                         }
                     }
