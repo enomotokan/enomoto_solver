@@ -5580,7 +5580,7 @@ struct EnumClockGuard(Option<Option<(usize, f64, f64)>>);
 
 impl EnumClockGuard {
     fn new() -> Self {
-        let on = enum_adapt_on() && env_str!("ENOMOTO_MIP_ENUM_ADAPT").is_some_and(|v| v.contains('t')) && ENUM_T0.with(|c| c.get()).is_none();
+        let on = enum_adapt_on() && enum_adapt_val().is_some_and(|v| v.contains('t')) && ENUM_T0.with(|c| c.get()).is_none();
         if !on {
             return EnumClockGuard(None);
         }
@@ -9729,11 +9729,16 @@ fn quick_probe_fixings(prob: &mut MipProblem, verbose: bool, submip: bool) -> Op
 /// `before` = プロービングの前だけ、`after` (既定) = プロービングの後だけ、`loop` = プロービングの後に回し、その回 (プロービングと列挙) で新しい固定・締め付け・
 /// 同値な組・衝突の組 (clique) が出れば、プロービングと列挙をもう一度回す、を何も出なくなるまで繰り返す ([`enum_probe_loop`]。回数の上限は置かない。
 /// 止めは前処理の時間の止め [`presolve_stop`] だけ)。`loop` では列挙で分かった衝突の組を含意の表に足す (足さないと次の回も同じ組を新しいと数える)
-/// 試作 `ENOMOTO_MIP_ENUM_ADAPT` (既定では使わない。analysis/cutgap_20261123 の 8 節): 列挙の前処理 (`ENOMOTO_MIP_ENUM_PRESOLVE=all`)・
+/// `ENOMOTO_MIP_ENUM_ADAPT` (2026-11-28 に `1st` で既定化、`=0`・`off` で切る。analysis/base1_20261128。もとは試作、analysis/cutgap_20261123 の 8 節): 列挙の前処理 (`ENOMOTO_MIP_ENUM_PRESOLVE=all`)・
 /// 列挙とプロービングの繰り返し (`ENOMOTO_MIP_ENUM_WHERE=loop`)・締め付けでの前処理のかけ直し (`ENOMOTO_MIP_PRR_TIGHT`) を全部使い、
 /// 2 周目からの繰り返しとかけ直しを続けるか、次の列挙で何割の行を列挙するかを、直前の周の成果と時間からシグモイドで決める ([`enum_adapt_continue`])
 fn enum_adapt_on() -> bool {
-    env_str!("ENOMOTO_MIP_ENUM_ADAPT").is_some_and(|v| v != "0")
+    enum_adapt_val().is_some()
+}
+
+/// `ENOMOTO_MIP_ENUM_ADAPT` の値 (付けていなければ既定の `1st`、`0`・`off` なら `None`)
+fn enum_adapt_val() -> Option<&'static str> {
+    env_def!("ENOMOTO_MIP_ENUM_ADAPT", "1st")
 }
 
 /// 列挙の前処理の形 (`ENOMOTO_MIP_ENUM_PRESOLVE` の値。[`enum_adapt_on`] なら `all`)。`None` は使わない
@@ -9746,7 +9751,7 @@ fn enum_presolve_mode() -> Option<&'static str> {
 
 /// `ENOMOTO_MIP_ENUM_ADAPT=log`: 判定を出すだけで常に続ける (繰り返しは以前の規則で止まる。係数を決めるためのデータ集め)
 fn enum_adapt_log() -> bool {
-    env_str!("ENOMOTO_MIP_ENUM_ADAPT") == Some("log")
+    enum_adapt_val() == Some("log")
 }
 
 /// 求解 (再スタートの前の最初の求解) の始めからの秒 ([`ENUM_T0`]。置かれていなければ無限大)
@@ -9811,7 +9816,7 @@ fn enum_adapt_midstop(gain: usize, n: usize, secs: f64, el: f64) -> bool {
 }
 
 fn enum_adapt_mid_on() -> bool {
-    enum_adapt_on() && env_str!("ENOMOTO_MIP_ENUM_ADAPT").is_some_and(|v| v.contains('s') || v.contains('z'))
+    enum_adapt_on() && enum_adapt_val().is_some_and(|v| v.contains('s') || v.contains('z'))
 }
 
 /// 試作 `ENOMOTO_MIP_ENUM_ADAPT` の `z` (analysis/presize240_20261127 の 7 節): [`enum_adapt_continue`]・[`enum_adapt_midstop`] の得を、
@@ -9820,7 +9825,7 @@ fn enum_adapt_mid_on() -> bool {
 /// 行の数の上限と空振りの規則つき (`ENOMOTO_MIP_ENUM_PRESOLVE=1` と同じ) で回し、全部の行 (`all`) に広げるのは、その得と時間の
 /// シグモイドが続けると決めた後だけ。列挙の途中の止め (`s`) も入る。シグモイドの係数は `ENUM_ADAPT` のまま (新しい閾値は作らない)
 fn enum_adapt_z() -> bool {
-    enum_adapt_on() && env_str!("ENOMOTO_MIP_ENUM_ADAPT").is_some_and(|v| v.contains('z'))
+    enum_adapt_on() && enum_adapt_val().is_some_and(|v| v.contains('z'))
 }
 
 fn enum_where() -> &'static str {
