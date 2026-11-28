@@ -986,7 +986,7 @@ pub(super) fn polish_in_problem(p: &MipProblem, x: &mut Vec<f64>, z: f64) -> Opt
 }
 
 /// 試作 `ENOMOTO_MIP_POLISH_PRESOLVE` (analysis/overrun240_20261127、既定では使わない): 最後の研磨の LP (整数を固定した `p`) を、温めた単体法の代わりに
-/// LP の前処理 + 単体法で解く ([`polish_in_problem`] と同じ解き方、[`polish_presolved`])。`1` = 時間切れで終わるときだけ、`a` = いつも。
+/// LP の前処理 + 単体法で解く ([`polish_in_problem`] と同じ解き方、[`polish_presolved`])。`1` = 最適で終わらないとき (時間切れなど。W を使う最適の判定に関わらない) だけ、`a` = いつも。
 /// 整数を固定すると多くの行が 1 列の境界になる問題 (thor50dday・neos-873061・cuanza・kasavu) で、研磨の LP が前処理で大きく縮む (README 4.3 節)。
 /// この経路は双対値を返さないので、許容の漏れの上界 W ([`POLISH_TOL_LEAK`]) は 0 にする (最適の判定が厳しい側になるだけ)
 pub(super) fn polish_presolve_mode() -> Option<char> {
